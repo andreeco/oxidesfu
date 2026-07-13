@@ -1,0 +1,31 @@
+[package]
+name = "oxidesfu-signaling"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+axum = { workspace = true }
+oxidesfu-auth = { workspace = true }
+oxidesfu-protocol = { workspace = true }
+oxidesfu-room = { workspace = true }
+oxidesfu-rtc = { workspace = true }
+futures-util = { workspace = true }
+livekit-protocol = { workspace = true }
+prost = { workspace = true }
+rtc = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+flate2 = { workspace = true }
+http-body-util = { workspace = true }
+jsonwebtoken = { workspace = true }
+tokio-tungstenite = { workspace = true }
+tower = { workspace = true }

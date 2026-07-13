@@ -1,0 +1,72 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/oxidesfu-agent",
+    "crates/oxidesfu-api",
+    "crates/oxidesfu-auth",
+    "crates/oxidesfu-core",
+    "crates/oxidesfu-protocol",
+    "crates/oxidesfu-room",
+    "crates/oxidesfu-rtc",
+    "crates/oxidesfu-server",
+    "crates/oxidesfu-signaling",
+    "crates/oxidesfu-test",
+]
+
+[workspace.package]
+edition = "2024"
+# Conservative project-wide license: some compatibility code may be adapted from
+# Apache-2.0-licensed LiveKit source. See NOTICE and docs/provenance.md.
+license = "Apache-2.0"
+repository = "https://github.com/andreeco/oxidesfu"
+rust-version = "1.88"
+
+[workspace.dependencies]
+anyhow = "1.0.103"
+async-trait = "0.1.89"
+axum = { version = "0.8.9", features = ["http1", "json", "tokio", "ws"] }
+base64 = "0.22.1"
+bytes = "1.12.0"
+oxidesfu-agent = { path = "crates/oxidesfu-agent" }
+oxidesfu-api = { path = "crates/oxidesfu-api" }
+oxidesfu-auth = { path = "crates/oxidesfu-auth" }
+oxidesfu-core = { path = "crates/oxidesfu-core" }
+oxidesfu-protocol = { path = "crates/oxidesfu-protocol" }
+oxidesfu-room = { path = "crates/oxidesfu-room" }
+oxidesfu-rtc = { path = "crates/oxidesfu-rtc" }
+oxidesfu-signaling = { path = "crates/oxidesfu-signaling" }
+flate2 = "1.1.9"
+futures-util = "0.3.32"
+http-body-util = "0.1.3"
+jsonwebtoken = { version = "10.4.0", features = ["rust_crypto"] }
+ipnet = "2.12.0"
+livekit-protocol = "0.7.10"
+# Compatibility exception: md-5 0.11 uses digest 0.11 and does not compose with
+# sha2 0.10's digest trait in this workspace without a wider digest upgrade.
+md-5 = "0.10.6"
+sha2 = "0.10.9"
+# Compatibility exception: livekit-protocol 0.7.10 is the latest crates.io
+# release and its generated types use prost 0.12's Message trait.
+# TODO(protocol-upgrade): when crates.io publishes livekit-protocol with
+# StoreDataBlobRequest/GetDataBlobRequest and StoreDataBlobResponse/GetDataBlobResponse
+# (currently present in protocol/protobufs/livekit_rtc.proto), remove the temporary
+# raw protobuf shim in oxidesfu-signaling/src/signal_request.rs and switch back to
+# typed generated proto messages end-to-end.
+prost = "0.12"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+redis = "1.3.0"
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
+thiserror = "2.0.18"
+tokio = { version = "1.52.3", features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
+tokio-tungstenite = "0.29.0"
+tower = { version = "0.5.3", features = ["util"] }
+# Pinned from andreeco/turn-rs' oxidesfu/turn-runtime-integration branch for
+# LiveKit-compatible in-process TURN integration.
+turn-server = { git = "https://github.com/andreeco/turn-rs.git", rev = "672eddb660a7d462bdbe10c4aa10924fa7170cec", default-features = false, features = ["udp"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+# Pinned from andreeco/webrtc's oxidesfu/webrtc-compat branch for LiveKit compatibility.
+webrtc = { git = "https://github.com/andreeco/webrtc.git", rev = "55f80aff4f7d9ce1ffda0e5a403cab3db21157c8", default-features = false, features = ["runtime-tokio"] }
+rtc = { git = "https://github.com/andreeco/webrtc.git", rev = "55f80aff4f7d9ce1ffda0e5a403cab3db21157c8" }
+rtc-stun = { git = "https://github.com/andreeco/webrtc.git", rev = "55f80aff4f7d9ce1ffda0e5a403cab3db21157c8" }

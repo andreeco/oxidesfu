@@ -1,0 +1,47 @@
+[package]
+name = "oxidesfu-test"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+# Keep upstream LiveKit native ports enabled by default so plain `cargo test`
+# exercises this suite without requiring explicit feature flags.
+default = ["upstream-livekit"]
+# Enables heavier in-process harness E2E tests that mix OxideSFU server and SDK
+# runtimes in the same test process. Kept opt-in because these are currently
+# flaky in this environment and are covered by external conformance runners.
+harness-e2e = []
+# Enables upstream-native LiveKit test ports only.
+upstream-livekit = []
+
+[dependencies]
+
+[dev-dependencies]
+axum = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+oxidesfu-auth = { workspace = true }
+oxidesfu-core = { path = "../oxidesfu-core" }
+oxidesfu-room = { path = "../oxidesfu-room" }
+oxidesfu-rtc = { workspace = true }
+oxidesfu-server = { path = "../oxidesfu-server" }
+oxidesfu-signaling = { path = "../oxidesfu-signaling" }
+futures-util = { workspace = true }
+hmac = "0.13.0"
+# Pinned andreeco/rust-sdks revision used by the in-process compatibility tests.
+# This fork carries APIs exercised by OxideSFU's media probes.
+livekit = { git = "https://github.com/andreeco/rust-sdks.git", rev = "d5e98afd78fcf4129393ab75cc9436c564a6f105", default-features = false, features = ["tokio"] }
+livekit-api = { git = "https://github.com/andreeco/rust-sdks.git", rev = "d5e98afd78fcf4129393ab75cc9436c564a6f105", default-features = false, features = ["access-token", "services-tokio", "signal-client-tokio"] }
+livekit-protocol = { git = "https://github.com/andreeco/rust-sdks.git", rev = "d5e98afd78fcf4129393ab75cc9436c564a6f105" }
+md-5 = { workspace = true }
+prost = { workspace = true }
+rtc = { workspace = true }
+redis = { workspace = true }
+serde_json = { workspace = true }
+sha1 = "0.11.0"
+sha2 = { workspace = true }
+tokio = { workspace = true, features = ["process", "time"] }
+tokio-tungstenite = { workspace = true }

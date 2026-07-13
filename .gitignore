@@ -1,0 +1,14 @@
+/target/
+*.log
+.env
+.env.*
+!.env.example
+
+# Personal/local deployment files (keep private)
+deploy/
+
+# Local orchestration files
+compose.yaml
+
+# Local compatibility note files
+docs/livekit-go-compatibility-gaps.md

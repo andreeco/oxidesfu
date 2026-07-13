@@ -1,0 +1,49 @@
+{
+  "name": "OxideSFU Conformance",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "features": {
+    "ghcr.io/devcontainers/features/rust:1": {
+      "profile": "default",
+      "version": "stable"
+    },
+    "ghcr.io/devcontainers/features/go:1": {
+      "version": "1.24"
+    },
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "24"
+    }
+  },
+  "workspaceMount": "source=${localWorkspaceFolder}/..,target=/workspace,type=bind,consistency=cached",
+  "workspaceFolder": "/workspace/oxidesfu",
+  "containerUser": "vscode",
+  "updateRemoteUserUID": true,
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "remoteEnv": {
+    "LIVEKIT_API_KEY": "devkey",
+    "LIVEKIT_API_SECRET": "secret"
+  },
+  "forwardPorts": [
+    7880,
+    17880,
+    18880,
+    17890,
+    19478
+  ],
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash"
+      },
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "golang.Go",
+        "ms-vscode.cpptools",
+        "tamasfe.even-better-toml",
+        "esbenp.prettier-vscode"
+      ]
+    }
+  }
+}

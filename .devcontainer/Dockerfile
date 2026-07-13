@@ -1,0 +1,55 @@
+FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    clang \
+    lld \
+    cmake \
+    ninja-build \
+    pkg-config \
+    libssl-dev \
+    protobuf-compiler \
+    git \
+    curl \
+    ca-certificates \
+    jq \
+    unzip \
+    zip \
+    xz-utils \
+    python3 \
+    python3-pip \
+    iproute2 \
+    net-tools \
+    dnsutils \
+    portaudio19-dev \
+    libasound2-dev \
+    libpulse-dev \
+    libsoxr-dev \
+    libopus-dev \
+    libopusfile-dev \
+    libx11-dev \
+    libxext-dev \
+    libxfixes-dev \
+    libxrandr-dev \
+    libxkbcommon-dev \
+    libdrm-dev \
+    libgbm-dev \
+    libgtk-3-0 \
+    libnss3 \
+    libnspr4 \
+    libatk-bridge2.0-0 \
+    libatspi2.0-0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libcups2 \
+    libdbus-1-3 \
+    libxshmfence1 \
+    libpango-1.0-0 \
+    libcairo2 \
+    libxss1 \
+    libxtst6 \
+    xvfb \
+    coturn \
+    && rm -rf /var/lib/apt/lists/*

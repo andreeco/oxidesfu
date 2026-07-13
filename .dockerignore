@@ -1,0 +1,21 @@
+# Build output
+/target/
+
+# VCS/editor/local files
+.git/
+.gitignore
+.dockerignore
+*.log
+rustc-ice-*.txt
+
+# Private deployment helpers are local-only and gitignored
+/deploy/
+
+# Local env/secrets
+.env
+.env.*
+!.env.example
+
+# Misc local caches
+.cache/
+node_modules/
