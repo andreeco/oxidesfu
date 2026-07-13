@@ -54,7 +54,7 @@ Current recommended forks/branches for compatibility work:
   (Cargo fetches its `webrtc`, `rtc`, and `rtc-stun` crates from this branch; `rtc` is not a submodule.)
 - `../othercode/livekit` → `git@github.com:andreeco/livekit.git` on branch `oxidesfu/livekit-compat`
 
-Other sibling repos (`livekit-cli`, `server-sdk-go`, `rust-sdks`, `client-sdk-js`) can be cloned from upstream defaults unless you need custom patches.
+Other sibling repos (`livekit-cli`, `server-sdk-go`, `client-sdk-js`) can be cloned from upstream defaults unless you need custom patches. `rust-sdks` is an exception: workspace tests pin Git dependencies to `andreeco/rust-sdks` commit `d5e98afd78fcf4129393ab75cc9436c564a6f105`; use that fork and revision for compatibility work.
 
 ## Quickstart
 
