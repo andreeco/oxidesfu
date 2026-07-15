@@ -6079,7 +6079,7 @@ async fn forward_publisher_remote_track(
                         let rewritten_packet = target
                             .rtp_forwarder
                             .rewrite_packet_with_target_ssrc_and_payload_type(
-                                packet.clone(),
+                                &packet,
                                 target_ssrc,
                                 negotiated_payload_type,
                             );

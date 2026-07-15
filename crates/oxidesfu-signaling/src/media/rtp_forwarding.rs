@@ -259,6 +259,7 @@ impl SubscriberRtpState {
         &mut self,
         packet: &rtc::rtp::Packet,
         target_ssrc: Option<u32>,
+        negotiated_payload_type: Option<u8>,
     ) -> Option<rtc::rtp::Packet> {
         let incoming_ssrc = packet.header.ssrc;
         let incoming_seq = packet.header.sequence_number;
@@ -266,7 +267,7 @@ impl SubscriberRtpState {
             self.extend_sequence_number(incoming_ssrc, incoming_seq);
         let incoming_key = (incoming_ssrc, incoming_ext_seq);
 
-        if !is_new_highest && self.seen_incoming_ext_seq.contains(&incoming_key) {
+        if !is_new_highest && !self.seen_incoming_ext_seq.insert(incoming_key) {
             return None;
         }
 
@@ -277,7 +278,9 @@ impl SubscriberRtpState {
         };
         self.next_outgoing_ext_seq = Some(outgoing_ext_seq.saturating_add(1));
 
-        self.seen_incoming_ext_seq.insert(incoming_key);
+        if is_new_highest {
+            self.seen_incoming_ext_seq.insert(incoming_key);
+        }
         self.incoming_ext_seq_order.push_back(incoming_key);
         while self.incoming_ext_seq_order.len() > RTP_DUPLICATE_WINDOW {
             if let Some(evicted_incoming_ext_seq) = self.incoming_ext_seq_order.pop_front() {
@@ -286,6 +289,9 @@ impl SubscriberRtpState {
         }
 
         let mut rewritten_packet = packet.clone();
+        if let Some(payload_type) = negotiated_payload_type {
+            rewritten_packet.header.payload_type = payload_type;
+        }
         rewritten_packet.header.sequence_number = outgoing_ext_seq as u16;
         rewritten_packet.header.timestamp =
             self.map_packet_timestamp(incoming_ssrc, rewritten_packet.header.timestamp);
@@ -406,15 +412,16 @@ impl SubscriberRtpState {
 
     fn cache_retransmission_packet(&mut self, packet: rtc::rtp::Packet) {
         let outgoing_sequence_number = packet.header.sequence_number;
-        if !self
-            .retransmission_cache
-            .contains_key(&outgoing_sequence_number)
-        {
-            self.retransmission_order
-                .push_back(outgoing_sequence_number);
+        match self.retransmission_cache.entry(outgoing_sequence_number) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                entry.insert(packet);
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                self.retransmission_order
+                    .push_back(outgoing_sequence_number);
+                entry.insert(packet);
+            }
         }
-        self.retransmission_cache
-            .insert(outgoing_sequence_number, packet);
 
         while self.retransmission_order.len() > RTP_RETRANSMISSION_CACHE_SIZE {
             if let Some(evicted_sequence_number) = self.retransmission_order.pop_front() {
@@ -429,25 +436,21 @@ impl SubscriberRtpState {
         incoming_sequence_number: u16,
     ) -> (u64, bool) {
         let incoming_sequence_number = incoming_sequence_number as u64;
-        let extended = if let Some(highest_ext_seq) = self
-            .highest_incoming_ext_seq_by_ssrc
-            .get(&incoming_ssrc)
-            .copied()
-        {
-            extend_sequence_number_from_reference(incoming_sequence_number, highest_ext_seq)
-        } else {
-            incoming_sequence_number
-        };
-
-        let should_update = self
-            .highest_incoming_ext_seq_by_ssrc
-            .get(&incoming_ssrc)
-            .is_none_or(|highest| extended > *highest);
-        if should_update {
-            self.highest_incoming_ext_seq_by_ssrc
-                .insert(incoming_ssrc, extended);
+        match self.highest_incoming_ext_seq_by_ssrc.entry(incoming_ssrc) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                let extended =
+                    extend_sequence_number_from_reference(incoming_sequence_number, *entry.get());
+                let should_update = extended > *entry.get();
+                if should_update {
+                    entry.insert(extended);
+                }
+                (extended, should_update)
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(incoming_sequence_number);
+                (incoming_sequence_number, true)
+            }
         }
-        (extended, should_update)
     }
 }
 
@@ -491,17 +494,13 @@ pub(crate) struct SubscriberRtpForwarder {
 impl SubscriberRtpForwarder {
     pub(crate) fn rewrite_packet_with_target_ssrc_and_payload_type(
         &self,
-        mut packet: rtc::rtp::Packet,
+        packet: &rtc::rtp::Packet,
         target_ssrc: Option<u32>,
         negotiated_payload_type: Option<u8>,
     ) -> Option<rtc::rtp::Packet> {
-        if let Some(payload_type) = negotiated_payload_type {
-            packet.header.payload_type = payload_type;
-        }
-        self.state
-            .lock()
-            .ok()
-            .and_then(|mut state| state.rewrite_packet(&packet, target_ssrc))
+        self.state.lock().ok().and_then(|mut state| {
+            state.rewrite_packet(packet, target_ssrc, negotiated_payload_type)
+        })
     }
 }
 
@@ -566,7 +565,7 @@ impl RtpForwardingStore {
     ) -> Option<rtc::rtp::Packet> {
         self.forwarder_for(key)?
             .rewrite_packet_with_target_ssrc_and_payload_type(
-                packet,
+                &packet,
                 target_ssrc,
                 negotiated_payload_type,
             )
@@ -834,6 +833,56 @@ mod tests {
             .rewrite_packet_for_subscriber(&key, packet_with_seq_ssrc_timestamp(23334, 123, 1_960))
             .expect("next unique packet should forward");
         assert_eq!(next.header.sequence_number, 23334);
+    }
+
+    #[test]
+    fn target_rewrites_borrow_the_source_packet_and_cache_each_target_representation() {
+        let store = RtpForwardingStore::default();
+        let source = rtc::rtp::Packet {
+            header: rtc::rtp::header::Header {
+                sequence_number: 1234,
+                timestamp: 56_789,
+                ssrc: 0x1111_0001,
+                payload_type: 96,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let source_header = source.header.clone();
+
+        let first_key = forwarding_key("subscriber-a");
+        let first = store
+            .forwarder_for(&first_key)
+            .expect("first target should have forwarding state")
+            .rewrite_packet_with_target_ssrc_and_payload_type(&source, Some(0x2222_0002), Some(111))
+            .expect("first target should rewrite");
+        let second_key = forwarding_key("subscriber-b");
+        let second = store
+            .forwarder_for(&second_key)
+            .expect("second target should have forwarding state")
+            .rewrite_packet_with_target_ssrc_and_payload_type(&source, Some(0x3333_0003), Some(112))
+            .expect("second target should rewrite");
+
+        assert_eq!(
+            source.header, source_header,
+            "source packet must remain reusable"
+        );
+        assert_eq!(first.header.ssrc, 0x2222_0002);
+        assert_eq!(first.header.payload_type, 111);
+        assert_eq!(second.header.ssrc, 0x3333_0003);
+        assert_eq!(second.header.payload_type, 112);
+        assert_eq!(
+            store
+                .get_retransmission_packet(&first_key, first.header.sequence_number)
+                .expect("first target rewrite should be cached"),
+            first
+        );
+        assert_eq!(
+            store
+                .get_retransmission_packet(&second_key, second.header.sequence_number)
+                .expect("second target rewrite should be cached"),
+            second
+        );
     }
 
     #[test]
