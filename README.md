@@ -37,13 +37,15 @@ OxideSFU keeps external compatibility checks in `tools/conformance/` and runs th
 | JavaScript SDK | ✅ Passed | `client-sdk-js-full-suite.sh`. |
 | Go server SDK | ❌ Owned-TURN full run blocked | Focused codec, E2EE H.264, dynacast, region-fallback, ForceTLS, and payload contracts pass. The unfiltered owned-TURN run fails at `TestJoinSinglePeerConnection` because the subscriber misses its immediate reliable data packet. See the [investigation](docs/go-sdk-single-pc-reliable-data-investigation.md). |
 | Native upstream LiveKit ports | ⚠️ 51 / 52 passed | Full serial run on 2026-07-13. `TestDataPublishSlowSubscriber` failed its above-threshold contiguity assertion twice; it is timing-sensitive and remains under investigation. |
-| LiveKit external contracts | 47 / 49 passed | Latest full local run on 2026-07-13. `TestMultinodeDataPublishing` and `TestMultinodePublishingUponJoining` remain reproducible failures. |
+| LiveKit external contracts | 46 / 49 passed | Latest full local run on 2026-07-15. `TestConnectionStats`, `TestMultiNodeUpdateAttributes`, and `TestMultinodePublishingUponJoining` failed; `TestMultinodeDataPublishing` passed in this run. |
 
 The owned TURN runtime is externally covered by `TestTurnRelay/allow`, `TestTurnRelay/not-allowed`, `TestTurnRelay/denied-overrides-allowed`, and `TestTurnAuthFailure`. The focused Go SDK owned-TURN probe (`TestForceTLS` and `TestLimitPayloadSize`) passed on 2026-07-13; it still observed bounded relay allocation `486 Allocation Quota Reached` responses while host candidate pairs connected. Do not treat this as general owned-TURN robustness evidence until the unfiltered Go SDK suite passes.
 
 
 
 The canonical named external-contract inventory and its evidence live in [`crates/oxidesfu-test/src/upstream_livekit/README.md`](crates/oxidesfu-test/src/upstream_livekit/README.md#known-external-contract-inventory). Run instructions and per-run log locations are in [`tools/conformance/README.md`](tools/conformance/README.md).
+
+Latest Rust workspace regression run (2026-07-15): `cargo test --workspace` finished with 113 passed, 1 failed, 7 ignored in `oxidesfu-test`; the remaining failure was `upstream_livekit::singlenode::test_single_node_update_subscription_permissions` (timeout waiting for data-track bytes).
 
 _Passing tests sadly do not mean that everything works as expected._
 

@@ -357,12 +357,12 @@ What it does by default (`OXIDESFU_DISCOVERY_LIVEKIT_PACKAGE_SCOPE=external`):
 
 This is the default/scoped discovery gate and works with clean upstream `livekit` checkouts.
 
-**Latest scoped run (2026-07-13):** the default external scope completed all 49
+**Latest scoped run (2026-07-15):** the default external scope completed all 49
 isolated `./test` shards against a locally spawned OxideSFU. **46 passed and 3
 failed.** The failures are `TestConnectionStats`,
-`TestMultinodeDataPublishing`, and `TestMultinodePublishingUponJoining`.
-The two multinode publishing failures are known gaps; `TestConnectionStats`
-requires a focused follow-up before it can again be represented as passing.
+`TestMultiNodeUpdateAttributes`, and `TestMultinodePublishingUponJoining`.
+`TestMultinodeDataPublishing` passed in this run; the remaining three failures
+still require focused multinode/signaling follow-up.
 
 ### Broad all-packages mode (`livekit` integration package included)
 
