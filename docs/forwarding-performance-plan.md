@@ -72,6 +72,20 @@ The latest rerun (`mixed_room_high_simulcast_large-20260715T211139Z-8a59e987`) d
 
 Representative artifacts are deliberately ignored under `target/profiles/`; reproduce them rather than committing binary profiling data.
 
+### 2026-07-15: current-revision scenario coverage
+
+A 60-second Oxide-only profile pass at `869d6d44` covered the three medium presets and the high video-only companion. All runs retained every expected track with zero reported packet loss. These are hotspot-mapping runs, not CPU-capacity comparisons: the profile runner records only OxideSFU, and sample counts vary with each workload's actual CPU use.
+
+| Scenario | Delivery | Samples | Leading shared samples |
+|---|---:|---:|---|
+| `video_room_high_simulcast_large` | 54/54 | 4K | VDSO 1.83%, driver loop 1.51%, epoll 1.18%, RTC `poll_event` 0.94% |
+| `audio_fanout_medium` | 48/48 | 10K | VDSO 2.57%, driver loop 2.26%, epoll 1.25%, spinlock 1.10%, AES-GCM 1.03%, RTC write 0.95% |
+| `livestream_medium` | 20/20 | 9K | VDSO 2.62%, driver loop 2.24%, epoll 1.38%, RTC write 1.33% |
+| `mixed_room_medium` | 40/40 | 7K | VDSO 2.11%, driver loop 1.60%, epoll 1.15%, RTC write 0.81% |
+| `mixed_room_high_simulcast_large` (latest LAN-address run) | 160/160 | 34K | VDSO 3.04%, driver loop 2.08%, epoll 1.35%, spinlock 1.31%, RTC write 1.13%, AES-GCM 0.98% |
+
+The generated paired benchmark overview currently shows Rust faster in CPU time for every real scenario except `mixed_room_high_simulcast_large` (Go 7.100s → OxideSFU 8.500s, +19.7%). The profile matrix therefore does **not** support another general forwarding-map optimization: the regression is specific to the high mixed scale (four high simulcast video publishers, four audio publishers, and 20 subscribers), where the shared per-packet driver/timing/transport costs accumulate. Profile Go and OxideSFU side by side under that exact scenario, then vary one dimension at a time (video publishers, audio publishers, subscribers) before changing the common driver or transport path.
+
 ### Findings
 
 The original forwarding reader held several parallel maps indexed by:
