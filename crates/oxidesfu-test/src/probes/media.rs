@@ -1,5 +1,10 @@
 use super::*;
 
+// Native SDK media probes create real local peer connections, encoders, and video streams.
+// Run those probes one at a time so cadence assertions measure forwarding policy rather than
+// contention from another in-process media topology.
+static NATIVE_MEDIA_PROBE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn wait_for_remote_video_subscription(
     events: &mut tokio::sync::mpsc::UnboundedReceiver<RoomEvent>,
 ) -> (
@@ -58,8 +63,19 @@ async fn count_video_frames_for_duration(
     frames
 }
 
+async fn drain_video_frames_for_duration(
+    stream: &mut livekit::webrtc::video_stream::native::NativeVideoStream,
+    duration: Duration,
+) {
+    let deadline = tokio::time::Instant::now() + duration;
+    while tokio::time::Instant::now() < deadline {
+        let _ = tokio::time::timeout(Duration::from_millis(25), stream.next()).await;
+    }
+}
+
 #[tokio::test]
 async fn rust_sdk_room_simulcast_video_fps_setting_reduces_observed_frame_cadence_contract() {
+    let _media_probe_guard = NATIVE_MEDIA_PROBE_LOCK.lock().await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("listener should bind");
@@ -180,6 +196,7 @@ async fn rust_sdk_room_simulcast_video_fps_setting_reduces_observed_frame_cadenc
 
     remote_publication.set_video_fps(8);
     tokio::time::sleep(Duration::from_secs(1)).await;
+    drain_video_frames_for_duration(&mut video_stream, Duration::from_secs(1)).await;
 
     let throttled_frames = count_video_frames_for_duration(
         &mut video_stream,
@@ -214,6 +231,7 @@ async fn rust_sdk_room_simulcast_video_fps_setting_reduces_observed_frame_cadenc
 
 #[tokio::test]
 async fn rust_sdk_room_av1_dd_video_fps_setting_reduces_observed_frame_cadence_contract() {
+    let _media_probe_guard = NATIVE_MEDIA_PROBE_LOCK.lock().await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("listener should bind");
@@ -388,6 +406,7 @@ async fn rust_sdk_room_av1_dd_video_fps_setting_reduces_observed_frame_cadence_c
 
 #[tokio::test]
 async fn rust_sdk_room_simulcast_video_fps_isolated_per_subscriber_contract() {
+    let _media_probe_guard = NATIVE_MEDIA_PROBE_LOCK.lock().await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("listener should bind");
@@ -529,14 +548,13 @@ async fn rust_sdk_room_simulcast_video_fps_isolated_per_subscriber_contract() {
         &mut low_stream,
         Duration::from_secs(3),
         Duration::from_millis(450),
-    )
-    .await;
+    );
     let high_baseline = count_video_frames_for_duration(
         &mut high_stream,
         Duration::from_secs(3),
         Duration::from_millis(450),
-    )
-    .await;
+    );
+    let (low_baseline, high_baseline) = tokio::join!(low_baseline, high_baseline);
 
     low_remote_publication.set_video_fps(6);
     high_remote_publication.set_video_fps(30);
@@ -587,6 +605,7 @@ async fn rust_sdk_room_simulcast_video_fps_isolated_per_subscriber_contract() {
 
 #[tokio::test]
 async fn rust_sdk_room_simulcast_video_quality_switch_preserves_video_delivery_contract() {
+    let _media_probe_guard = NATIVE_MEDIA_PROBE_LOCK.lock().await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("listener should bind");
@@ -745,6 +764,7 @@ async fn rust_sdk_room_simulcast_video_quality_switch_preserves_video_delivery_c
 
 #[tokio::test]
 async fn differential_media_publish_subscribe_event_flow_matches_go_livekit_dev() {
+    let _media_probe_guard = NATIVE_MEDIA_PROBE_LOCK.lock().await;
     let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("listener should bind");
