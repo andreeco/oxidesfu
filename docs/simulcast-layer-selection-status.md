@@ -61,9 +61,9 @@ The reader currently recognizes the following RTP-level source-switch starts:
 | Codec | Accepted boundary |
 |---|---|
 | VP8 | Partition-zero keyframe start. |
-| VP9 | Beginning of a non-predicted frame. |
+| VP9 | Verified dependency-descriptor frame start with an active DTI `Switch` target when descriptor metadata is available; otherwise beginning of a non-predicted frame. |
 | H264 | IDR NAL, including STAP-A and FU-A/FU-B starts. |
-| AV1 | New coded-video-sequence RTP packet. |
+| AV1 | Verified dependency-descriptor frame start with an active DTI `Switch` target when descriptor metadata is available; otherwise new coded-video-sequence RTP packet. |
 
 Unknown codecs are not silently treated as arbitrary decodable delta frames.
 
@@ -117,19 +117,22 @@ Remaining work:
 - extend allocator output so it can set an independent desired temporal target, rather than deriving `desired = max` only from `UpdateTrackSettings.fps`;
 - add end-to-end allocation-driven temporal downgrade/upgrade coverage once that producer exists.
 
-### 3. Dependency-descriptor decode targets are not yet used for switching
+### 3. Dependency-descriptor decode targets are used for VP9/AV1 switching; end-to-end stream coverage remains
 
-The dependency-descriptor parser extension is published and pinned by OxideSFU at outer WebRTC `3b0b2f0d8f0443deeab47fb83dada7eb4d7778ea`, nested RTC `56a36e408913475baeeb5672bd3e30036dea820f`.
+Oxide is pinned to outer WebRTC `3b0b2f0d8f0443deeab47fb83dada7eb4d7778ea`, nested RTC `56a36e408913475baeeb5672bd3e30036dea820f`.
 
-`DependencyDescriptorParser::parse_packet_metadata` exposes active-target layer metadata, frame boundaries, and `has_switching_decode_target`. A consumer must require both a frame start and an active DTI `Switch` indication before treating descriptor metadata as a decodable source-switch point. The nested parser regressions pass (nine dependency-descriptor parser tests).
+`RemoteTrack` parses and retains a current-packet descriptor switch result per incoming SSRC. The forwarding reader consumes that result for VP9 and AV1: when descriptor metadata is available, a source transition requires both `first_packet_in_frame` and an active DTI `Switch` target. A parsed non-switchable descriptor deliberately overrides VP9/AV1 payload keyframe heuristics; it cannot trigger an unsafe fallback switch. When descriptor metadata is absent, the established codec-specific VP9/AV1 boundary detector remains the compatibility fallback. VP8 and H264 continue to use their codec-specific paths.
 
-No production Oxide forwarding behavior uses the newly pinned API yet.
+Covered regressions:
 
-Required production work:
+- nested RTC parser: an active descriptor `Switch` target is distinct from a frame boundary (nine parser tests);
+- `oxidesfu-rtc`: both descriptor frame start and `Switch` are required for the exposed result;
+- signaling: a descriptor `false` result blocks a VP9 payload-keyframe heuristic, a descriptor `true` result permits the transition, and absent metadata falls back to the payload detector.
 
-- expose target-local descriptor switch-point metadata from the RTC track parser;
-- prefer the verified descriptor switch point where available, while retaining the codec-keyframe fallback when metadata is absent;
-- add signaling packet-sequence regressions proving that a descriptor frame boundary without DTI `Switch` does not switch, and that an eligible descriptor switch point does.
+Remaining work:
+
+- add RTP packet-sequence integration coverage that exercises descriptor state through a real scalable VP9/AV1 remote track and verifies source-switch RTP continuity;
+- add native SDK scalable-stream coverage when a deterministic dependency-descriptor publisher fixture is available.
 
 ### 4. Source liveness expiry is complete; decodability availability remains limited
 

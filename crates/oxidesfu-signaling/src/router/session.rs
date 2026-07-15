@@ -2012,6 +2012,24 @@ pub(crate) fn video_is_decodable_switch_point(codec_mime: Option<&str>, payload:
     }
 }
 
+/// Applies dependency-descriptor source-switch semantics for scalable VP9/AV1 when available.
+/// A parsed descriptor that is not a switch point must not fall back to a payload heuristic.
+pub(crate) fn video_is_decodable_switch_point_with_dependency_descriptor(
+    codec_mime: Option<&str>,
+    payload: &[u8],
+    descriptor_switch_point: Option<bool>,
+) -> bool {
+    let descriptor_codec = codec_mime.is_some_and(|mime| {
+        mime.eq_ignore_ascii_case("video/vp9") || mime.eq_ignore_ascii_case("video/av1")
+    });
+    if descriptor_codec {
+        return descriptor_switch_point
+            .unwrap_or_else(|| video_is_decodable_switch_point(codec_mime, payload));
+    }
+
+    video_is_decodable_switch_point(codec_mime, payload)
+}
+
 pub(crate) fn vp9_temporal_layer_id_from_payload(payload: &[u8]) -> Option<u8> {
     rtc::rtp::codec::vp9::temporal_layer_id_from_payload(payload)
 }
@@ -6418,6 +6436,13 @@ async fn forward_publisher_remote_track(
                     } else {
                         None
                     };
+                    let packet_descriptor_switch_point = if is_video_track {
+                        remote_track.last_observed_dependency_descriptor_switch_point_for_ssrc(
+                            packet.header.ssrc,
+                        )
+                    } else {
+                        None
+                    };
                     let packet_spatial_layer = if is_video_track {
                         remote_track
                             .last_observed_spatial_layer_for_ssrc(packet.header.ssrc)
@@ -6515,14 +6540,15 @@ async fn forward_publisher_remote_track(
                                 target
                                     .video_layer_selector
                                     .observe_packet(LayerPacketMetadata {
-                                        ssrc: effective_video_ssrc,
-                                        spatial: packet_video_quality
-                                            .map(SpatialLayer::from_quality),
-                                        is_decodable_switch_point: video_is_decodable_switch_point(
+                                    ssrc: effective_video_ssrc,
+                                    spatial: packet_video_quality.map(SpatialLayer::from_quality),
+                                    is_decodable_switch_point:
+                                        video_is_decodable_switch_point_with_dependency_descriptor(
                                             packet_codec_mime,
                                             &packet.payload,
+                                            packet_descriptor_switch_point,
                                         ),
-                                    });
+                                });
                             match layer_selection {
                                 VideoIngressDecision::Forward {
                                     selected_ssrc_changed,
@@ -7826,7 +7852,8 @@ mod tests {
         reliable_channel_label_rank, reorder_section_media_line_payloads_for_preferred_codec,
         resolved_destination_identities_for_packet, selected_forwarding_mime_type_for_subscriber,
         signal_track_subscribed_to_publisher, video_is_decodable_switch_point,
-        vp8_is_keyframe_start, vp9_is_keyframe_start,
+        video_is_decodable_switch_point_with_dependency_descriptor, vp8_is_keyframe_start,
+        vp9_is_keyframe_start,
     };
     use crate::{
         DataChannelStore,
@@ -11204,6 +11231,34 @@ mod tests {
             controller.observe_packet(6_000, 15, None),
             TemporalIngressDecision::Forward
         );
+    }
+
+    #[test]
+    fn dependency_descriptor_switch_point_overrides_scalable_payload_heuristics() {
+        // VP9's payload alone looks like a keyframe start, but a parsed descriptor that lacks
+        // DTI Switch must prevent a source transition.
+        assert!(!video_is_decodable_switch_point_with_dependency_descriptor(
+            Some("video/VP9"),
+            &[0x08],
+            Some(false),
+        ));
+        assert!(video_is_decodable_switch_point_with_dependency_descriptor(
+            Some("video/VP9"),
+            &[0x00],
+            Some(true),
+        ));
+        // No descriptor metadata preserves the codec-specific keyframe fallback.
+        assert!(video_is_decodable_switch_point_with_dependency_descriptor(
+            Some("video/VP9"),
+            &[0x08],
+            None,
+        ));
+        // Descriptor metadata has no meaning for non-scalable H264 simulcast.
+        assert!(video_is_decodable_switch_point_with_dependency_descriptor(
+            Some("video/H264"),
+            &[0x65],
+            Some(false),
+        ));
     }
 
     #[test]

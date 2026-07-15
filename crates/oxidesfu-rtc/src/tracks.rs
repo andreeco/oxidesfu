@@ -69,6 +69,12 @@ struct ObservedLayerIds {
     spatial_id: u8,
 }
 
+fn dependency_descriptor_is_switch_point(
+    metadata: rtp::extension::dependency_descriptor_extension::DependencyDescriptorPacketMetadata,
+) -> bool {
+    metadata.first_packet_in_frame && metadata.has_switching_decode_target
+}
+
 #[derive(Debug, Default)]
 struct RemoteTrackState {
     codec_mime_by_ssrc: Mutex<HashMap<u32, Option<String>>>,
@@ -76,6 +82,7 @@ struct RemoteTrackState {
     dd_parser_by_ssrc: Mutex<
         HashMap<u32, rtp::extension::dependency_descriptor_extension::DependencyDescriptorParser>,
     >,
+    last_dd_switch_point_by_ssrc: Mutex<HashMap<u32, bool>>,
     last_observed_layer_by_ssrc: Mutex<HashMap<u32, ObservedLayerIds>>,
 }
 
@@ -110,19 +117,32 @@ impl RemoteTrack {
 
     async fn observe_temporal_layer_fps(&self, packet: &rtp::Packet) {
         let ssrc = packet.header.ssrc;
+        let dd_metadata = packet
+            .header
+            .extension
+            .then(|| self.try_parse_dd_packet_metadata(ssrc, packet))
+            .flatten();
+        if let Ok(mut switch_points) = self.state.last_dd_switch_point_by_ssrc.lock() {
+            match dd_metadata {
+                Some(metadata) => {
+                    switch_points.insert(ssrc, dependency_descriptor_is_switch_point(metadata));
+                }
+                None => {
+                    switch_points.remove(&ssrc);
+                }
+            }
+        }
+
         let Some(codec_mime) = self.codec_mime_cached_for_ssrc(ssrc).await else {
             return;
         };
         let mime = codec_mime.to_ascii_lowercase();
 
-        let dd_layer_ids = if packet.header.extension {
-            self.try_parse_dd_layer_ids(ssrc, packet)
-        } else {
-            None
-        };
-
-        let (spatial_id, temporal_id) = if let Some(ids) = dd_layer_ids {
-            (ids.spatial_id, Some(ids.temporal_id))
+        let (spatial_id, temporal_id) = if let Some(metadata) = dd_metadata {
+            (
+                metadata.layer_ids.spatial_id,
+                Some(metadata.layer_ids.temporal_id),
+            )
         } else if mime.contains("vp8") {
             (
                 0,
@@ -205,6 +225,19 @@ impl RemoteTrack {
             .and_then(|layers| layers.get(&ssrc).map(|ids| ids.spatial_id))
     }
 
+    /// Returns whether the latest packet for an SSRC is a verified dependency-descriptor switch
+    /// point. `None` means descriptor metadata was unavailable for that packet.
+    pub fn last_observed_dependency_descriptor_switch_point_for_ssrc(
+        &self,
+        ssrc: u32,
+    ) -> Option<bool> {
+        self.state
+            .last_dd_switch_point_by_ssrc
+            .lock()
+            .ok()
+            .and_then(|switch_points| switch_points.get(&ssrc).copied())
+    }
+
     /// Returns the most recently observed temporal layer for an incoming SSRC.
     pub fn last_observed_temporal_layer_for_ssrc(&self, ssrc: u32) -> Option<u8> {
         self.state
@@ -214,11 +247,12 @@ impl RemoteTrack {
             .and_then(|layers| layers.get(&ssrc).map(|ids| ids.temporal_id))
     }
 
-    fn try_parse_dd_layer_ids(
+    fn try_parse_dd_packet_metadata(
         &self,
         ssrc: u32,
         packet: &rtp::Packet,
-    ) -> Option<rtp::extension::dependency_descriptor_extension::DependencyDescriptorLayerIds> {
+    ) -> Option<rtp::extension::dependency_descriptor_extension::DependencyDescriptorPacketMetadata>
+    {
         let mut parsers = self.state.dd_parser_by_ssrc.lock().ok()?;
         let parser = parsers.entry(ssrc).or_default();
 
@@ -226,7 +260,7 @@ impl RemoteTrack {
             .header
             .extensions
             .iter()
-            .find_map(|extension| parser.parse_layer_ids(&extension.payload))
+            .find_map(|extension| parser.parse_packet_metadata(&extension.payload))
     }
 
     /// Returns remote track identifier.
@@ -329,7 +363,37 @@ pub struct LocalRtpTrack {
 
 #[cfg(test)]
 mod tests {
-    use super::TemporalLayerFpsEstimate;
+    use super::{TemporalLayerFpsEstimate, dependency_descriptor_is_switch_point};
+    use rtc::rtp::extension::dependency_descriptor_extension::{
+        DependencyDescriptorLayerIds, DependencyDescriptorPacketMetadata,
+    };
+
+    #[test]
+    fn dependency_descriptor_switch_requires_frame_start_and_switch_target() {
+        let metadata = DependencyDescriptorPacketMetadata {
+            layer_ids: DependencyDescriptorLayerIds {
+                temporal_id: 0,
+                spatial_id: 2,
+            },
+            first_packet_in_frame: true,
+            last_packet_in_frame: false,
+            has_switching_decode_target: true,
+        };
+        assert!(dependency_descriptor_is_switch_point(metadata));
+
+        assert!(!dependency_descriptor_is_switch_point(
+            DependencyDescriptorPacketMetadata {
+                has_switching_decode_target: false,
+                ..metadata
+            }
+        ));
+        assert!(!dependency_descriptor_is_switch_point(
+            DependencyDescriptorPacketMetadata {
+                first_packet_in_frame: false,
+                ..metadata
+            }
+        ));
+    }
 
     #[test]
     fn temporal_layer_fps_estimate_tracks_per_temporal_layer_independently() {
