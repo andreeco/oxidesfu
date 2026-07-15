@@ -92,6 +92,8 @@ At the beginning of a session, inspect the full messages for the latest 20–30 
 
 ```bash
 git --no-pager log -n 30
+# Don't do this
+# git --no-pager log -n 30 --oneline
 ```
 
 Use that history to avoid duplicating work, identify active compatibility investigations, and preserve relevant conventions.

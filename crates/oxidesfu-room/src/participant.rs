@@ -384,6 +384,43 @@ impl RoomStore {
         Ok(true)
     }
 
+    /// Updates the SDP-side CID for a published media track and returns the updated participant snapshot.
+    pub fn set_participant_track_sdp_cid(
+        &self,
+        room: &str,
+        identity: &str,
+        track_sid: &str,
+        sdp_cid: &str,
+    ) -> Result<proto::ParticipantInfo, RoomStoreError> {
+        let mut inner = self
+            .inner
+            .write()
+            .map_err(|_| RoomStoreError::LockPoisoned)?;
+        let record = inner
+            .rooms
+            .get_mut(room)
+            .ok_or(RoomStoreError::RoomNotFound)?;
+        let participant = record
+            .participants
+            .get_mut(identity)
+            .ok_or(RoomStoreError::ParticipantNotFound)?;
+        let Some(track) = participant
+            .tracks
+            .iter_mut()
+            .find(|track| track.sid == track_sid)
+        else {
+            return Err(RoomStoreError::ParticipantNotFound);
+        };
+        if track.codecs.iter().all(|codec| codec.sdp_cid == sdp_cid) {
+            return Ok(participant.clone());
+        }
+        for codec in &mut track.codecs {
+            codec.sdp_cid = sdp_cid.to_string();
+        }
+        participant.version = participant.version.saturating_add(1);
+        Ok(participant.clone())
+    }
+
     /// Sets media subscription preference for a subscriber and publisher participant SID.
     pub fn set_media_track_subscribed_by_publisher_sid(
         &self,

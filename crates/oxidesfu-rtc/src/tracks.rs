@@ -234,6 +234,11 @@ impl RemoteTrack {
         self.inner.track_id().await.to_string()
     }
 
+    /// Returns the negotiated SDP media-section MID when available.
+    pub async fn mid(&self) -> Option<String> {
+        self.inner.mid().await
+    }
+
     /// Returns remote stream identifier.
     pub async fn stream_id(&self) -> String {
         self.inner.stream_id().await.to_string()

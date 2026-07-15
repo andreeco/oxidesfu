@@ -68,6 +68,7 @@ impl SinglePcOfferMediaKindStore {
 pub(crate) struct PendingPublisherRemoteTrack {
     pub(crate) publisher_sid: String,
     pub(crate) remote_track_id: String,
+    pub(crate) remote_mid: Option<String>,
     pub(crate) remote_track: oxidesfu_rtc::RemoteTrack,
 }
 

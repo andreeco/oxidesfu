@@ -65,7 +65,9 @@ test('final adaptive low request keeps the active Firefox receiver advancing', a
   await waitForHarnessReady(publisher, 'publisher');
   await subscriber.goto(subscriberUrl);
   await waitForHarnessReady(subscriber, 'subscriber');
-  await expect(subscriber.getByTestId('remote-video')).toHaveJSProperty('srcObject', expect.anything());
+  await expect.poll(
+    () => subscriber.evaluate(() => document.querySelector('video[data-testid="remote-video"]')?.srcObject !== null),
+  ).toBe(true);
 
   await subscriber.evaluate(() => {
     window.oxidesfuSetQuality('high');

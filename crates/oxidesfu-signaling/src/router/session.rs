@@ -221,6 +221,7 @@ fn retry_pending_remote_tracks_after_track_published(
 
     for pending_remote_track in pending_remote_tracks {
         let remote_track = pending_remote_track.remote_track;
+        let remote_mid = pending_remote_track.remote_mid;
         let publisher_sid = pending_remote_track.publisher_sid;
         let state = state.clone();
         let peer_connections = state.peer_connections.clone();
@@ -244,6 +245,7 @@ fn retry_pending_remote_tracks_after_track_published(
             let _ = forward_publisher_remote_track(
                 &state,
                 remote_track,
+                remote_mid,
                 &peer_connections,
                 &rooms,
                 &media_forwarding,
@@ -3887,6 +3889,7 @@ pub(crate) async fn answer_publisher_offer(
             identity,
             &offer_sdp,
             &reconcile_mid_to_track_id,
+            &offer_proto_mid_to_track_id,
         )
         .await;
         ensure_existing_media_forwarding_for_subscriber(state, room_name, identity).await;
@@ -4077,6 +4080,7 @@ pub(crate) async fn answer_publisher_offer(
         identity,
         &offer_sdp,
         &reconcile_mid_to_track_id,
+        &offer_proto_mid_to_track_id,
     )
     .await;
     ensure_existing_media_forwarding_for_subscriber(state, room_name, identity).await;
@@ -4268,6 +4272,7 @@ fn forward_peer_connection_events(
                         if let Err(error) = forward_publisher_remote_track(
                             &state,
                             remote_track,
+                            None,
                             &peer_connections,
                             &rooms,
                             &media_forwarding,
@@ -4871,16 +4876,24 @@ async fn ensure_subscriber_forwarding_for_track(
     Ok(())
 }
 
-async fn resolve_forward_track_info(
+pub(crate) async fn resolve_forward_track_info(
     rooms: &RoomStore,
     media_track_cids: &crate::stores::MediaTrackCidStore,
     room_name: &str,
     publisher_identity: &str,
     remote_track_id: &str,
+    remote_mid: Option<&str>,
     remote_track_kind: rtc::rtp_transceiver::rtp_sender::RtpCodecKind,
 ) -> Option<proto::TrackInfo> {
     const RESOLUTION_ATTEMPTS: usize = 250;
     const RESOLUTION_SLEEP_MS: u64 = 20;
+
+    let expected_track_type =
+        if remote_track_kind == rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Video {
+            proto::TrackType::Video as i32
+        } else {
+            proto::TrackType::Audio as i32
+        };
 
     for _ in 0..RESOLUTION_ATTEMPTS {
         let Ok(publisher) = rooms.get_participant(room_name, publisher_identity) else {
@@ -4908,19 +4921,24 @@ async fn resolve_forward_track_info(
             return Some(track);
         }
 
-        let expected_track_type =
-            if remote_track_kind == rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Video {
-                proto::TrackType::Video as i32
-            } else {
-                proto::TrackType::Audio as i32
-            };
+        if let Some(remote_mid) = remote_mid
+            && let Some(track) = publisher
+                .tracks
+                .iter()
+                .find(|track| track.mid == remote_mid)
+                .cloned()
+        {
+            return Some(track);
+        }
 
-        if let Some(track) = publisher
+        // Browser renegotiation can leave the protocol and RTP MID views out
+        // of sync. As a last resort, use only an unambiguous same-kind match.
+        let mut compatible_tracks = publisher
             .tracks
             .iter()
-            .rev()
-            .find(|track| track.r#type == expected_track_type)
-            .cloned()
+            .filter(|track| track.r#type == expected_track_type);
+        if let Some(track) = compatible_tracks.next().cloned()
+            && compatible_tracks.next().is_none()
         {
             return Some(track);
         }
@@ -4928,6 +4946,29 @@ async fn resolve_forward_track_info(
         tokio::time::sleep(std::time::Duration::from_millis(RESOLUTION_SLEEP_MS)).await;
     }
 
+    match rooms.get_participant(room_name, publisher_identity) {
+        Ok(publisher) => tracing::warn!(
+            room = room_name,
+            publisher_identity,
+            remote_track_id,
+            remote_mid = ?remote_mid,
+            expected_track_type,
+            tracks = ?publisher.tracks.iter().map(|track| (
+                &track.sid,
+                track.r#type,
+                &track.mid,
+                track.codecs.iter().map(|codec| (&codec.cid, &codec.sdp_cid)).collect::<Vec<_>>(),
+            )).collect::<Vec<_>>(),
+            "remote_track_resolution_timed_out"
+        ),
+        Err(error) => tracing::warn!(
+            room = room_name,
+            publisher_identity,
+            remote_track_id,
+            error = %error,
+            "remote_track_resolution_publisher_missing"
+        ),
+    }
     None
 }
 
@@ -4993,6 +5034,7 @@ pub(crate) async fn rebuild_forwarding_tracks_after_runtime_codec_change(
 async fn forward_publisher_remote_track(
     state: &SignalState,
     remote_track: oxidesfu_rtc::RemoteTrack,
+    remote_mid: Option<String>,
     peer_connections: &PeerConnectionStore,
     rooms: &RoomStore,
     media_forwarding: &MediaForwardingStore,
@@ -5022,6 +5064,10 @@ async fn forward_publisher_remote_track(
     }
 
     let remote_track_id = remote_track.track_id().await;
+    let remote_mid = match remote_mid {
+        Some(remote_mid) => Some(remote_mid),
+        None => remote_track.mid().await,
+    };
     let remote_track_kind = remote_track.kind().await;
     let Some(mut track_info) = resolve_forward_track_info(
         rooms,
@@ -5029,6 +5075,7 @@ async fn forward_publisher_remote_track(
         room_name,
         publisher_identity,
         &remote_track_id,
+        remote_mid.as_deref(),
         remote_track_kind,
     )
     .await
@@ -5039,6 +5086,7 @@ async fn forward_publisher_remote_track(
             crate::stores::PendingPublisherRemoteTrack {
                 publisher_sid: publisher_sid.to_string(),
                 remote_track_id: remote_track_id.clone(),
+                remote_mid: remote_mid.clone(),
                 remote_track,
             },
         );
@@ -5046,6 +5094,7 @@ async fn forward_publisher_remote_track(
             room = room_name,
             publisher_identity,
             remote_track_id,
+            remote_mid = ?remote_mid,
             remote_track_kind = ?remote_track_kind,
             "queued_unresolved_remote_track_for_retry"
         );
@@ -5060,6 +5109,50 @@ async fn forward_publisher_remote_track(
             "discarding_remote_track_resolved_for_stale_publisher_session"
         );
         return Ok(());
+    }
+
+    let needs_mid_update = remote_mid
+        .as_deref()
+        .is_some_and(|mid| track_info.mid != mid);
+    let needs_sdp_cid_update = track_info
+        .codecs
+        .iter()
+        .any(|codec| codec.sdp_cid != remote_track_id);
+    media_track_cids.insert(
+        room_name,
+        publisher_identity,
+        &remote_track_id,
+        &track_info.sid,
+    );
+    if needs_mid_update || needs_sdp_cid_update {
+        let mut participant_update = None;
+        if needs_mid_update && let Some(mid) = remote_mid.as_deref() {
+            participant_update = rooms
+                .set_participant_track_mid(room_name, publisher_identity, &track_info.sid, mid)
+                .ok();
+        }
+        if needs_sdp_cid_update {
+            participant_update = rooms
+                .set_participant_track_sdp_cid(
+                    room_name,
+                    publisher_identity,
+                    &track_info.sid,
+                    &remote_track_id,
+                )
+                .ok()
+                .or(participant_update);
+        }
+        if let Some(participant) = participant_update {
+            if let Some(updated_track) = participant
+                .tracks
+                .iter()
+                .find(|track| track.sid == track_info.sid)
+                .cloned()
+            {
+                track_info = updated_track;
+            }
+            state.updates.broadcast_update(room_name, participant);
+        }
     }
 
     let expected_mime_prefix = match track_info.r#type {
@@ -6454,27 +6547,81 @@ pub(super) async fn reconcile_publisher_media_tracks_after_answer(
     room_name: &str,
     publisher_identity: &str,
     offer_sdp: &str,
-    mid_to_track_id: &HashMap<String, String>,
+    mid_to_sdp_track_id: &HashMap<String, String>,
+    mid_to_signal_cid: &HashMap<String, String>,
 ) {
     let active_mids = active_publisher_mids_from_offer(offer_sdp);
     let offered_mids = publisher_mids_from_offer(offer_sdp);
+    let offer_sections = offer_media_sections_from_sdp(offer_sdp);
+    let media_kind_by_mid = offer_sections
+        .iter()
+        .filter_map(|section| section.kind.map(|kind| (section.mid.clone(), kind)))
+        .collect::<HashMap<_, _>>();
+    let explicitly_removed_mids = offer_sections
+        .iter()
+        .filter(|section| section.direction == "inactive")
+        .map(|section| section.mid.clone())
+        .collect::<HashSet<_>>();
 
-    for (mid, track_id) in mid_to_track_id {
-        let track_sid = if track_id.starts_with("TR_") {
-            Some(track_id.clone())
+    for (mid, sdp_track_id) in mid_to_sdp_track_id {
+        let track_sid = if sdp_track_id.starts_with("TR_") {
+            Some(sdp_track_id.clone())
         } else {
             state
                 .media_track_cids
-                .find_track_sid(room_name, publisher_identity, track_id)
+                .find_track_sid(room_name, publisher_identity, sdp_track_id)
+                .or_else(|| {
+                    mid_to_signal_cid.get(mid).and_then(|signal_cid| {
+                        state.media_track_cids.find_track_sid(
+                            room_name,
+                            publisher_identity,
+                            signal_cid,
+                        )
+                    })
+                })
+                .or_else(|| {
+                    // LiveKit accepts a browser's changed SDP track ID only
+                    // when one unbound publication of the same kind exists.
+                    // Do not guess when multiple tracks could match.
+                    let expected_track_type = match media_kind_by_mid.get(mid) {
+                        Some(ReceiveSectionKind::Audio) => proto::TrackType::Audio as i32,
+                        Some(ReceiveSectionKind::Video) => proto::TrackType::Video as i32,
+                        None => return None,
+                    };
+                    let participant = state
+                        .rooms
+                        .get_participant(room_name, publisher_identity)
+                        .ok()?;
+                    let mut candidates = participant.tracks.iter().filter(|track| {
+                        track.r#type == expected_track_type
+                            && track.mid.is_empty()
+                            && track.codecs.iter().all(|codec| codec.sdp_cid.is_empty())
+                    });
+                    let track_sid = candidates.next()?.sid.clone();
+                    candidates.next().is_none().then_some(track_sid)
+                })
         };
 
         if let Some(track_sid) = track_sid {
-            if let Ok(participant) = state.rooms.set_participant_track_mid(
+            // Browser SDP MSID track IDs are not required to equal the
+            // application-signaled AddTrack CID. Preserve both aliases, as
+            // LiveKit does with SimulcastCodecInfo.sdp_cid.
+            state
+                .media_track_cids
+                .insert(room_name, publisher_identity, sdp_track_id, &track_sid);
+            let mid_updated = state.rooms.set_participant_track_mid(
                 room_name,
                 publisher_identity,
                 &track_sid,
                 mid,
-            ) {
+            );
+            let sdp_cid_updated = state.rooms.set_participant_track_sdp_cid(
+                room_name,
+                publisher_identity,
+                &track_sid,
+                sdp_track_id,
+            );
+            if let Ok(participant) = sdp_cid_updated.or(mid_updated) {
                 state.updates.broadcast_update(room_name, participant);
             }
         }
@@ -6488,18 +6635,27 @@ pub(super) async fn reconcile_publisher_media_tracks_after_answer(
         .tracks
         .iter()
         .filter(|track| {
-            if active_mids.is_empty() {
-                track.mid.is_empty() || offered_mids.contains(&track.mid)
-            } else {
-                !track.mid.is_empty()
-                    && offered_mids.contains(&track.mid)
-                    && !active_mids.contains(&track.mid)
-            }
+            !track.mid.is_empty()
+                && track.codecs.iter().any(|codec| !codec.sdp_cid.is_empty())
+                && offered_mids.contains(&track.mid)
+                && !active_mids.contains(&track.mid)
+                && explicitly_removed_mids.contains(&track.mid)
         })
         .cloned()
         .collect();
 
     for track in stale_tracks {
+        tracing::warn!(
+            room = room_name,
+            publisher_identity,
+            track_sid = %track.sid,
+            track_mid = %track.mid,
+            active_mids = ?active_mids,
+            offered_mids = ?offered_mids,
+            explicitly_removed_mids = ?explicitly_removed_mids,
+            offer_sections = ?offer_sections.iter().map(|section| (&section.mid, &section.direction, section.is_rejected)).collect::<Vec<_>>(),
+            "removing_stale_publisher_track"
+        );
         cleanup_publisher_forwarding_for_track(state, room_name, publisher_identity, &track).await;
         state
             .media_track_cids

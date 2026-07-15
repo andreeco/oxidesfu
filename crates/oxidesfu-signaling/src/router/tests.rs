@@ -6029,7 +6029,7 @@ async fn relayed_signal_request_bytes_captures_outbound_only_responses() {
 }
 
 #[tokio::test]
-async fn reconcile_publisher_media_tracks_after_answer_removes_tracks_when_offer_has_no_active_media_mids()
+async fn reconcile_publisher_media_tracks_after_answer_retains_unbound_tracks_when_offer_has_no_active_media_mids()
  {
     let state = state();
     let room = "reconcile-no-active-mids-room";
@@ -6074,6 +6074,7 @@ async fn reconcile_publisher_media_tracks_after_answer_removes_tracks_when_offer
         publisher,
         unpublish_like_offer_sdp,
         &HashMap::new(),
+        &HashMap::new(),
     )
     .await;
 
@@ -6081,10 +6082,132 @@ async fn reconcile_publisher_media_tracks_after_answer_removes_tracks_when_offer
         .rooms
         .get_participant(room, publisher)
         .expect("participant should exist");
-    assert!(
-        participant_after.tracks.is_empty(),
-        "tracks should be removed when no active publish mids remain"
+    assert_eq!(
+        participant_after.tracks.len(),
+        1,
+        "an unbound publication must remain available for later browser RTP correlation"
     );
+    assert_eq!(participant_after.tracks[0].sid, published_track.sid);
+}
+
+#[tokio::test]
+async fn reconcile_publisher_media_tracks_falls_back_to_single_unbound_browser_track() {
+    let state = state();
+    let room = "reconcile-browser-sdp-cid-room";
+    let publisher = "publisher";
+    let signal_cid = "signal-video-cid";
+    let browser_sdp_track_id = "{browser-generated-track-id}";
+
+    join_participant_for_data_track_test(&state, room, publisher);
+    let response = add_track_response(
+        &state,
+        room,
+        publisher,
+        proto::AddTrackRequest {
+            cid: signal_cid.to_string(),
+            name: "camera".to_string(),
+            r#type: proto::TrackType::Video as i32,
+            source: proto::TrackSource::Camera as i32,
+            ..Default::default()
+        },
+    )
+    .await;
+    let Some(proto::signal_response::Message::TrackPublished(track_published)) = response.message
+    else {
+        panic!("expected TrackPublished response");
+    };
+    let track = track_published
+        .track
+        .expect("video track should be present");
+
+    let offer_sdp = "v=0\r\n\
+        m=video 9 UDP/TLS/RTP/SAVPF 96\r\n\
+        a=mid:3\r\n\
+        a=sendonly\r\n\
+        a=msid:browser-stream {browser_sdp_track_id}\r\n";
+    let mut sdp_track_ids = HashMap::new();
+    sdp_track_ids.insert("3".to_string(), browser_sdp_track_id.to_string());
+    let signal_cids = HashMap::new();
+
+    reconcile_publisher_media_tracks_after_answer(
+        &state,
+        room,
+        publisher,
+        offer_sdp,
+        &sdp_track_ids,
+        &signal_cids,
+    )
+    .await;
+
+    assert_eq!(
+        state
+            .media_track_cids
+            .find_track_sid(room, publisher, browser_sdp_track_id),
+        Some(track.sid.clone())
+    );
+    let participant = state
+        .rooms
+        .get_participant(room, publisher)
+        .expect("publisher should exist");
+    let reconciled = participant
+        .tracks
+        .iter()
+        .find(|candidate| candidate.sid == track.sid)
+        .expect("published track should remain");
+    assert_eq!(reconciled.mid, "3");
+    assert!(
+        reconciled
+            .codecs
+            .iter()
+            .all(|codec| codec.sdp_cid == browser_sdp_track_id)
+    );
+}
+
+#[tokio::test]
+async fn resolve_forward_track_info_matches_browser_track_by_negotiated_mid() {
+    let state = state();
+    let room = "resolve-browser-mid-room";
+    let publisher = "publisher";
+
+    join_participant_for_data_track_test(&state, room, publisher);
+    let response = add_track_response(
+        &state,
+        room,
+        publisher,
+        proto::AddTrackRequest {
+            cid: "signal-video-cid".to_string(),
+            name: "camera".to_string(),
+            r#type: proto::TrackType::Video as i32,
+            source: proto::TrackSource::Camera as i32,
+            ..Default::default()
+        },
+    )
+    .await;
+    let Some(proto::signal_response::Message::TrackPublished(track_published)) = response.message
+    else {
+        panic!("expected TrackPublished response");
+    };
+    let published_track = track_published
+        .track
+        .expect("video track should be present");
+    state
+        .rooms
+        .set_participant_track_mid(room, publisher, &published_track.sid, "3")
+        .expect("track MID should be set");
+
+    let resolved = crate::session::resolve_forward_track_info(
+        &state.rooms,
+        &state.media_track_cids,
+        room,
+        publisher,
+        "{browser-generated-track-id}",
+        Some("3"),
+        rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Video,
+    )
+    .await
+    .expect("remote track should resolve through its negotiated MID");
+
+    assert_eq!(resolved.sid, published_track.sid);
 }
 
 #[tokio::test]
@@ -6158,6 +6281,7 @@ async fn reconcile_publisher_media_tracks_after_answer_does_not_remove_a_track_a
         publisher,
         old_offer_sdp,
         &old_offer_mid_to_track_id,
+        &HashMap::new(),
     )
     .await;
 
@@ -6224,6 +6348,15 @@ async fn reconcile_publisher_media_tracks_after_answer_removes_negotiated_track_
         .expect("track mid should be set");
     assert_eq!(participant_with_mid.tracks.len(), 1);
     assert_eq!(participant_with_mid.tracks[0].mid, "0");
+    state
+        .rooms
+        .set_participant_track_sdp_cid(
+            room,
+            publisher,
+            &published_track.sid,
+            "negotiated-browser-track-id",
+        )
+        .expect("track SDP CID should be set");
 
     let unpublish_offer_sdp = "v=0\r\n\
             m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
@@ -6234,6 +6367,7 @@ async fn reconcile_publisher_media_tracks_after_answer_removes_negotiated_track_
         room,
         publisher,
         unpublish_offer_sdp,
+        &HashMap::new(),
         &HashMap::new(),
     )
     .await;
