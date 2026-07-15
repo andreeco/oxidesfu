@@ -1129,7 +1129,7 @@ struct ForwardTarget {
     fps_state: FpsForwardingState,
     target_primary_ssrc: Option<Option<u32>>,
     target_payload_type: Option<Option<u8>>,
-    keyframe_requested_at: Option<std::time::Instant>,
+
     forwarded_once: bool,
     logged_video_rewrite_drop: bool,
     logged_audio_rewrite_drop: bool,
@@ -1153,7 +1153,7 @@ impl ForwardTarget {
             fps_state: FpsForwardingState::default(),
             target_primary_ssrc: None,
             target_payload_type: None,
-            keyframe_requested_at: None,
+
             forwarded_once: false,
             logged_video_rewrite_drop: false,
             logged_audio_rewrite_drop: false,
@@ -5460,7 +5460,12 @@ async fn forward_publisher_remote_track(
     tokio::spawn(async move {
         let mut logged_no_forward_tracks = false;
         let mut logged_first_rtp = false;
-        let mut last_keyframe_request_sweep_at: Option<std::time::Instant> = None;
+        let mut keyframe_retry_tick = tokio::time::interval_at(
+            tokio::time::Instant::now() + std::time::Duration::from_secs(3),
+            std::time::Duration::from_secs(3),
+        );
+        keyframe_retry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut last_video_media_ssrc: Option<u32> = None;
         let mut video_ssrc_rids = HashMap::<u32, Option<String>>::new();
         let mut video_ssrc_codec_mime = HashMap::<u32, Option<String>>::new();
         let mut video_ssrc_is_repair = HashMap::<u32, bool>::new();
@@ -5504,11 +5509,42 @@ async fn forward_publisher_remote_track(
                 break;
             }
 
-            let recv_event_result = tokio::time::timeout(
-                REMOTE_TRACK_EVENT_IDLE_LOG_INTERVAL,
-                remote_track.recv_event(),
-            )
-            .await;
+            let recv_event_result = if is_video_track {
+                tokio::select! {
+                    result = tokio::time::timeout(
+                        REMOTE_TRACK_EVENT_IDLE_LOG_INTERVAL,
+                        remote_track.recv_event(),
+                    ) => result,
+                    _ = keyframe_retry_tick.tick() => {
+                        if let Some(media_ssrc) = last_video_media_ssrc
+                            && !cached_forward_targets.is_empty()
+                        {
+                            tracing::debug!(
+                                room = %room_name,
+                                publisher_identity = %publisher_identity,
+                                track_sid = %track_sid,
+                                media_ssrc,
+                                "requesting_periodic_keyframe_for_video_forwarding_track"
+                            );
+                            let _ = remote_track
+                                .write_rtcp_packets(vec![Box::new(
+                                    rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication {
+                                        sender_ssrc: 0,
+                                        media_ssrc,
+                                    },
+                                )])
+                                .await;
+                        }
+                        continue;
+                    }
+                }
+            } else {
+                tokio::time::timeout(
+                    REMOTE_TRACK_EVENT_IDLE_LOG_INTERVAL,
+                    remote_track.recv_event(),
+                )
+                .await
+            };
             let recv_event = match recv_event_result {
                 Ok(recv_event) => recv_event,
                 Err(_elapsed) => {
@@ -5716,43 +5752,25 @@ async fn forward_publisher_remote_track(
                     }
                     logged_no_forward_tracks = false;
 
-                    let keyframe_request_sweep_due = is_video_track
-                        && (forwarding_targets_changed
-                            || last_keyframe_request_sweep_at.is_none_or(|last_sweep_at| {
-                                rtp_event_at.duration_since(last_sweep_at)
-                                    >= std::time::Duration::from_secs(3)
-                            }));
-                    if keyframe_request_sweep_due {
-                        last_keyframe_request_sweep_at = Some(rtp_event_at);
-                        for target in &mut cached_forward_targets {
-                            let should_request =
-                                target
-                                    .keyframe_requested_at
-                                    .is_none_or(|last_requested_at| {
-                                        rtp_event_at.duration_since(last_requested_at)
-                                            >= std::time::Duration::from_secs(3)
-                                    });
-                            if !should_request {
-                                continue;
-                            }
-                            target.keyframe_requested_at = Some(rtp_event_at);
-                            tracing::debug!(
-                                room = %room_name,
-                                publisher_identity = %publisher_identity,
-                                track_sid = %track_sid,
-                                subscriber_identity = %target.subscriber_identity(),
-                                media_ssrc = packet.header.ssrc,
-                                "requesting_keyframe_for_new_video_forwarding_track"
-                            );
-                            let _ = remote_track
-                                .write_rtcp_packets(vec![Box::new(
-                                    rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication {
-                                        sender_ssrc: 0,
-                                        media_ssrc: packet.header.ssrc,
-                                    },
-                                )])
-                                .await;
-                        }
+                    if is_video_track {
+                        last_video_media_ssrc = Some(packet.header.ssrc);
+                    }
+                    if is_video_track && forwarding_targets_changed {
+                        tracing::debug!(
+                            room = %room_name,
+                            publisher_identity = %publisher_identity,
+                            track_sid = %track_sid,
+                            media_ssrc = packet.header.ssrc,
+                            "requesting_keyframe_for_new_video_forwarding_targets"
+                        );
+                        let _ = remote_track
+                            .write_rtcp_packets(vec![Box::new(
+                                rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication {
+                                    sender_ssrc: 0,
+                                    media_ssrc: packet.header.ssrc,
+                                },
+                            )])
+                            .await;
                     }
 
                     let total_forward_targets = cached_forward_targets.len();
