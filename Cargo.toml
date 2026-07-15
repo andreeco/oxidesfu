@@ -68,8 +68,8 @@ turn-server = { git = "https://github.com/andreeco/turn-rs.git", rev = "79d1bc2a
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 # Pinned from andreeco/webrtc's oxidesfu/webrtc-compat branch for LiveKit compatibility.
-webrtc = { git = "https://github.com/andreeco/webrtc.git", rev = "55f80aff4f7d9ce1ffda0e5a403cab3db21157c8", default-features = false, features = ["runtime-tokio"] }
-rtc = { git = "https://github.com/andreeco/webrtc.git", rev = "55f80aff4f7d9ce1ffda0e5a403cab3db21157c8" }
+webrtc = { git = "https://github.com/andreeco/webrtc.git", rev = "2209a54930bfb239b8dd16e0d9ff9da98f8c4f47", default-features = false, features = ["runtime-tokio"] }
+rtc = { git = "https://github.com/andreeco/webrtc.git", rev = "2209a54930bfb239b8dd16e0d9ff9da98f8c4f47" }
 rtc-stun = { git = "https://github.com/andreeco/webrtc.git", rev = "55f80aff4f7d9ce1ffda0e5a403cab3db21157c8" }
 
 # Optimized profiling builds retain symbols without changing normal release artifacts.

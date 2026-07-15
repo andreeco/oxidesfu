@@ -183,7 +183,9 @@ impl PeerConnection {
                         mime_type: MIME_TYPE_AV1.to_string(),
                         clock_rate: 90_000,
                         channels: 0,
-                        sdp_fmtp_line: "profile-id=0".to_string(),
+                        // AV1 RTP infers the Main profile when `profile` is absent.
+                        // LiveKit/Pion advertises AV1 this way rather than with `profile-id`.
+                        sdp_fmtp_line: String::new(),
                         rtcp_feedback: vec![],
                     },
                     _ => RTCRtpCodec {
@@ -202,7 +204,7 @@ impl PeerConnection {
         if mime_type.is_some_and(|mime| mime.trim().eq_ignore_ascii_case("video/av1")) {
             return vec![RTCRtpCodecParameters {
                 rtp_codec: Self::forwarding_codec_for(RtpCodecKind::Video, Some("video/av1")),
-                payload_type: 41,
+                payload_type: 45,
             }];
         }
 
@@ -1348,10 +1350,13 @@ mod tests {
             .expect("offer should contain a video section");
 
         assert!(
-            video_section.contains("a=rtpmap:41 AV1/90000"),
+            video_section.contains("a=rtpmap:45 AV1/90000"),
             "AV1 forwarding offer should advertise AV1 rather than silently falling back to VP8"
         );
-        assert!(video_section.contains("a=fmtp:41 profile-id=0"));
+        assert!(
+            !video_section.contains("a=fmtp:41"),
+            "AV1 profile 0 is represented by an omitted profile parameter, matching LiveKit/Pion"
+        );
 
         forwarder.close().await.expect("forwarder should close");
     }
@@ -1561,7 +1566,7 @@ mod tests {
                             .write_rtp(rtc::rtp::packet::Packet {
                                 header: rtc::rtp::header::Header {
                                     version: 2,
-                                    payload_type: 41,
+                                    payload_type: 45,
                                     sequence_number: next_sequence_number,
                                     timestamp: u32::from(next_sequence_number) * 3_000,
                                     ssrc: 42,
@@ -1580,7 +1585,7 @@ mod tests {
         .expect("subscriber should receive AV1 RTP before timeout");
 
         assert_eq!(received_packet.payload, av1_rtp_payload);
-        assert_eq!(received_packet.header.payload_type, 41);
+        assert_eq!(received_packet.header.payload_type, 45);
 
         forwarder
             .close()
