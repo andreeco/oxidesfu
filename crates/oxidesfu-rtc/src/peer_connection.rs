@@ -15,7 +15,8 @@ use rtc::{
     ice::mdns::MulticastDnsMode,
     media_stream::MediaStreamTrack,
     peer_connection::configuration::media_engine::{
-        MIME_TYPE_H264, MIME_TYPE_OPUS, MIME_TYPE_PCMA, MIME_TYPE_PCMU, MIME_TYPE_VP8,
+        MIME_TYPE_AV1, MIME_TYPE_H264, MIME_TYPE_OPUS, MIME_TYPE_PCMA, MIME_TYPE_PCMU,
+        MIME_TYPE_VP8,
     },
     rtp_transceiver::{
         RTCRtpTransceiverDirection, RTCRtpTransceiverInit,
@@ -178,6 +179,13 @@ impl PeerConnection {
                                 .to_string(),
                         rtcp_feedback: vec![],
                     },
+                    "video/av1" => RTCRtpCodec {
+                        mime_type: MIME_TYPE_AV1.to_string(),
+                        clock_rate: 90_000,
+                        channels: 0,
+                        sdp_fmtp_line: "profile-id=0".to_string(),
+                        rtcp_feedback: vec![],
+                    },
                     _ => RTCRtpCodec {
                         mime_type: MIME_TYPE_VP8.to_string(),
                         clock_rate: 90_000,
@@ -190,7 +198,14 @@ impl PeerConnection {
         }
     }
 
-    fn forwarding_video_codec_preferences() -> Vec<RTCRtpCodecParameters> {
+    fn forwarding_video_codec_preferences(mime_type: Option<&str>) -> Vec<RTCRtpCodecParameters> {
+        if mime_type.is_some_and(|mime| mime.trim().eq_ignore_ascii_case("video/av1")) {
+            return vec![RTCRtpCodecParameters {
+                rtp_codec: Self::forwarding_codec_for(RtpCodecKind::Video, Some("video/av1")),
+                payload_type: 41,
+            }];
+        }
+
         vec![
             RTCRtpCodecParameters {
                 rtp_codec: Self::forwarding_codec_for(RtpCodecKind::Video, Some("video/vp8")),
@@ -343,11 +358,11 @@ impl PeerConnection {
         forwarding_transceiver
             .set_direction(RTCRtpTransceiverDirection::Sendonly)
             .await?;
-        let is_vp8_forwarding_track = kind == RtpCodecKind::Video
+        let requires_explicit_video_codec_preferences = kind == RtpCodecKind::Video
             && !mime_type.is_some_and(|mime| mime.trim().eq_ignore_ascii_case("video/h264"));
-        if is_vp8_forwarding_track {
+        if requires_explicit_video_codec_preferences {
             forwarding_transceiver
-                .set_codec_preferences(Self::forwarding_video_codec_preferences())
+                .set_codec_preferences(Self::forwarding_video_codec_preferences(mime_type))
                 .await?;
         }
         sender
@@ -1312,6 +1327,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn av1_forwarding_section_advertises_av1_receiver_capabilities() {
+        let forwarder = create_peer_connection()
+            .await
+            .expect("forwarder peer connection should create");
+        forwarder
+            .add_forwarding_track_with_mime(
+                "PA_publisher",
+                "TR_av1",
+                RtpCodecKind::Video,
+                Some("video/av1"),
+            )
+            .await
+            .expect("AV1 forwarding track should add");
+
+        let offer_sdp = forwarder.create_offer().await.expect("offer should create");
+        let video_section = offer_sdp
+            .split("m=video ")
+            .nth(1)
+            .expect("offer should contain a video section");
+
+        assert!(
+            video_section.contains("a=rtpmap:41 AV1/90000"),
+            "AV1 forwarding offer should advertise AV1 rather than silently falling back to VP8"
+        );
+        assert!(video_section.contains("a=fmtp:41 profile-id=0"));
+
+        forwarder.close().await.expect("forwarder should close");
+    }
+
+    #[tokio::test]
     async fn negotiated_vp8_forward_track_delivers_rtp_to_in_process_subscriber() {
         let (forwarder, forwarder_events) = create_peer_connection_with_events()
             .await
@@ -1418,6 +1463,124 @@ mod tests {
 
         assert_eq!(received_packet.payload, pion_null_vp8_sample);
         assert_eq!(received_packet.header.payload_type, 96);
+
+        forwarder
+            .close()
+            .await
+            .expect("forwarder peer connection should close");
+        subscriber
+            .close()
+            .await
+            .expect("subscriber peer connection should close");
+    }
+
+    #[tokio::test]
+    async fn negotiated_av1_forward_track_delivers_rtp_to_in_process_subscriber() {
+        let (forwarder, forwarder_events) = create_peer_connection_with_events()
+            .await
+            .expect("forwarder peer connection should create");
+        let (subscriber, subscriber_events) = create_peer_connection_with_events()
+            .await
+            .expect("subscriber peer connection should create");
+        let PeerConnectionEvents {
+            ice_candidates: mut forwarder_ice_candidates,
+            data_channels: _,
+            remote_tracks: _,
+        } = forwarder_events;
+        let PeerConnectionEvents {
+            ice_candidates: mut subscriber_ice_candidates,
+            data_channels: _,
+            remote_tracks: mut subscriber_remote_tracks,
+        } = subscriber_events;
+
+        let forward_track = forwarder
+            .add_forwarding_track_with_mime(
+                "PA_publisher",
+                "TR_av1",
+                RtpCodecKind::Video,
+                Some("video/av1"),
+            )
+            .await
+            .expect("AV1 forwarding track should add");
+        let offer_sdp = forwarder.create_offer().await.expect("offer should create");
+        let answer_sdp = subscriber
+            .create_answer_for_offer(offer_sdp)
+            .await
+            .expect("answer should create");
+        forwarder
+            .set_remote_answer(answer_sdp)
+            .await
+            .expect("answer should apply to forwarder");
+        assert!(
+            matches!(
+                forward_track.bind_result().await,
+                crate::ForwardTrackBindResult::Compatible { .. }
+            ),
+            "AV1 forwarding track should bind to the subscriber's negotiated codec context"
+        );
+
+        let received_rtp_task = tokio::spawn(async move {
+            let remote_track = subscriber_remote_tracks
+                .recv()
+                .await
+                .ok_or_else(|| std::io::Error::other("subscriber remote-track stream ended"))?;
+            remote_track.recv_rtp_packet().await
+        });
+        tokio::pin!(received_rtp_task);
+
+        // AV1 aggregation header with one OBU element. The forwarding path must preserve
+        // AV1 RTP payload bytes; it does not transcode them to VP8.
+        let av1_rtp_payload = bytes::Bytes::from_static(&[0x10, 0x00]);
+        let mut next_sequence_number = 1u16;
+        let received_packet = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                tokio::select! {
+                    candidate = forwarder_ice_candidates.recv() => {
+                        if let Some(candidate) = candidate {
+                            subscriber
+                                .add_ice_candidate_json(&candidate.candidate_init_json)
+                                .await
+                                .expect("forwarder candidate should add to subscriber");
+                        }
+                    }
+                    candidate = subscriber_ice_candidates.recv() => {
+                        if let Some(candidate) = candidate {
+                            forwarder
+                                .add_ice_candidate_json(&candidate.candidate_init_json)
+                                .await
+                                .expect("subscriber candidate should add to forwarder");
+                        }
+                    }
+                    result = &mut received_rtp_task => {
+                        break result
+                            .expect("subscriber RTP receive task should not panic")
+                            .expect("subscriber should receive forwarded AV1 RTP");
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(10)) => {
+                        forward_track
+                            .write_rtp(rtc::rtp::packet::Packet {
+                                header: rtc::rtp::header::Header {
+                                    version: 2,
+                                    payload_type: 41,
+                                    sequence_number: next_sequence_number,
+                                    timestamp: u32::from(next_sequence_number) * 3_000,
+                                    ssrc: 42,
+                                    ..Default::default()
+                                },
+                                payload: av1_rtp_payload.clone(),
+                            })
+                            .await
+                            .expect("forwarded AV1 RTP should write");
+                        next_sequence_number = next_sequence_number.wrapping_add(1);
+                    }
+                }
+            }
+        })
+        .await
+        .expect("subscriber should receive AV1 RTP before timeout");
+
+        assert_eq!(received_packet.payload, av1_rtp_payload);
+        assert_eq!(received_packet.header.payload_type, 41);
 
         forwarder
             .close()
