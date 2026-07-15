@@ -5446,28 +5446,6 @@ fn forwarding_target_refresh_is_revision_scoped_and_prunes_stale_state() {
 }
 
 #[test]
-fn target_settings_revision_refreshes_only_for_new_targets_or_new_generation() {
-    assert!(super::session::target_settings_revision_needs_refresh(
-        None, 10, false
-    ));
-    assert!(super::session::target_settings_revision_needs_refresh(
-        Some(9),
-        10,
-        true
-    ));
-    assert!(super::session::target_settings_revision_needs_refresh(
-        Some(10),
-        10,
-        false
-    ));
-    assert!(!super::session::target_settings_revision_needs_refresh(
-        Some(10),
-        10,
-        true
-    ));
-}
-
-#[test]
 fn forwarding_debug_heartbeat_is_consumed_by_the_next_video_packet() {
     let mut heartbeat_due = true;
 

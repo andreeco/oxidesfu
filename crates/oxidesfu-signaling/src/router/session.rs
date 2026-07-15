@@ -1310,34 +1310,49 @@ fn cached_forwarding_decision_for_target(
     decision
 }
 
-/// Refreshes the settings version attached to a reader-owned target.
-///
-/// Returns whether a changed version reset target-local simulcast selection state.
-fn refresh_target_settings_revision(
-    target: &mut ForwardTarget,
-    observed_settings_generation: Option<u64>,
-    current_settings_generation: u64,
-    track_settings: &crate::media::TrackSettingsStore,
-) -> (u64, bool) {
-    if target_settings_revision_needs_refresh(
-        observed_settings_generation,
-        current_settings_generation,
-        target.settings_revision.is_some(),
-    ) {
-        let settings_revision =
-            track_settings.revision_for_track(&target.key.0, &target.key.3, &target.key.2);
-        let changed = target
-            .settings_revision
-            .replace(settings_revision)
-            .is_some_and(|previous| previous != settings_revision);
-        if changed {
-            target.video_layer_selector = SubscriberVideoLayerSelector::default();
-            target.fps_state = FpsForwardingState::default();
-        }
-        return (settings_revision, changed);
+/// Applies one effective settings revision to its reader-owned forwarding target.
+fn apply_target_settings_revision(target: &mut ForwardTarget, settings_revision: u64) -> bool {
+    let changed = target.settings_revision != Some(settings_revision);
+    target.settings_revision = Some(settings_revision);
+    if changed {
+        target.decision = None;
+        target.video_layer_selector = SubscriberVideoLayerSelector::default();
+        target.fps_state = FpsForwardingState::default();
     }
+    changed
+}
 
-    (target.settings_revision.unwrap_or_default(), false)
+/// Applies an effective mutation only to its matching reader target.
+fn apply_effective_track_settings_change(
+    targets: &mut [ForwardTarget],
+    change: &crate::media::EffectiveTrackSettingsChange,
+) -> usize {
+    targets
+        .iter_mut()
+        .map(|target| {
+            (target.key.0 == change.room
+                && target.key.2 == change.track_sid
+                && target.key.3 == change.subscriber_identity)
+                && apply_target_settings_revision(target, change.revision)
+        })
+        .filter(|changed| *changed)
+        .count()
+}
+
+/// Recovers from a bounded notification receiver lag without returning to packet polling.
+fn resync_target_settings_revisions(
+    targets: &mut [ForwardTarget],
+    track_settings: &crate::media::TrackSettingsStore,
+) -> usize {
+    targets
+        .iter_mut()
+        .map(|target| {
+            let revision =
+                track_settings.revision_for_track(&target.key.0, &target.key.3, &target.key.2);
+            apply_target_settings_revision(target, revision)
+        })
+        .filter(|changed| *changed)
+        .count()
 }
 
 #[allow(deprecated)]
@@ -1760,14 +1775,6 @@ pub(crate) fn forwarding_target_revision_changed(
     current_revision: u64,
 ) -> bool {
     cached_revision != Some(current_revision)
-}
-
-pub(crate) fn target_settings_revision_needs_refresh(
-    observed_settings_generation: Option<u64>,
-    current_settings_generation: u64,
-    target_revision_is_known: bool,
-) -> bool {
-    observed_settings_generation != Some(current_settings_generation) || !target_revision_is_known
 }
 
 pub(crate) fn retain_forwarding_state_for_current_targets<T>(
@@ -5584,7 +5591,7 @@ async fn forward_publisher_remote_track(
         let mut track_subscribed_signaled_to_publisher = false;
         let mut forwarding_debug_heartbeat_due = false;
         let mut cached_forward_tracks_revision: Option<u64> = None;
-        let mut observed_track_settings_generation: Option<u64> = None;
+        let mut track_settings_changes = track_settings.subscribe_effective_changes();
         let mut cached_forward_targets = Vec::<ForwardTarget>::new();
 
         loop {
@@ -5647,13 +5654,61 @@ async fn forward_publisher_remote_track(
                         }
                         continue;
                     }
+                    change = track_settings_changes.recv() => {
+                        match change {
+                            Ok(change) => {
+                                let changed_targets = apply_effective_track_settings_change(
+                                    &mut cached_forward_targets,
+                                    &change,
+                                );
+                                if changed_targets > 0 {
+                                    tracing::debug!(
+                                        room = %room_name,
+                                        publisher_identity = %publisher_identity,
+                                        track_sid = %track_sid,
+                                        subscriber_identity = %change.subscriber_identity,
+                                        settings_revision = change.revision,
+                                        changed_targets,
+                                        "subscriber_track_settings_applied_to_forwarding_target"
+                                    );
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                resync_target_settings_revisions(
+                                    &mut cached_forward_targets,
+                                    &track_settings,
+                                );
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                        continue;
+                    }
                 }
             } else {
-                tokio::time::timeout(
-                    REMOTE_TRACK_EVENT_IDLE_LOG_INTERVAL,
-                    remote_track.recv_event(),
-                )
-                .await
+                tokio::select! {
+                    result = tokio::time::timeout(
+                        REMOTE_TRACK_EVENT_IDLE_LOG_INTERVAL,
+                        remote_track.recv_event(),
+                    ) => result,
+                    change = track_settings_changes.recv() => {
+                        match change {
+                            Ok(change) => {
+                                apply_effective_track_settings_change(
+                                    &mut cached_forward_targets,
+                                    &change,
+                                );
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                resync_target_settings_revisions(
+                                    &mut cached_forward_targets,
+                                    &track_settings,
+                                );
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                        continue;
+                    }
+                }
             };
             let recv_event = match recv_event_result {
                 Ok(recv_event) => recv_event,
@@ -5676,13 +5731,16 @@ async fn forward_publisher_remote_track(
                         let mut media_forwarding_true_targets = 0usize;
                         let mut signaling_subscribed_targets = 0usize;
                         let mut room_subscribed_targets = 0usize;
-                        let decision_revisions = ForwardingDecisionRevisions {
-                            media_subscription: media_subscriptions.revision(),
-                            auto_subscribe: auto_subscribe_preferences.revision(),
-                            track_settings: track_settings.revision(),
-                            room_media_subscription: rooms.media_subscription_revision(),
-                        };
+                        let media_subscription_revision = media_subscriptions.revision();
+                        let auto_subscribe_revision = auto_subscribe_preferences.revision();
+                        let room_media_subscription_revision = rooms.media_subscription_revision();
                         for target in &mut cached_forward_targets {
+                            let decision_revisions = ForwardingDecisionRevisions {
+                                media_subscription: media_subscription_revision,
+                                auto_subscribe: auto_subscribe_revision,
+                                track_settings: target.settings_revision.unwrap_or_default(),
+                                room_media_subscription: room_media_subscription_revision,
+                            };
                             let (key_room, key_publisher, key_track_sid, key_subscriber) =
                                 &target.key;
                             let has_media_forwarding = media_forwarding.contains(
@@ -5889,15 +5947,9 @@ async fn forward_publisher_remote_track(
                     let mut media_forwarding_true_targets = 0usize;
                     let mut signaling_subscribed_targets = 0usize;
                     let mut room_subscribed_targets = 0usize;
-                    let current_track_settings_generation = track_settings.revision();
-                    let previous_track_settings_generation = observed_track_settings_generation;
-                    observed_track_settings_generation = Some(current_track_settings_generation);
-                    let decision_revisions = ForwardingDecisionRevisions {
-                        media_subscription: media_subscriptions.revision(),
-                        auto_subscribe: auto_subscribe_preferences.revision(),
-                        track_settings: current_track_settings_generation,
-                        room_media_subscription: rooms.media_subscription_revision(),
-                    };
+                    let media_subscription_revision = media_subscriptions.revision();
+                    let auto_subscribe_revision = auto_subscribe_preferences.revision();
+                    let room_media_subscription_revision = rooms.media_subscription_revision();
                     let packet_codec_mime = video_ssrc_codec_mime
                         .get(&packet.header.ssrc)
                         .and_then(|mime| mime.as_deref());
@@ -5932,23 +5984,13 @@ async fn forward_publisher_remote_track(
                         None
                     };
                     for target in &mut cached_forward_targets {
-                        let (settings_revision, settings_changed) =
-                            refresh_target_settings_revision(
-                                target,
-                                previous_track_settings_generation,
-                                current_track_settings_generation,
-                                &track_settings,
-                            );
-                        if settings_changed {
-                            tracing::debug!(
-                                room = %room_name,
-                                publisher_identity = %publisher_identity,
-                                track_sid = %track_sid,
-                                subscriber_identity = %target.subscriber_identity(),
-                                settings_revision,
-                                "subscriber_video_layer_selector_reset_for_track_settings_change"
-                            );
-                        }
+                        let settings_revision = target.settings_revision.unwrap_or_default();
+                        let decision_revisions = ForwardingDecisionRevisions {
+                            media_subscription: media_subscription_revision,
+                            auto_subscribe: auto_subscribe_revision,
+                            track_settings: settings_revision,
+                            room_media_subscription: room_media_subscription_revision,
+                        };
                         let (key_room, key_publisher, key_track_sid, key_subscriber) = &target.key;
                         if collect_forwarding_debug_counts {
                             if media_forwarding.contains(

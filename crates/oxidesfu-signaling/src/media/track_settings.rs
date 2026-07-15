@@ -10,13 +10,37 @@ use livekit_protocol as proto;
 
 type TrackSettingsKey = (String, String, String);
 
-#[derive(Debug, Clone, Default)]
+/// A semantic effective-setting mutation for one subscriber forwarding target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EffectiveTrackSettingsChange {
+    pub(crate) room: String,
+    pub(crate) subscriber_identity: String,
+    pub(crate) track_sid: String,
+    pub(crate) revision: u64,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct TrackSettingsStore {
     settings: Arc<Mutex<HashMap<TrackSettingsKey, proto::UpdateTrackSettings>>>,
     revisions: Arc<Mutex<HashMap<TrackSettingsKey, u64>>>,
     pending: Arc<Mutex<HashMap<TrackSettingsKey, (u64, proto::UpdateTrackSettings)>>>,
     next_pending_generation: Arc<AtomicU64>,
     revision: Arc<AtomicU64>,
+    effective_changes: tokio::sync::broadcast::Sender<EffectiveTrackSettingsChange>,
+}
+
+impl Default for TrackSettingsStore {
+    fn default() -> Self {
+        let (effective_changes, _) = tokio::sync::broadcast::channel(256);
+        Self {
+            settings: Arc::default(),
+            revisions: Arc::default(),
+            pending: Arc::default(),
+            next_pending_generation: Arc::default(),
+            revision: Arc::default(),
+            effective_changes,
+        }
+    }
 }
 
 impl TrackSettingsStore {
@@ -24,11 +48,29 @@ impl TrackSettingsStore {
         self.revision.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    fn mark_changed(&self, key: TrackSettingsKey) {
+    fn mark_changed(&self, key: TrackSettingsKey) -> u64 {
         let revision = self.bump_revision();
         if let Ok(mut revisions) = self.revisions.lock() {
             revisions.insert(key, revision);
         }
+        revision
+    }
+
+    fn notify_effective_change(&self, key: TrackSettingsKey, revision: u64) {
+        let (room, subscriber_identity, track_sid) = key;
+        let _ = self.effective_changes.send(EffectiveTrackSettingsChange {
+            room,
+            subscriber_identity,
+            track_sid,
+            revision,
+        });
+    }
+
+    /// Subscribes a forwarding reader to semantic settings changes.
+    pub(crate) fn subscribe_effective_changes(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<EffectiveTrackSettingsChange> {
+        self.effective_changes.subscribe()
     }
 
     pub(crate) fn revision(&self) -> u64 {
@@ -132,6 +174,7 @@ impl TrackSettingsStore {
 
         let room = room.to_string();
         let identity = identity.to_string();
+        let mut changed = Vec::new();
         for track_sid in &request.track_sids {
             let key = (room.clone(), identity.clone(), track_sid.clone());
             let mut setting = request.clone();
@@ -140,7 +183,12 @@ impl TrackSettingsStore {
                 continue;
             }
             settings.insert(key.clone(), setting);
-            self.mark_changed(key);
+            changed.push((key.clone(), self.mark_changed(key)));
+        }
+        drop(settings);
+
+        for (key, revision) in changed {
+            self.notify_effective_change(key, revision);
         }
     }
 
@@ -150,10 +198,16 @@ impl TrackSettingsStore {
             identity.to_string(),
             track_sid.to_string(),
         );
-        if let Ok(mut settings) = self.settings.lock()
-            && settings.remove(&key).is_some()
-        {
-            self.mark_changed(key);
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.remove(&key);
+        }
+        let changed = self.settings.lock().ok().and_then(|mut settings| {
+            settings
+                .remove(&key)
+                .map(|_| self.mark_changed(key.clone()))
+        });
+        if let Some(revision) = changed {
+            self.notify_effective_change(key, revision);
         }
     }
 
@@ -193,6 +247,11 @@ impl TrackSettingsStore {
     }
 
     pub(crate) fn remove_participant(&self, room: &str, identity: &str) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.retain(|(key_room, key_identity, _), _| {
+                key_room != room || key_identity != identity
+            });
+        }
         let Ok(mut settings) = self.settings.lock() else {
             return;
         };
@@ -201,9 +260,18 @@ impl TrackSettingsStore {
             .filter(|(key_room, key_identity, _)| key_room == room && key_identity == identity)
             .cloned()
             .collect::<Vec<_>>();
-        for key in removed {
-            settings.remove(&key);
-            self.mark_changed(key);
+        let changed = removed
+            .into_iter()
+            .filter_map(|key| {
+                settings
+                    .remove(&key)
+                    .map(|_| (key.clone(), self.mark_changed(key)))
+            })
+            .collect::<Vec<_>>();
+        drop(settings);
+
+        for (key, revision) in changed {
+            self.notify_effective_change(key, revision);
         }
     }
 
@@ -621,6 +689,82 @@ mod tests {
         store.remove_for_track("room", "alice", "TR_a");
         assert!(store.revision() > after_upsert);
         assert!(store.revision_for_track("room", "alice", "TR_a") > after_upsert_a);
+    }
+
+    #[tokio::test]
+    async fn effective_track_setting_changes_notify_only_semantic_mutations_and_removals() {
+        let store = TrackSettingsStore::default();
+        let mut changes = store.subscribe_effective_changes();
+        let setting = proto::UpdateTrackSettings {
+            track_sids: vec!["TR_video".to_string()],
+            quality: proto::VideoQuality::Low as i32,
+            width: 320,
+            height: 180,
+            fps: 15,
+            ..Default::default()
+        };
+
+        store.upsert_from_request("room", "subscriber", &setting);
+        let applied = changes
+            .recv()
+            .await
+            .expect("effective setting should notify reader");
+        assert_eq!(applied.room, "room");
+        assert_eq!(applied.subscriber_identity, "subscriber");
+        assert_eq!(applied.track_sid, "TR_video");
+        assert_eq!(
+            applied.revision,
+            store.revision_for_track("room", "subscriber", "TR_video")
+        );
+
+        store.upsert_from_request("room", "subscriber", &setting);
+        assert!(matches!(
+            changes.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+
+        let deferred = proto::UpdateTrackSettings {
+            height: 360,
+            fps: 10,
+            ..setting.clone()
+        };
+        let (_, pending) = store.schedule_from_request("room", "subscriber", &deferred);
+        assert!(store.apply_pending_for_track("room", "subscriber", "TR_video", pending[0].1));
+        let debounced = changes
+            .recv()
+            .await
+            .expect("effective debounced setting should notify reader");
+        assert!(debounced.revision > applied.revision);
+        assert_eq!(
+            store
+                .get_for_track("room", "subscriber", "TR_video")
+                .expect("debounced setting should be effective")
+                .fps,
+            10
+        );
+
+        let pending_removal = proto::UpdateTrackSettings {
+            disabled: true,
+            ..deferred
+        };
+        let (_, pending) = store.schedule_from_request("room", "subscriber", &pending_removal);
+        store.remove_for_track("room", "subscriber", "TR_video");
+        let removed = changes
+            .recv()
+            .await
+            .expect("effective removal should notify reader");
+        assert_eq!(removed.room, "room");
+        assert_eq!(removed.subscriber_identity, "subscriber");
+        assert_eq!(removed.track_sid, "TR_video");
+        assert!(removed.revision > debounced.revision);
+        assert!(
+            !store.apply_pending_for_track("room", "subscriber", "TR_video", pending[0].1),
+            "removal must cancel a pending debounce so it cannot resurrect a subscription"
+        );
+        assert!(matches!(
+            changes.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
     }
 
     #[test]
