@@ -5,8 +5,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "install:browsers": "playwright install --with-deps firefox",
-    "test:firefox": "playwright test --project=firefox"
+    "install:browsers": "playwright install firefox",
+    "test:firefox": "node ./scripts/run-firefox.mjs",
+    "test:firefox:raw": "playwright test --project=firefox"
   },
   "dependencies": {
     "livekit-client": "2.20.1"

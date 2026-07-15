@@ -1,10 +1,51 @@
 const nativePeerConnection = window.RTCPeerConnection;
 const peerConnections = [];
+const peerConnectionStateHistory = [];
+const remoteIceCandidateHistory = [];
+let descriptionError;
+
+function observeDescriptionSetter(method) {
+  const original = nativePeerConnection.prototype[method];
+  nativePeerConnection.prototype[method] = async function (description) {
+    try {
+      return await original.call(this, description);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      descriptionError = `${method}(${description?.type ?? 'unknown'}): ${message}`;
+      throw error;
+    }
+  };
+}
+
+observeDescriptionSetter('setLocalDescription');
+observeDescriptionSetter('setRemoteDescription');
+
+const nativeAddIceCandidate = nativePeerConnection.prototype.addIceCandidate;
+nativePeerConnection.prototype.addIceCandidate = async function (candidate) {
+  remoteIceCandidateHistory.push(
+    `mid=${candidate?.sdpMid ?? 'null'},mline=${candidate?.sdpMLineIndex ?? 'null'}`,
+  );
+  try {
+    return await nativeAddIceCandidate.call(this, candidate);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    descriptionError = `addIceCandidate(${candidate?.sdpMid ?? 'null'}): ${message}`;
+    throw error;
+  }
+};
 
 window.RTCPeerConnection = class extends nativePeerConnection {
   constructor(...args) {
     super(...args);
     peerConnections.push(this);
+    const recordState = () => {
+      peerConnectionStateHistory.push(
+        `connection=${this.connectionState},ice=${this.iceConnectionState},gathering=${this.iceGatheringState}`,
+      );
+    };
+    this.addEventListener('connectionstatechange', recordState);
+    this.addEventListener('iceconnectionstatechange', recordState);
+    recordState();
   }
 };
 
@@ -83,6 +124,14 @@ try {
   window.oxidesfuClose = () => room.disconnect();
   ready.textContent = 'ready';
 } catch (error) {
-  ready.textContent = `error: ${error instanceof Error ? error.message : String(error)}`;
-  console.error('OxideSFU browser harness startup failed', error);
+  const message = error instanceof Error ? error.message : String(error);
+  const detail = descriptionError ?? message;
+  const states = peerConnectionStateHistory.join(' -> ');
+  const candidates = remoteIceCandidateHistory.join(' -> ');
+  ready.textContent = `error: ${detail}${states ? ` [${states}]` : ''}${candidates ? ` [remote candidates: ${candidates}]` : ''}`;
+  console.error('OxideSFU browser harness startup failed', error, {
+    descriptionError,
+    peerConnectionStateHistory,
+    remoteIceCandidateHistory,
+  });
 }

@@ -2976,6 +2976,80 @@ async fn single_pc_audio_mid_stays_active_when_adding_video_receive_section() {
 }
 
 #[tokio::test]
+async fn single_pc_unattached_audio_and_video_receive_sections_are_inactive() {
+    let state = state();
+    let room = "single-pc-unattached-receive-sections-room";
+    let identity = "browser-publisher";
+    join_participant_for_data_track_test(&state, room, identity);
+
+    let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::unbounded_channel();
+    let offer_sdp = "v=0\r\n\
+            o=- 1 2 IN IP4 0.0.0.0\r\n\
+            s=-\r\n\
+            t=0 0\r\n\
+            a=fingerprint:sha-256 D9:D5:EF:C3:37:B8:DC:12:14:87:47:0B:C9:73:2C:6F:D8:1A:1E:3C:C4:CE:2B:D4:EE:32:AC:B6:9B:26:D4:BF\r\n\
+            a=msid-semantic: WMS *\r\n\
+            a=group:BUNDLE 0 1 2\r\n\
+            m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
+            c=IN IP4 0.0.0.0\r\n\
+            a=setup:actpass\r\n\
+            a=mid:0\r\n\
+            a=sendrecv\r\n\
+            a=ice-ufrag:test\r\n\
+            a=ice-pwd:testpwd\r\n\
+            a=sctp-port:5000\r\n\
+            a=max-message-size:65536\r\n\
+            m=audio 9 UDP/TLS/RTP/SAVPF 109\r\n\
+            c=IN IP4 0.0.0.0\r\n\
+            a=rtpmap:109 opus/48000/2\r\n\
+            a=setup:actpass\r\n\
+            a=mid:1\r\n\
+            a=recvonly\r\n\
+            a=ice-ufrag:test\r\n\
+            a=ice-pwd:testpwd\r\n\
+            a=rtcp-mux\r\n\
+            m=video 9 UDP/TLS/RTP/SAVPF 96\r\n\
+            c=IN IP4 0.0.0.0\r\n\
+            a=rtpmap:96 VP8/90000\r\n\
+            a=setup:actpass\r\n\
+            a=mid:2\r\n\
+            a=recvonly\r\n\
+            a=ice-ufrag:test\r\n\
+            a=ice-pwd:testpwd\r\n\
+            a=rtcp-mux\r\n";
+
+    let response = answer_publisher_offer(
+        proto::SessionDescription {
+            r#type: "offer".to_string(),
+            sdp: offer_sdp.to_string(),
+            id: 1,
+            ..Default::default()
+        },
+        &state,
+        room,
+        identity,
+        &outbound_tx,
+        &state.rtc_transport_config(),
+    )
+    .await
+    .expect("initial browser offer should be answered");
+
+    let Some(proto::signal_response::Message::Answer(answer)) = response.message else {
+        panic!("expected answer response");
+    };
+    assert_eq!(
+        sdp_direction_for_mid(&answer.sdp, "1").as_deref(),
+        Some("inactive"),
+        "an unattached audio receive section must not answer recvonly"
+    );
+    assert_eq!(
+        sdp_direction_for_mid(&answer.sdp, "2").as_deref(),
+        Some("inactive"),
+        "an unattached video receive section must not answer recvonly"
+    );
+}
+
+#[tokio::test]
 async fn single_pc_vp8_only_receive_section_rejects_h264_with_inactive_answer_mid() {
     let state = state();
     let room = "single-pc-vp8-only-h264-rejection-room";

@@ -3828,10 +3828,8 @@ pub(crate) async fn answer_publisher_offer(
             .iter()
             .map(|section| section.mid.clone())
             .collect::<Vec<_>>();
-        let mut mids_to_force_recvonly = publisher_mids.clone();
-        mids_to_force_recvonly.extend(receive_mids.iter().cloned());
         existing_peer_connection
-            .set_transceivers_recvonly_by_mid(mids_to_force_recvonly.iter().map(String::as_str))
+            .set_transceivers_recvonly_by_mid(publisher_mids.iter().map(String::as_str))
             .await
             .map_err(|err| prost::DecodeError::new(err.to_string()))?;
         let attached_mid_to_track_id = attach_receive_section_forwarding_to_single_pc(
@@ -3859,9 +3857,7 @@ pub(crate) async fn answer_publisher_offer(
             .filter(|mid| !attached_mid_to_track_id.contains_key(*mid))
             .collect::<std::collections::HashSet<_>>();
         sdp = force_answer_mids_sendonly(&sdp, &attached_mids);
-        if receive_mids.len() == 1 {
-            sdp = force_answer_mids_inactive(&sdp, &unattached_receive_mids);
-        }
+        sdp = force_answer_mids_inactive(&sdp, &unattached_receive_mids);
         sdp = force_sendonly_sections_without_msid_recvonly(&sdp, &attached_mids);
         sdp = normalize_answer_direction_order(&sdp);
         if let Some(client_info) = state.participant_client_info(room_name, identity) {
@@ -3989,10 +3985,8 @@ pub(crate) async fn answer_publisher_offer(
         .iter()
         .map(|section| section.mid.clone())
         .collect::<Vec<_>>();
-    let mut mids_to_force_recvonly = publisher_mids.clone();
-    mids_to_force_recvonly.extend(receive_mids.iter().cloned());
     peer_connection
-        .set_transceivers_recvonly_by_mid(mids_to_force_recvonly.iter().map(String::as_str))
+        .set_transceivers_recvonly_by_mid(publisher_mids.iter().map(String::as_str))
         .await
         .map_err(|err| prost::DecodeError::new(err.to_string()))?;
     let attached_mid_to_track_id = attach_receive_section_forwarding_to_single_pc(
@@ -4019,9 +4013,7 @@ pub(crate) async fn answer_publisher_offer(
         .filter(|mid| !attached_mid_to_track_id.contains_key(*mid))
         .collect::<std::collections::HashSet<_>>();
     sdp = force_answer_mids_sendonly(&sdp, &attached_mids);
-    if receive_mids.len() == 1 {
-        sdp = force_answer_mids_inactive(&sdp, &unattached_receive_mids);
-    }
+    sdp = force_answer_mids_inactive(&sdp, &unattached_receive_mids);
     sdp = force_sendonly_sections_without_msid_recvonly(&sdp, &attached_mids);
     sdp = normalize_answer_direction_order(&sdp);
     if let Some(client_info) = state.participant_client_info(room_name, identity) {

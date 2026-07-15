@@ -29,6 +29,25 @@ const hasServerCredentials = Boolean(
 );
 test.skip(!hasServerCredentials, 'Set OXIDESFU_URL, OXIDESFU_API_KEY, and OXIDESFU_API_SECRET.');
 
+async function waitForHarnessReady(page: import('@playwright/test').Page, label: string, timeoutMs = 30_000) {
+  const status = page.getByTestId('browser-harness-ready');
+  const deadline = Date.now() + timeoutMs;
+  let lastStatus = '';
+
+  while (Date.now() < deadline) {
+    lastStatus = (await status.textContent())?.trim() ?? '';
+    if (lastStatus === 'ready') return;
+    if (lastStatus.startsWith('error:') || lastStatus.startsWith('disconnected:')) {
+      throw new Error(`${label} harness failed before ready: ${lastStatus}`);
+    }
+    await page.waitForTimeout(250);
+  }
+
+  throw new Error(
+    `${label} harness did not become ready within ${timeoutMs}ms (last status: ${lastStatus || 'empty'})`,
+  );
+}
+
 test('final adaptive low request keeps the active Firefox receiver advancing', async ({ browser }) => {
   const serverUrl = process.env.OXIDESFU_URL;
 
@@ -43,9 +62,9 @@ test('final adaptive low request keeps the active Firefox receiver advancing', a
   const subscriberUrl = `/?role=subscriber&url=${encodeURIComponent(serverUrl!)}&token=${encodeURIComponent(token('browser-subscriber', room))}`;
 
   await publisher.goto(publisherUrl);
-  await expect(publisher.getByTestId('browser-harness-ready')).toHaveText('ready', { timeout: 15_000 });
+  await waitForHarnessReady(publisher, 'publisher');
   await subscriber.goto(subscriberUrl);
-  await expect(subscriber.getByTestId('browser-harness-ready')).toHaveText('ready', { timeout: 15_000 });
+  await waitForHarnessReady(subscriber, 'subscriber');
   await expect(subscriber.getByTestId('remote-video')).toHaveJSProperty('srcObject', expect.anything());
 
   await subscriber.evaluate(() => {

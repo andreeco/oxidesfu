@@ -10,6 +10,8 @@ npm install
 npm run install:browsers
 ```
 
+`install:browsers` uses `playwright install firefox` (without `--with-deps`) to avoid distro-specific apt package resolution issues.
+
 `@playwright/test` is pinned to `1.61.1`. Playwright is intentionally isolated from the Rust workspace and does not run from `cargo test`.
 
 ## Required harness contract
@@ -45,15 +47,37 @@ visible=false -> visible=true -> final LOW dimensions
 
 ## Run
 
-Start OxideSFU separately, then provide its URL and fresh local API credentials only as process environment variables:
+Provide OxideSFU URL and local API credentials via environment variables:
 
 ```bash
-OXIDESFU_URL=http://127.0.0.1:7880 \
+OXIDESFU_URL=ws://127.0.0.1:7880 \
 OXIDESFU_API_KEY=devkey \
 OXIDESFU_API_SECRET=secret \
 npm run test:firefox
 ```
 
+`test:firefox` now auto-starts `oxidesfu-server` when nothing is listening on `OXIDESFU_URL` and stops it after the test run.
+
+If you want to run against an already-running server only, disable auto-start:
+
+```bash
+OXIDESFU_AUTOSTART=0 npm run test:firefox
+```
+
+For debugging the Playwright invocation without wrapper logic:
+
+```bash
+npm run test:firefox:raw
+```
+
 The test mints short-lived tokens in memory; it never writes them to artifacts.
 
-On failure, Playwright retains trace, screenshot, and video artifacts. Never place JWTs, API secrets, or full Meet URLs in test artifacts.
+By default, this harness keeps screenshots on failure, but disables trace/video to avoid storing JWT-bearing websocket URLs in artifacts.
+
+You can opt in for deeper debugging:
+
+```bash
+PLAYWRIGHT_TRACE=1 PLAYWRIGHT_VIDEO=1 npm run test:firefox
+```
+
+If you enable trace/video, treat generated artifacts as sensitive and avoid sharing them unredacted.
