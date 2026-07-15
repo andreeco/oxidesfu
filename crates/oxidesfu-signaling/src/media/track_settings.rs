@@ -14,6 +14,8 @@ type TrackSettingsKey = (String, String, String);
 pub(crate) struct TrackSettingsStore {
     settings: Arc<Mutex<HashMap<TrackSettingsKey, proto::UpdateTrackSettings>>>,
     revisions: Arc<Mutex<HashMap<TrackSettingsKey, u64>>>,
+    pending: Arc<Mutex<HashMap<TrackSettingsKey, (u64, proto::UpdateTrackSettings)>>>,
+    next_pending_generation: Arc<AtomicU64>,
     revision: Arc<AtomicU64>,
 }
 
@@ -48,6 +50,74 @@ impl TrackSettingsStore {
                     .copied()
             })
             .unwrap_or_default()
+    }
+
+    /// Queues ordinary settings for debounce while applying disabled-to-enabled immediately.
+    pub(crate) fn schedule_from_request(
+        &self,
+        room: &str,
+        identity: &str,
+        request: &proto::UpdateTrackSettings,
+    ) -> (Vec<String>, Vec<(String, u64)>) {
+        let mut immediate = Vec::new();
+        let mut deferred = Vec::new();
+        for track_sid in &request.track_sids {
+            let key = (room.to_string(), identity.to_string(), track_sid.clone());
+            let mut setting = request.clone();
+            setting.track_sids = vec![track_sid.clone()];
+            let current = self.get_for_track(room, identity, track_sid);
+            if current.as_ref() == Some(&setting) {
+                if let Ok(mut pending) = self.pending.lock() {
+                    pending.remove(&key);
+                }
+                continue;
+            }
+            if current.is_some_and(|current| current.disabled && !setting.disabled) {
+                self.upsert_from_request(room, identity, &setting);
+                if let Ok(mut pending) = self.pending.lock() {
+                    pending.remove(&key);
+                }
+                immediate.push(track_sid.clone());
+                continue;
+            }
+            let generation = self.next_pending_generation.fetch_add(1, Ordering::Relaxed) + 1;
+            if let Ok(mut pending) = self.pending.lock() {
+                pending.insert(key, (generation, setting));
+                deferred.push((track_sid.clone(), generation));
+            }
+        }
+        (immediate, deferred)
+    }
+
+    /// Applies a debounced setting only when it is still the most recent pending update.
+    pub(crate) fn apply_pending_for_track(
+        &self,
+        room: &str,
+        identity: &str,
+        track_sid: &str,
+        generation: u64,
+    ) -> bool {
+        let key = (
+            room.to_string(),
+            identity.to_string(),
+            track_sid.to_string(),
+        );
+        let setting = self.pending.lock().ok().and_then(|mut pending| {
+            pending
+                .get(&key)
+                .filter(|(candidate_generation, _)| *candidate_generation == generation)
+                .cloned()
+                .map(|(_, setting)| {
+                    pending.remove(&key);
+                    setting
+                })
+        });
+        let Some(setting) = setting else {
+            return false;
+        };
+        let before = self.revision_for_track(room, identity, track_sid);
+        self.upsert_from_request(room, identity, &setting);
+        self.revision_for_track(room, identity, track_sid) != before
     }
 
     pub(crate) fn upsert_from_request(
@@ -472,6 +542,38 @@ mod tests {
         assert!(update.subscribed_codecs[1].qualities[0].enabled);
         assert!(!update.subscribed_codecs[1].qualities[1].enabled);
         assert!(!update.subscribed_codecs[1].qualities[2].enabled);
+    }
+
+    #[allow(deprecated)]
+    #[test]
+    fn track_settings_store_debounces_rapid_dimension_updates_to_the_latest_value() {
+        let store = TrackSettingsStore::default();
+        let first = proto::UpdateTrackSettings {
+            track_sids: vec!["TR_video".to_string()],
+            quality: proto::VideoQuality::High as i32,
+            width: 468,
+            height: 940,
+            ..Default::default()
+        };
+        let second = proto::UpdateTrackSettings {
+            height: 121,
+            ..first.clone()
+        };
+
+        let (_, first_deferred) = store.schedule_from_request("room", "subscriber", &first);
+        let (_, second_deferred) = store.schedule_from_request("room", "subscriber", &second);
+        let first_generation = first_deferred[0].1;
+        let second_generation = second_deferred[0].1;
+
+        assert!(
+            !store.apply_pending_for_track("room", "subscriber", "TR_video", first_generation),
+            "a superseded dimension update must not become effective"
+        );
+        assert!(store.apply_pending_for_track("room", "subscriber", "TR_video", second_generation));
+        let effective = store
+            .get_for_track("room", "subscriber", "TR_video")
+            .expect("latest debounced setting should become effective");
+        assert_eq!((effective.width, effective.height), (468, 121));
     }
 
     #[test]

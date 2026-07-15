@@ -4316,6 +4316,7 @@ async fn track_setting_request_updates_dynacast_control_plane_state() {
     .expect("track-setting request should decode");
 
     assert!(response.is_none());
+    tokio::time::sleep(Duration::from_millis(120)).await;
 
     let persisted = state
         .track_settings

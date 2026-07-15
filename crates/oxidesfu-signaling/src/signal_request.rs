@@ -13,6 +13,21 @@ const MAX_PARTICIPANT_DATA_BLOB_BYTES: usize = 50 * 1024;
 // is currently not exposed by the crates.io livekit-protocol release used by this workspace.
 // Keep wire-compat by emitting numeric reason code directly.
 const REQUEST_RESPONSE_REASON_INVALID_REQUEST: i32 = 11;
+const TRACK_SETTINGS_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(100);
+
+fn emit_track_setting_quality_update(state: &SignalState, room_name: &str, track_sid: &str) {
+    let Some((publisher_identity, track)) =
+        crate::media::find_media_track_publisher(state, room_name, track_sid)
+    else {
+        return;
+    };
+    crate::router::session::emit_aggregate_subscribed_quality_update_for_track(
+        state,
+        room_name,
+        &publisher_identity,
+        &track,
+    );
+}
 
 // TODO(protocol-upgrade): remove these Compat* wire types when the crates.io
 // livekit-protocol release includes SignalRequest tags 22/23 and SignalResponse
@@ -728,22 +743,27 @@ pub(crate) async fn signal_response_for_request(
             state, room_name, identity, request,
         )),
         proto::signal_request::Message::TrackSetting(request) => {
-            state
+            let (immediate, deferred) = state
                 .track_settings
-                .upsert_from_request(room_name, identity, &request);
+                .schedule_from_request(room_name, identity, &request);
 
-            for track_sid in &request.track_sids {
-                let Some((publisher_identity, track)) =
-                    crate::media::find_media_track_publisher(state, room_name, track_sid)
-                else {
-                    continue;
-                };
-                crate::router::session::emit_aggregate_subscribed_quality_update_for_track(
-                    state,
-                    room_name,
-                    &publisher_identity,
-                    &track,
-                );
+            for track_sid in immediate {
+                emit_track_setting_quality_update(state, room_name, &track_sid);
+            }
+
+            for (track_sid, generation) in deferred {
+                let state = state.clone();
+                let room_name = room_name.to_string();
+                let identity = identity.to_string();
+                tokio::spawn(async move {
+                    tokio::time::sleep(TRACK_SETTINGS_DEBOUNCE).await;
+                    if state
+                        .track_settings
+                        .apply_pending_for_track(&room_name, &identity, &track_sid, generation)
+                    {
+                        emit_track_setting_quality_update(&state, &room_name, &track_sid);
+                    }
+                });
             }
             None
         }
