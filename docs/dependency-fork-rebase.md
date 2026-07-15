@@ -6,8 +6,18 @@ on a moving branch for a reproducible build.
 
 This guide uses **upstream** for the original project remote and **fork** for the
 `andreeco` remote. Confirm the actual remote names with `git remote -v` before
-running any command. For example, the local `rust-sdks` checkout currently uses
-`origin` for upstream LiveKit and `andreeco` for the fork.
+running any command. Current repository mapping is:
+
+| Fork | Real upstream | Upstream branch |
+| --- | --- | --- |
+| `rust-sdks` | `livekit/rust-sdks` | `origin/main` |
+| `rtc` | `webrtc-rs/rtc` | `origin/master` |
+| `webrtc` | `webrtc-rs/webrtc` | `origin/master` |
+| `turn-rs` | `mycrl/turn-rs` | `upstream/main` |
+
+The `andreeco` remote is the fork/publish remote in each checkout, although the
+TURN checkout currently names that remote `origin`; always verify with
+`git remote -v`.
 
 ## Required sequence
 
@@ -118,15 +128,28 @@ cargo test --workspace
 
 Run relevant Rust SDK conformance commands in `tools/conformance/` as well.
 
+Known validation caveats from the 2026-07-15 rebase: the strict Rust SDK clippy
+command also fails on pristine upstream `origin/main` in `device-info` because
+two compile-time assertion helpers are reported as dead code. The OxideSFU
+workspace run completed 112 tests, with two known failures awaiting follow-up:
+`rust_sdk_room_publisher_unpublish_then_republish_audio_emits_clean_remote_lifecycle`
+and `upstream_livekit::singlenode::test_single_node_update_subscription_permissions`.
+
 ## WebRTC and RTC forks
 
 The outer `webrtc` fork contains the RTC core as a submodule. Rebase and publish
-in this order:
+in this order. The outer commit and its submodule pointer must be updated
+atomically from OxideSFU's perspective:
 
-1. Rebase and validate the RTC core fork.
-2. Update the outer `webrtc` fork submodule pointer to the final RTC commit.
-3. Rebase and validate the outer `webrtc` fork.
+1. Rebase and publish the RTC fork.
+2. Update the outer checkout's `rtc` submodule to the resulting RTC commit and
+   commit that pointer in the outer fork.
+3. Rebase and publish the outer WebRTC fork.
 4. Pin the final outer commit in OxideSFU.
+
+Do not update only the standalone RTC fork and assume an older outer commit will
+fetch it; Cargo fetches the submodule commit recorded by the outer revision.
+
 
 The outer fork must pass its focused remote-track and forwarding tests before the
 OxideSFU pin moves. The current OxideSFU workspace dependencies are:
@@ -135,7 +158,7 @@ OxideSFU pin moves. The current OxideSFU workspace dependencies are:
 | --- | --- | --- |
 | `webrtc` | root `Cargo.toml` workspace dependencies | Pin the final outer fork commit. |
 | `rtc` | root `Cargo.toml` workspace dependencies | Keep at the same outer fork commit as `webrtc`. |
-| `rtc-stun` | root `Cargo.toml` workspace dependencies | Separate historical fork pin; update only when its own compatibility change is rebased and validated. |
+| `rtc-stun` | root `Cargo.toml` workspace dependencies | Keep at the same outer WebRTC revision as `webrtc` and `rtc` unless a deliberate compatibility exception is documented. |
 
 After updating `webrtc` or `rtc`, run `cargo update -p webrtc` and commit the
 resulting `Cargo.toml` and `Cargo.lock` change. At minimum run the focused RTC
@@ -151,6 +174,18 @@ and signaling tests plus the Firefox browser receiver contract.
 Do not change crates.io dependencies such as the root workspace's production
 `livekit-protocol = "0.7.10"` merely because the Rust SDK test fork advances.
 They are separate dependency roles and must be upgraded deliberately.
+
+## Current published compatibility revisions
+
+These values are examples of the revisions recorded by the 2026-07-15 rebase;
+update this table after future rebases:
+
+| Fork | Published compatibility revision |
+| --- | --- |
+| Rust SDK | `88aab601eac42fbba83e196a9b30206cf63945b8` |
+| RTC core fork branch | `c7eee66` (full commit in the fork log) |
+| Outer WebRTC (recorded RTC submodule) | `4472644b29c85b1f2e5638f1feb662484823d2e5` (records RTC `fdc7492` in its submodule) |
+| TURN | `79d1bc2a0b92329df51f827036d284ad577ca1ff` |
 
 ## Commit record
 
