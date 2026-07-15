@@ -235,6 +235,43 @@ impl MediaFeedbackState {
     }
 }
 
+#[derive(Debug, Clone)]
+struct RetransmissionCacheSlot {
+    sequence_number: u16,
+    packet: rtc::rtp::Packet,
+}
+
+#[derive(Debug, Clone)]
+struct RetransmissionCache {
+    slots: [Option<RetransmissionCacheSlot>; RTP_RETRANSMISSION_CACHE_SIZE],
+}
+
+impl Default for RetransmissionCache {
+    fn default() -> Self {
+        Self {
+            slots: std::array::from_fn(|_| None),
+        }
+    }
+}
+
+impl RetransmissionCache {
+    fn insert(&mut self, packet: rtc::rtp::Packet) {
+        let sequence_number = packet.header.sequence_number;
+        let index = sequence_number as usize % RTP_RETRANSMISSION_CACHE_SIZE;
+        self.slots[index] = Some(RetransmissionCacheSlot {
+            sequence_number,
+            packet,
+        });
+    }
+
+    fn get(&self, sequence_number: u16) -> Option<rtc::rtp::Packet> {
+        let index = sequence_number as usize % RTP_RETRANSMISSION_CACHE_SIZE;
+        self.slots[index]
+            .as_ref()
+            .and_then(|slot| (slot.sequence_number == sequence_number).then(|| slot.packet.clone()))
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct SubscriberRtpState {
     highest_incoming_ext_seq_by_ssrc: HashMap<u32, u64>,
@@ -245,8 +282,7 @@ struct SubscriberRtpState {
     timestamp_mapper_base_incoming: Option<u32>,
     timestamp_mapper_base_outgoing: Option<u32>,
     timestamp_mapper_last_outgoing: Option<u32>,
-    retransmission_cache: HashMap<u16, rtc::rtp::Packet>,
-    retransmission_order: VecDeque<u16>,
+    retransmission_cache: RetransmissionCache,
     keyframe_gate: KeyFrameRequestGate,
     fir_sequence_numbers: HashMap<u32, u8>,
     sender_report_mapper: SenderReportMapper,
@@ -304,9 +340,7 @@ impl SubscriberRtpState {
     }
 
     fn retransmission_packet(&self, outgoing_sequence_number: u16) -> Option<rtc::rtp::Packet> {
-        self.retransmission_cache
-            .get(&outgoing_sequence_number)
-            .cloned()
+        self.retransmission_cache.get(outgoing_sequence_number)
     }
 
     fn should_forward_keyframe_request(
@@ -411,23 +445,7 @@ impl SubscriberRtpState {
     }
 
     fn cache_retransmission_packet(&mut self, packet: rtc::rtp::Packet) {
-        let outgoing_sequence_number = packet.header.sequence_number;
-        match self.retransmission_cache.entry(outgoing_sequence_number) {
-            std::collections::hash_map::Entry::Occupied(mut entry) => {
-                entry.insert(packet);
-            }
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                self.retransmission_order
-                    .push_back(outgoing_sequence_number);
-                entry.insert(packet);
-            }
-        }
-
-        while self.retransmission_order.len() > RTP_RETRANSMISSION_CACHE_SIZE {
-            if let Some(evicted_sequence_number) = self.retransmission_order.pop_front() {
-                self.retransmission_cache.remove(&evicted_sequence_number);
-            }
-        }
+        self.retransmission_cache.insert(packet);
     }
 
     fn extend_sequence_number(
@@ -907,6 +925,29 @@ mod tests {
     }
 
     #[test]
+    fn retransmission_cache_rejects_stale_sequence_that_shares_a_ring_slot() {
+        let mut cache = RetransmissionCache::default();
+        let first_sequence_number = u16::MAX - 10;
+
+        for offset in 0..=RTP_RETRANSMISSION_CACHE_SIZE as u16 {
+            let sequence_number = first_sequence_number.wrapping_add(offset);
+            cache.insert(packet_with_seq(sequence_number));
+        }
+
+        assert!(
+            cache.get(first_sequence_number).is_none(),
+            "a stale sequence sharing the retained packet's ring slot must not be retransmitted"
+        );
+
+        let retained_sequence_number =
+            first_sequence_number.wrapping_add(RTP_RETRANSMISSION_CACHE_SIZE as u16);
+        let retained = cache
+            .get(retained_sequence_number)
+            .expect("the current packet in the slot must remain retransmittable");
+        assert_eq!(retained.header.sequence_number, retained_sequence_number);
+    }
+
+    #[test]
     fn retransmission_cache_evicts_oldest_packet_beyond_capacity() {
         let store = RtpForwardingStore::default();
         let key = forwarding_key("subscriber-a");
@@ -915,43 +956,31 @@ mod tests {
             let _ = store.rewrite_packet_for_subscriber(&key, packet_with_seq(sequence_number));
         }
 
-        let (cache_len, first_retained, last_retained) = {
-            let states = store
-                .states
-                .lock()
-                .expect("rtp forwarding store lock should not be poisoned");
-            let state = states
-                .get(&key)
-                .expect("subscriber forwarding state should exist")
-                .lock()
-                .expect("subscriber forwarding state lock should not be poisoned");
-            (
-                state.retransmission_cache.len(),
-                state
-                    .retransmission_order
-                    .front()
-                    .copied()
-                    .unwrap_or_default(),
-                state
-                    .retransmission_order
-                    .back()
-                    .copied()
-                    .unwrap_or_default(),
-            )
-        };
-
-        assert_eq!(cache_len, RTP_RETRANSMISSION_CACHE_SIZE);
-        assert_eq!(first_retained, 10);
-        assert_eq!(last_retained, RTP_RETRANSMISSION_CACHE_SIZE as u16 + 9);
-
         assert!(
             store.get_retransmission_packet(&key, 0).is_none(),
             "oldest packet should be evicted from retransmission cache"
         );
+        let first_retained = 10;
+        assert_eq!(
+            store
+                .get_retransmission_packet(&key, first_retained)
+                .expect("first retained packet should remain in retransmission cache")
+                .header
+                .sequence_number,
+            first_retained
+        );
         let newest = RTP_RETRANSMISSION_CACHE_SIZE as u16 + 9;
+        assert_eq!(
+            store
+                .get_retransmission_packet(&key, newest)
+                .expect("newest packet should remain in retransmission cache")
+                .header
+                .sequence_number,
+            newest
+        );
         assert!(
-            store.get_retransmission_packet(&key, newest).is_some(),
-            "newest packet should remain in retransmission cache"
+            store.get_retransmission_packet(&key, 1_000).is_none(),
+            "a cache miss must not return a packet from a colliding slot"
         );
     }
 
