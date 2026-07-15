@@ -10,6 +10,17 @@ use crate::{
 const MAX_AGENT_DISPATCH_METADATA_BYTES: usize = 512 * 1024;
 const MAX_AGENT_DISPATCH_ATTRIBUTES_BYTES: usize = 64 * 1024;
 
+fn room_snapshot(record: &RoomRecord) -> proto::Room {
+    let mut room = record.room.clone();
+    room.num_publishers = record
+        .participants
+        .values()
+        .filter(|participant| !participant.tracks.is_empty())
+        .count()
+        .min(u32::MAX as usize) as u32;
+    room
+}
+
 fn default_enabled_codecs() -> Vec<proto::Codec> {
     vec![
         proto::Codec {
@@ -109,18 +120,14 @@ impl RoomStore {
             .read()
             .map_err(|_| RoomStoreError::LockPoisoned)?;
         if names.is_empty() {
-            let mut rooms = inner
-                .rooms
-                .values()
-                .map(|record| record.room.clone())
-                .collect::<Vec<_>>();
+            let mut rooms = inner.rooms.values().map(room_snapshot).collect::<Vec<_>>();
             rooms.sort_by(|a, b| a.name.cmp(&b.name));
             return Ok(rooms);
         }
 
         Ok(names
             .iter()
-            .filter_map(|name| inner.rooms.get(name).map(|record| record.room.clone()))
+            .filter_map(|name| inner.rooms.get(name).map(room_snapshot))
             .collect())
     }
 
@@ -1465,7 +1472,7 @@ impl RoomStore {
         inner
             .rooms
             .get(room)
-            .map(|record| record.room.clone())
+            .map(room_snapshot)
             .ok_or(RoomStoreError::RoomNotFound)
     }
 

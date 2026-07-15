@@ -3010,6 +3010,19 @@ mod tests {
                 }),
             )
             .expect("hidden should join");
+        for identity in ["visible", "hidden"] {
+            state
+                .rooms
+                .add_participant_track(
+                    "test-room",
+                    identity,
+                    proto::TrackInfo {
+                        sid: format!("TR_{identity}"),
+                        ..Default::default()
+                    },
+                )
+                .expect("publisher track should be stored");
+        }
 
         let response = post(
             router(state),
@@ -3027,6 +3040,8 @@ mod tests {
             proto::ListRoomsResponse::decode(body_bytes(response).await).expect("rooms decode");
         assert_eq!(rooms.rooms.len(), 1);
         assert_eq!(rooms.rooms[0].num_participants, 1);
+        // LiveKit counts publishers independently from hidden-participant visibility.
+        assert_eq!(rooms.rooms[0].num_publishers, 2);
     }
 
     #[tokio::test]
