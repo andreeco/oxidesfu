@@ -4,7 +4,7 @@ use std::{
 };
 
 use super::*;
-use crate::media::{VideoIngressDecision, VideoIngressFilter};
+use crate::media::{SubscriberVideoLayerSelector, VideoIngressDecision};
 
 static NEXT_TRACK_SID_COUNTER: AtomicU64 = AtomicU64::new(0);
 const RTCP_EFFECTS_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
@@ -4943,6 +4943,53 @@ pub(crate) fn publisher_session_is_current(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) async fn rebuild_forwarding_tracks_after_runtime_codec_change(
+    state: &SignalState,
+    room_name: &str,
+    publisher_identity: &str,
+    track_sid: &str,
+) {
+    state
+        .forward_tracks
+        .revoke_track_reader(room_name, publisher_identity, track_sid);
+    let stale_forward_tracks =
+        state
+            .forward_tracks
+            .remove_all_for_track(room_name, publisher_identity, track_sid);
+
+    for (subscriber_identity, forward_track) in stale_forward_tracks {
+        state.rtp_forwarding.remove(
+            room_name,
+            publisher_identity,
+            track_sid,
+            &subscriber_identity,
+        );
+        state.media_forwarding.remove(
+            room_name,
+            publisher_identity,
+            track_sid,
+            &subscriber_identity,
+        );
+
+        let Some((subscriber_pc, _connection_kind)) = state
+            .peer_connections
+            .media_receiver_for_identity(room_name, &subscriber_identity)
+        else {
+            continue;
+        };
+        if let Err(error) = subscriber_pc.remove_forwarding_track(&forward_track).await {
+            tracing::warn!(
+                room = room_name,
+                publisher_identity,
+                subscriber_identity,
+                track_sid,
+                error = %error,
+                "failed_to_detach_runtime_codec_changed_forwarding_sender"
+            );
+        }
+    }
+}
+
 async fn forward_publisher_remote_track(
     state: &SignalState,
     remote_track: oxidesfu_rtc::RemoteTrack,
@@ -5015,15 +5062,26 @@ async fn forward_publisher_remote_track(
         return Ok(());
     }
 
-    if track_info.r#type == proto::TrackType::Video as i32 {
+    let expected_mime_prefix = match track_info.r#type {
+        kind if kind == proto::TrackType::Audio as i32 => "audio/",
+        kind if kind == proto::TrackType::Video as i32 => "video/",
+        _ => "",
+    };
+    if !expected_mime_prefix.is_empty() {
         for ssrc in remote_track.ssrcs().await {
             let Some(codec_mime) = remote_track.codec_mime_for_ssrc(ssrc).await else {
                 continue;
             };
             let normalized_mime = codec_mime.trim().to_ascii_lowercase();
-            if normalized_mime.is_empty() {
+            let is_primary_media_codec = normalized_mime.starts_with(expected_mime_prefix)
+                && !normalized_mime.contains("rtx")
+                && !normalized_mime.contains("red")
+                && !normalized_mime.contains("ulpfec")
+                && !normalized_mime.contains("telephone-event");
+            if !is_primary_media_codec {
                 continue;
             }
+            let runtime_mime_changed = !track_info.mime_type.eq_ignore_ascii_case(&normalized_mime);
             if let Ok(participant) = rooms.set_participant_track_mime_type(
                 room_name,
                 publisher_identity,
@@ -5032,7 +5090,20 @@ async fn forward_publisher_remote_track(
             ) {
                 state.updates.broadcast_update(room_name, participant);
             }
-            track_info.mime_type = normalized_mime;
+            track_info.mime_type = normalized_mime.clone();
+            track_info.codecs = vec![proto::SimulcastCodecInfo {
+                mime_type: normalized_mime,
+                ..Default::default()
+            }];
+            if runtime_mime_changed {
+                rebuild_forwarding_tracks_after_runtime_codec_change(
+                    state,
+                    room_name,
+                    publisher_identity,
+                    &track_info.sid,
+                )
+                .await;
+            }
             break;
         }
     }
@@ -5116,7 +5187,11 @@ async fn forward_publisher_remote_track(
             std::collections::HashMap::<(String, String, String, String), u64>::new();
         let mut logged_audio_rewrite_drop_keys =
             std::collections::HashSet::<(String, String, String, String)>::new();
-        let mut video_ingress_filter = VideoIngressFilter::default();
+        let mut subscriber_video_layer_selectors = std::collections::HashMap::<
+            (String, String, String, String),
+            SubscriberVideoLayerSelector,
+        >::new();
+        let mut video_layer_selector_track_settings_revision = track_settings.revision();
         let mut video_ssrc_rids = std::collections::HashMap::<u32, Option<String>>::new();
         let mut video_ssrc_codec_mime = std::collections::HashMap::<u32, Option<String>>::new();
         let mut video_ssrc_is_repair = std::collections::HashMap::<u32, bool>::new();
@@ -5126,12 +5201,12 @@ async fn forward_publisher_remote_track(
             );
         let mut target_primary_ssrc_by_forward_key =
             std::collections::HashMap::<(String, String, String, String), Option<u32>>::new();
+        let mut target_payload_type_by_forward_key =
+            std::collections::HashMap::<(String, String, String, String), Option<u8>>::new();
         let mut subscriber_forwarding_decision_cache = std::collections::HashMap::<
             (String, String, String, String),
             CachedForwardingDecision,
         >::new();
-        let mut dropped_non_selected_video_ssrc_count: u64 = 0;
-        let mut dropped_non_dominant_payload_type_count: u64 = 0;
         let mut dropped_repair_video_ssrc_count: u64 = 0;
         let mut had_forward_targets: Option<bool> = None;
         let mut track_subscribed_signaled_to_publisher = false;
@@ -5145,6 +5220,20 @@ async fn forward_publisher_remote_track(
             std::collections::HashSet::<(String, String, String, String)>::new();
 
         loop {
+            if !forward_tracks.owns_track_reader(
+                &room_name,
+                &publisher_identity,
+                &track_sid,
+                reader_lease,
+            ) {
+                tracing::debug!(
+                    room = %room_name,
+                    publisher_identity = %publisher_identity,
+                    track_sid = %track_sid,
+                    "stopping_forward_track_reader_after_lease_revocation"
+                );
+                break;
+            }
             if !publisher_session_is_current(
                 &rooms,
                 &room_name,
@@ -5240,12 +5329,10 @@ async fn forward_publisher_remote_track(
                             }
                         }
 
-                        let selected_incoming_ssrc = video_ingress_filter.selected_ssrc();
                         tracing::warn!(
                             room = %room_name,
                             publisher_identity = %publisher_identity,
                             track_sid = %track_sid,
-                            selected_incoming_ssrc = ?selected_incoming_ssrc,
                             total_forward_targets,
                             filtered_out_targets,
                             media_forwarding_true_targets,
@@ -5254,27 +5341,6 @@ async fn forward_publisher_remote_track(
                             idle_ms = REMOTE_TRACK_EVENT_IDLE_LOG_INTERVAL.as_millis(),
                             "video_forwarding_remote_track_event_idle"
                         );
-
-                        if total_forward_targets > 0
-                            && filtered_out_targets < total_forward_targets
-                            && let Some(media_ssrc) = selected_incoming_ssrc
-                        {
-                            let _ = remote_track
-                                .write_rtcp_packets(vec![Box::new(
-                                    rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication {
-                                        sender_ssrc: 0,
-                                        media_ssrc,
-                                    },
-                                )])
-                                .await;
-                            tracing::debug!(
-                                room = %room_name,
-                                publisher_identity = %publisher_identity,
-                                track_sid = %track_sid,
-                                media_ssrc,
-                                "video_forwarding_idle_keyframe_request"
-                            );
-                        }
                     }
                     continue;
                 }
@@ -5283,12 +5349,10 @@ async fn forward_publisher_remote_track(
             match recv_event {
                 Ok(oxidesfu_rtc::RemoteTrackEvent::RtpPacket(packet)) => {
                     let rtp_event_at = std::time::Instant::now();
-                    let mut force_keyframe_refresh = false;
                     let mut packet_video_quality: Option<proto::VideoQuality> = None;
+                    let mut effective_video_ssrc = packet.header.ssrc;
                     if is_video_track {
                         let incoming_ssrc = packet.header.ssrc;
-                        let incoming_payload_type = packet.header.payload_type;
-                        let now_millis = current_unix_millis().max(0) as u64;
 
                         if !video_ssrc_rids.contains_key(&incoming_ssrc) {
                             let rid = remote_track.rid_for_ssrc(incoming_ssrc).await;
@@ -5327,7 +5391,7 @@ async fn forward_publisher_remote_track(
                             continue;
                         }
 
-                        let effective_ssrc =
+                        effective_video_ssrc =
                             if let Some(Some(rid)) = video_ssrc_rids.get(&incoming_ssrc) {
                                 let primary = video_rid_primary_ssrc
                                     .entry(rid.clone())
@@ -5337,10 +5401,6 @@ async fn forward_publisher_remote_track(
                                 incoming_ssrc
                             };
 
-                        let previous_selected_ssrc = video_ingress_filter.selected_ssrc();
-                        let previous_dominant_payload_type =
-                            video_ingress_filter.dominant_payload_type();
-
                         packet_video_quality = packet_video_quality_for_track(
                             incoming_ssrc,
                             video_ssrc_rids
@@ -5349,91 +5409,6 @@ async fn forward_publisher_remote_track(
                             &layer_quality_by_ssrc,
                             &layer_quality_by_rid,
                         );
-
-                        match video_ingress_filter.observe_packet(
-                            now_millis,
-                            effective_ssrc,
-                            incoming_payload_type,
-                        ) {
-                            VideoIngressDecision::Forward {
-                                selected_ssrc_changed,
-                            } => {
-                                if let Some(dominant_payload_type) =
-                                    video_ingress_filter.dominant_payload_type()
-                                    && previous_dominant_payload_type != Some(dominant_payload_type)
-                                {
-                                    tracing::info!(
-                                        room = %room_name,
-                                        publisher_identity = %publisher_identity,
-                                        track_sid = %track_sid,
-                                        dominant_payload_type,
-                                        "video_dominant_payload_type_selected"
-                                    );
-                                }
-
-                                if selected_ssrc_changed {
-                                    let new_selected_ssrc = video_ingress_filter
-                                        .selected_ssrc()
-                                        .unwrap_or(effective_ssrc);
-                                    match previous_selected_ssrc {
-                                        Some(previous_selected_ssrc) => {
-                                            tracing::info!(
-                                                room = %room_name,
-                                                publisher_identity = %publisher_identity,
-                                                track_sid = %track_sid,
-                                                previous_selected_incoming_ssrc = previous_selected_ssrc,
-                                                new_selected_incoming_ssrc = new_selected_ssrc,
-                                                "video_selected_incoming_ssrc_switched"
-                                            );
-                                        }
-                                        None => {
-                                            tracing::info!(
-                                                room = %room_name,
-                                                publisher_identity = %publisher_identity,
-                                                track_sid = %track_sid,
-                                                selected_incoming_ssrc = new_selected_ssrc,
-                                                "video_selected_incoming_ssrc"
-                                            );
-                                        }
-                                    }
-                                    force_keyframe_refresh = true;
-                                }
-                            }
-                            VideoIngressDecision::DropNonDominantPayloadType => {
-                                dropped_non_dominant_payload_type_count =
-                                    dropped_non_dominant_payload_type_count.saturating_add(1);
-                                if dropped_non_dominant_payload_type_count % 200 == 0 {
-                                    tracing::debug!(
-                                        room = %room_name,
-                                        publisher_identity = %publisher_identity,
-                                        track_sid = %track_sid,
-                                        incoming_ssrc,
-                                        incoming_payload_type,
-                                        dominant_payload_type = ?video_ingress_filter.dominant_payload_type(),
-                                        dropped_non_dominant_payload_type_count,
-                                        "video_packet_dropped_non_dominant_payload_type"
-                                    );
-                                }
-                                continue;
-                            }
-                            VideoIngressDecision::DropNonSelectedSsrc => {
-                                dropped_non_selected_video_ssrc_count =
-                                    dropped_non_selected_video_ssrc_count.saturating_add(1);
-                                if dropped_non_selected_video_ssrc_count % 300 == 0 {
-                                    tracing::debug!(
-                                        room = %room_name,
-                                        publisher_identity = %publisher_identity,
-                                        track_sid = %track_sid,
-                                        selected_incoming_ssrc = ?video_ingress_filter.selected_ssrc(),
-                                        dropped_incoming_ssrc = incoming_ssrc,
-                                        effective_incoming_ssrc = effective_ssrc,
-                                        dropped_non_selected_video_ssrc_count,
-                                        "video_packet_dropped_non_selected_ssrc"
-                                    );
-                                }
-                                continue;
-                            }
-                        }
                     }
 
                     if !logged_first_rtp {
@@ -5493,7 +5468,11 @@ async fn forward_publisher_remote_track(
 
                     target_primary_ssrc_by_forward_key
                         .retain(|key, _| current_forward_keys.contains(key));
+                    target_payload_type_by_forward_key
+                        .retain(|key, _| current_forward_keys.contains(key));
                     subscriber_forwarding_decision_cache
+                        .retain(|key, _| current_forward_keys.contains(key));
+                    subscriber_video_layer_selectors
                         .retain(|key, _| current_forward_keys.contains(key));
 
                     if is_video_track {
@@ -5506,15 +5485,10 @@ async fn forward_publisher_remote_track(
 
                         for key in current_forward_keys {
                             let now = std::time::Instant::now();
-                            let should_request = if force_keyframe_refresh {
-                                true
-                            } else {
-                                match keyframe_requested_forward_keys.get(key) {
-                                    None => true,
-                                    Some(last_at) => {
-                                        now.duration_since(*last_at)
-                                            > std::time::Duration::from_secs(3)
-                                    }
+                            let should_request = match keyframe_requested_forward_keys.get(key) {
+                                None => true,
+                                Some(last_at) => {
+                                    now.duration_since(*last_at) > std::time::Duration::from_secs(3)
                                 }
                             };
                             if !should_request {
@@ -5538,6 +5512,12 @@ async fn forward_publisher_remote_track(
                                 )])
                                 .await;
                         }
+                    }
+
+                    let track_settings_revision = track_settings.revision();
+                    if video_layer_selector_track_settings_revision != track_settings_revision {
+                        subscriber_video_layer_selectors.clear();
+                        video_layer_selector_track_settings_revision = track_settings_revision;
                     }
 
                     let total_forward_targets = forward_tracks_for_track.len();
@@ -5632,15 +5612,48 @@ async fn forward_publisher_remote_track(
                             continue;
                         }
 
-                        if track_supports_quality_control {
-                            if !should_forward_video_packet_for_requested_quality(
+                        let packet_is_eligible_for_subscriber = !track_supports_quality_control
+                            || should_forward_video_packet_for_requested_quality(
                                 decision.requested_max_quality,
                                 packet_video_quality,
-                            ) {
+                            );
+                        let layer_selection = subscriber_video_layer_selectors
+                            .entry(key.clone())
+                            .or_default()
+                            .observe_packet(
+                                effective_video_ssrc,
+                                packet_is_eligible_for_subscriber,
+                            );
+                        match layer_selection {
+                            VideoIngressDecision::Forward {
+                                selected_ssrc_changed,
+                            } => {
+                                if selected_ssrc_changed {
+                                    let _ = remote_track
+                                        .write_rtcp_packets(vec![Box::new(
+                                            rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication {
+                                                sender_ssrc: 0,
+                                                media_ssrc: packet.header.ssrc,
+                                            },
+                                        )])
+                                        .await;
+                                    tracing::debug!(
+                                        room = %room_name,
+                                        publisher_identity = %publisher_identity,
+                                        track_sid = %track_sid,
+                                        subscriber_identity = %key.3,
+                                        selected_incoming_ssrc = effective_video_ssrc,
+                                        "subscriber_video_layer_selected"
+                                    );
+                                }
+                            }
+                            VideoIngressDecision::DropNonSelectedSsrc => {
                                 filtered_out_targets += 1;
                                 continue;
                             }
+                        }
 
+                        if track_supports_quality_control {
                             if let Some(requested_fps) = decision.requested_fps {
                                 let fps_state = subscriber_video_fps_forward_state
                                     .entry(key.clone())
@@ -5670,12 +5683,31 @@ async fn forward_publisher_remote_track(
                             .get(key)
                             .copied()
                             .flatten();
+                        let negotiated_payload_type = if is_video_track {
+                            None
+                        } else if let Some(payload_type) = target_payload_type_by_forward_key
+                            .get(key)
+                            .copied()
+                            .flatten()
+                        {
+                            Some(payload_type)
+                        } else {
+                            let payload_type = match local_forward_track.bind_result().await {
+                                oxidesfu_rtc::ForwardTrackBindResult::Compatible {
+                                    payload_type,
+                                } => Some(payload_type),
+                                oxidesfu_rtc::ForwardTrackBindResult::Pending
+                                | oxidesfu_rtc::ForwardTrackBindResult::UnsupportedCodec => None,
+                            };
+                            target_payload_type_by_forward_key.insert(key.clone(), payload_type);
+                            payload_type
+                        };
                         let rewritten_packet = rtp_forwarding
-                            .rewrite_packet_for_subscriber_with_target_ssrc_and_payload_pin_ref(
+                            .rewrite_packet_for_subscriber_with_target_ssrc_and_payload_type(
                                 key,
-                                &packet,
+                                packet.clone(),
                                 target_ssrc,
-                                !is_video_track,
+                                negotiated_payload_type,
                             );
                         let Some(rewritten_packet) = rewritten_packet else {
                             if is_video_track {
@@ -5685,7 +5717,9 @@ async fn forward_publisher_remote_track(
                                         publisher_identity = %publisher_identity,
                                         track_sid = %track_sid,
                                         subscriber_identity = %key.3,
-                                        selected_incoming_ssrc = ?video_ingress_filter.selected_ssrc(),
+                                        selected_incoming_ssrc = ?subscriber_video_layer_selectors
+                                            .get(key)
+                                            .and_then(SubscriberVideoLayerSelector::selected_ssrc),
                                         incoming_ssrc = packet.header.ssrc,
                                         incoming_sequence_number = packet.header.sequence_number,
                                         "video_forwarding_packet_rewrite_dropped"

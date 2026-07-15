@@ -818,6 +818,108 @@ async fn cleanup_participant_runtime_state_detaches_departed_publisher_forward_t
 }
 
 #[tokio::test]
+async fn runtime_audio_codec_change_detaches_existing_forwarding_sender_and_clears_state() {
+    let state = state();
+    let room = "runtime-codec-change-room";
+    let publisher = "alice";
+    let subscriber = "bob";
+    state
+        .rooms
+        .create_room(proto::CreateRoomRequest {
+            name: room.to_string(),
+            ..Default::default()
+        })
+        .expect("room should create");
+    let (_room, publisher_info, _participants) = state
+        .rooms
+        .join_participant(room, publisher, "Alice", String::new(), HashMap::new())
+        .expect("publisher should join");
+    state
+        .rooms
+        .join_participant(room, subscriber, "Bob", String::new(), HashMap::new())
+        .expect("subscriber should join");
+
+    let track = proto::TrackInfo {
+        sid: "TR_audio".to_string(),
+        r#type: proto::TrackType::Audio as i32,
+        mime_type: "audio/opus".to_string(),
+        codecs: vec![proto::SimulcastCodecInfo {
+            mime_type: "audio/opus".to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    state
+        .rooms
+        .add_participant_track(room, publisher, track.clone())
+        .expect("audio track should be added");
+
+    let subscriber_pc = state.peer_connections.insert(
+        room,
+        subscriber,
+        SignalConnectionTarget::Subscriber,
+        oxidesfu_rtc::create_peer_connection()
+            .await
+            .expect("subscriber peer connection should create"),
+    );
+    let forward_track = subscriber_pc
+        .add_forwarding_track_with_mime(
+            &publisher_info.sid,
+            &track.sid,
+            rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Audio,
+            Some("audio/opus"),
+        )
+        .await
+        .expect("Opus forwarding sender should be added");
+    state
+        .forward_tracks
+        .insert(room, publisher, &track.sid, subscriber, forward_track);
+    assert!(
+        state
+            .media_forwarding
+            .insert_once(room, publisher, &track.sid, subscriber)
+    );
+
+    let before_sender_count = subscriber_pc
+        .debug_transceiver_summary()
+        .await
+        .expect("transceiver summary before codec change should succeed")
+        .iter()
+        .filter(|entry| entry.contains("has_sender=true"))
+        .count();
+
+    session::rebuild_forwarding_tracks_after_runtime_codec_change(
+        &state, room, publisher, &track.sid,
+    )
+    .await;
+
+    let after_sender_count = subscriber_pc
+        .debug_transceiver_summary()
+        .await
+        .expect("transceiver summary after codec change should succeed")
+        .iter()
+        .filter(|entry| entry.contains("has_sender=true"))
+        .count();
+    assert!(
+        after_sender_count < before_sender_count,
+        "a runtime codec change must detach the stale forwarding sender"
+    );
+    assert!(
+        state
+            .forward_tracks
+            .list_for_track(room, publisher, &track.sid)
+            .is_empty(),
+        "the stale forwarding sender must be removed from the forwarding store"
+    );
+    assert!(
+        !state
+            .media_forwarding
+            .contains(room, publisher, &track.sid, subscriber),
+        "the forwarding marker must be cleared so the PCMA sender can be recreated"
+    );
+}
+
+#[tokio::test]
 async fn cleanup_participant_runtime_state_detaches_orphaned_forward_tracks_not_in_room_snapshot() {
     let state = state();
     state
@@ -7518,11 +7620,19 @@ fn forward_track_reader_lease_is_owned_by_one_remote_track_instance() {
         !store.release_track_reader("room", "publisher", "TR_a", first.wrapping_add(1)),
         "a stale remote track must not release the current reader lease"
     );
-    assert!(store.release_track_reader("room", "publisher", "TR_a", first));
+    assert!(store.owns_track_reader("room", "publisher", "TR_a", first));
+    assert!(
+        store.revoke_track_reader("room", "publisher", "TR_a"),
+        "a runtime codec replacement must revoke the old reader lease"
+    );
+    assert!(
+        !store.owns_track_reader("room", "publisher", "TR_a", first),
+        "the revoked reader must observe that it no longer owns the track"
+    );
 
     let replacement = store
         .acquire_track_reader("room", "publisher", "TR_a")
-        .expect("a replacement remote track should acquire after the old reader ends");
+        .expect("a codec-replacement remote track should acquire immediately");
     assert_ne!(replacement, first);
     assert!(
         !store.release_track_reader("room", "publisher", "TR_a", first),
@@ -8462,7 +8572,7 @@ fn rtp_forwarding_slice2_retransmission_cache_returns_recent_packets() {
 }
 
 #[test]
-fn rtp_forwarding_slice3_audio_payload_type_is_pinned_when_enabled() {
+fn rtp_forwarding_rewrites_audio_to_the_destination_negotiated_payload_type() {
     let key = (
         "room".to_string(),
         "publisher".to_string(),
@@ -8470,38 +8580,23 @@ fn rtp_forwarding_slice3_audio_payload_type_is_pinned_when_enabled() {
         "subscriber".to_string(),
     );
     let store = RtpForwardingStore::default();
+    let mut incoming = rtp_packet(5100, 9);
+    incoming.header.payload_type = 109;
 
-    let mut first_packet = rtp_packet(5000, 7);
-    first_packet.header.payload_type = 111;
-    let first = store
-        .rewrite_packet_for_subscriber_with_target_ssrc_and_payload_pin(
+    let rewritten = store
+        .rewrite_packet_for_subscriber_with_target_ssrc_and_payload_type(
             &key,
-            first_packet,
+            incoming,
             None,
-            true,
+            Some(111),
         )
-        .expect("first packet should forward");
-    assert_eq!(first.header.payload_type, 111);
+        .expect("packet should forward");
+    assert_eq!(rewritten.header.payload_type, 111);
 
-    let mut switched_packet = rtp_packet(5001, 8);
-    switched_packet.header.payload_type = 109;
-    let switched = store
-        .rewrite_packet_for_subscriber_with_target_ssrc_and_payload_pin(
-            &key,
-            switched_packet,
-            None,
-            true,
-        )
-        .expect("payload-type switch packet should still forward");
-    assert_eq!(
-        switched.header.payload_type, 111,
-        "audio forwarding should keep a stable payload type after source/renegotiation switches"
-    );
-
-    let retransmit_switched = store
-        .get_retransmission_packet(&key, switched.header.sequence_number)
-        .expect("rewritten switched packet should be cached with pinned payload type");
-    assert_eq!(retransmit_switched.header.payload_type, 111);
+    let retransmission = store
+        .get_retransmission_packet(&key, rewritten.header.sequence_number)
+        .expect("rewritten packet should be cached for retransmission");
+    assert_eq!(retransmission.header.payload_type, 111);
 }
 
 #[test]

@@ -252,7 +252,6 @@ struct SubscriberRtpState {
     sender_report_mapper: SenderReportMapper,
     media_feedback: MediaFeedbackState,
     media_feedback_adaptation: MediaFeedbackAdaptationState,
-    pinned_payload_type: Option<u8>,
 }
 
 impl SubscriberRtpState {
@@ -260,7 +259,6 @@ impl SubscriberRtpState {
         &mut self,
         packet: &rtc::rtp::Packet,
         target_ssrc: Option<u32>,
-        pin_payload_type: bool,
     ) -> Option<rtc::rtp::Packet> {
         let incoming_ssrc = packet.header.ssrc;
         let incoming_seq = packet.header.sequence_number;
@@ -294,12 +292,7 @@ impl SubscriberRtpState {
         if let Some(target_ssrc) = target_ssrc {
             rewritten_packet.header.ssrc = target_ssrc;
         }
-        if pin_payload_type {
-            let pinned_payload_type = *self
-                .pinned_payload_type
-                .get_or_insert(rewritten_packet.header.payload_type);
-            rewritten_packet.header.payload_type = pinned_payload_type;
-        }
+
         self.cache_retransmission_packet(rewritten_packet.clone());
         Some(rewritten_packet)
     }
@@ -523,41 +516,30 @@ impl RtpForwardingStore {
         packet: rtc::rtp::Packet,
         target_ssrc: Option<u32>,
     ) -> Option<rtc::rtp::Packet> {
-        self.rewrite_packet_for_subscriber_with_target_ssrc_and_payload_pin(
+        self.rewrite_packet_for_subscriber_with_target_ssrc_and_payload_type(
             key,
             packet,
             target_ssrc,
-            false,
+            None,
         )
     }
 
-    pub(crate) fn rewrite_packet_for_subscriber_with_target_ssrc_and_payload_pin(
+    /// Rewrites an RTP packet using the payload type negotiated by this forwarding target.
+    pub(crate) fn rewrite_packet_for_subscriber_with_target_ssrc_and_payload_type(
         &self,
         key: &ForwardTrackKey,
-        packet: rtc::rtp::Packet,
+        mut packet: rtc::rtp::Packet,
         target_ssrc: Option<u32>,
-        pin_payload_type: bool,
+        negotiated_payload_type: Option<u8>,
     ) -> Option<rtc::rtp::Packet> {
-        self.rewrite_packet_for_subscriber_with_target_ssrc_and_payload_pin_ref(
-            key,
-            &packet,
-            target_ssrc,
-            pin_payload_type,
-        )
-    }
-
-    pub(crate) fn rewrite_packet_for_subscriber_with_target_ssrc_and_payload_pin_ref(
-        &self,
-        key: &ForwardTrackKey,
-        packet: &rtc::rtp::Packet,
-        target_ssrc: Option<u32>,
-        pin_payload_type: bool,
-    ) -> Option<rtc::rtp::Packet> {
+        if let Some(payload_type) = negotiated_payload_type {
+            packet.header.payload_type = payload_type;
+        }
         let state = self.get_or_insert_state(key)?;
         state
             .lock()
             .ok()
-            .and_then(|mut state| state.rewrite_packet(packet, target_ssrc, pin_payload_type))
+            .and_then(|mut state| state.rewrite_packet(&packet, target_ssrc))
     }
 
     pub(crate) fn get_retransmission_packet(

@@ -399,6 +399,39 @@ impl ForwardTrackStore {
             .unwrap_or_default()
     }
 
+    /// Removes every forwarding sender for one publisher track.
+    pub(crate) fn remove_all_for_track(
+        &self,
+        room: &str,
+        publisher_identity: &str,
+        track_sid: &str,
+    ) -> Vec<(String, oxidesfu_rtc::LocalRtpTrack)> {
+        let keys = self
+            .tracks
+            .lock()
+            .map(|tracks| {
+                tracks
+                    .keys()
+                    .filter(
+                        |(candidate_room, candidate_publisher, candidate_track, _subscriber)| {
+                            candidate_room == room
+                                && candidate_publisher == publisher_identity
+                                && candidate_track == track_sid
+                        },
+                    )
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        keys.into_iter()
+            .filter_map(|(_room, _publisher, _track, subscriber_identity)| {
+                self.remove(room, publisher_identity, track_sid, &subscriber_identity)
+                    .map(|track| (subscriber_identity, track))
+            })
+            .collect()
+    }
+
     pub(crate) fn remove(
         &self,
         room: &str,
@@ -596,6 +629,35 @@ impl ForwardTrackStore {
                 Some(lease)
             }
         })
+    }
+
+    /// Returns whether an inbound reader still owns its lease.
+    pub(crate) fn owns_track_reader(
+        &self,
+        room: &str,
+        publisher_identity: &str,
+        track_sid: &str,
+        lease: u64,
+    ) -> bool {
+        let key = Self::reader_key(room, publisher_identity, track_sid);
+        self.started
+            .lock()
+            .is_ok_and(|started| started.get(&key) == Some(&lease))
+    }
+
+    /// Revokes the current reader lease so a replacement remote track can take over.
+    pub(crate) fn revoke_track_reader(
+        &self,
+        room: &str,
+        publisher_identity: &str,
+        track_sid: &str,
+    ) -> bool {
+        let key = Self::reader_key(room, publisher_identity, track_sid);
+        self.started
+            .lock()
+            .ok()
+            .and_then(|mut started| started.remove(&key))
+            .is_some()
     }
 
     /// Releases a reader lease only when it is still owned by that remote-track instance.
