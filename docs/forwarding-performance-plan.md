@@ -2,7 +2,7 @@
 
 ## Status
 
-**Active investigation.** The large simulcast forwarding workloads are functionally healthy but use more server CPU than the upstream Go LiveKit reference.
+**Phase 1 complete; further optimization is optional and evidence-driven.** The large simulcast forwarding workloads are functionally healthy and the latest two-round mixed high-simulcast comparison is within 5% CPU of the upstream Go LiveKit reference.
 
 This plan records the evidence, reference behavior, target architecture, staged implementation plan, and completion gates for closing that gap without weakening LiveKit compatibility.
 
@@ -28,12 +28,21 @@ Wall-clock completion remains close to the Go reference and peak RSS is lower. T
 
 ### Benchmark history
 
-A one-run post-change comparison and a two-run follow-up remain above the benchmark's configured 25% CPU regression gate. The latest two-round run observed:
+The earlier two-run comparison was above the benchmark's configured 25% CPU regression gate:
 
 ```text
 OxideSFU median CPU: 9.53 s
 LiveKit median CPU:  6.97 s
 Gate:                 8.71 s
+```
+
+After the reader-local target-state refactor, a fresh two-run comparison completed within the gate:
+
+```text
+OxideSFU median CPU: 7.87 s
+LiveKit median CPU:  7.53 s
+Delta:                +4.5%
+OxideSFU peak RSS: 108.95 MiB (Go: 204.54 MiB; -46.7%)
 ```
 
 These limited samples are useful directionally but are not a stable capacity claim. Use at least five runs on an otherwise idle host for acceptance decisions.
@@ -55,6 +64,9 @@ The successful runs delivered all 160 subscriber tracks with zero reported packe
 | WebRTC peer-connection `poll_write` | 2.38% | 2.41% | 2.64% |
 | forwarding reader closure | 1.11% | 2.16% | 1.70% |
 | `String::clone` | 1.57% | 1.23% | 1.21% |
+| `BuildHasher::hash_one` | — | — | 1.16% after reader-local target state |
+
+The post-refactor profile delivered all 160 subscriber tracks with zero reported packet loss. Its largest samples were WebRTC peer-connection `poll_write` (3.15%) and `__vdso_clock_gettime` (3.03%); no forwarding map hash operation is a leading hotspot.
 
 Representative artifacts are deliberately ignored under `target/profiles/`; reproduce them rather than committing binary profiling data.
 
@@ -117,18 +129,9 @@ Relevant implementation files:
 - `crates/oxidesfu-signaling/src/media/track_settings.rs` — canonical settings and debounce state.
 - `crates/oxidesfu-signaling/src/media/video_ingress.rs` — per-subscriber simulcast SSRC selection.
 
-The current reader caches active targets and their `SubscriberRtpForwarder` handles on `ForwardTrackStore` revision changes. However, several target-local concerns are still represented as parallel compound-key maps in the reader:
+The reader caches active targets and their `SubscriberRtpForwarder` handles on `ForwardTrackStore` revision changes. `ForwardTarget` now owns the forwarding decision, selector, settings revision, FPS state, target SSRC/payload-type cache, keyframe timestamp, first-forward/drop flags, and write-error counts. A revision refresh preserves state for still-active targets and drops removed targets with the old vector entry.
 
-- forwarding decision cache;
-- layer selector;
-- settings revision;
-- FPS state;
-- target SSRC and negotiated payload type;
-- keyframe retry timestamp;
-- first-forward / drop logging flags;
-- write error count.
-
-This remaining representation explains the continued SipHash and `String::clone` samples.
+The remaining packet-loop store query is the global track-settings generation check. It is not a dominant profile sample after Phase 1, but Phase 2 remains the path to eliminate it if a future benchmark or profile proves it worthwhile.
 
 ## Target architecture
 
@@ -205,6 +208,8 @@ Do not begin a phase without a current successful media delivery contract. A pro
 
 ### Phase 1 — Reader-local target state
 
+**Status: complete in the current working tree.**
+
 **Objective:** replace parallel per-target maps in `forward_publisher_remote_track` with `ForwardTarget` fields.
 
 1. Add focused unit tests for target rebuild and removal:
@@ -216,6 +221,8 @@ Do not begin a phase without a current successful media delivery contract. A pro
 3. Move target SSRC, payload type, selector, FPS, decision, logging flags, and write errors into the struct.
 4. Preserve shared `SubscriberRtpForwarder` state so RTCP retransmission and sender-report mapping remain coherent.
 5. Delete the superseded parallel maps only after the contracts pass.
+
+**Result:** the steady target iteration has no compound-key `HashMap` lookup. The only shared state retained is the target-bound `SubscriberRtpForwarder`, which is intentionally shared with RTCP retransmission and sender-report handling. Validation: `cargo test -p oxidesfu-signaling` (484 passed, 3 ignored); Rust SDK simulcast quality-switch contract passed; the two-run benchmark recorded +4.5% CPU vs Go with all 160 tracks delivered and zero loss.
 
 **Acceptance:** no compound-key `HashMap` lookup in the steady target iteration except explicitly retained shared RTCP state.
 
