@@ -6029,8 +6029,7 @@ async fn relayed_signal_request_bytes_captures_outbound_only_responses() {
 }
 
 #[tokio::test]
-async fn reconcile_publisher_media_tracks_after_answer_retains_unbound_tracks_when_offer_has_no_active_media_mids()
- {
+async fn reconcile_publisher_media_tracks_keeps_single_pc_unbound_track_when_offer_is_inactive() {
     let state = state();
     let room = "reconcile-no-active-mids-room";
     let publisher = "publisher";
@@ -6075,6 +6074,7 @@ async fn reconcile_publisher_media_tracks_after_answer_retains_unbound_tracks_wh
         unpublish_like_offer_sdp,
         &HashMap::new(),
         &HashMap::new(),
+        true,
     )
     .await;
 
@@ -6085,7 +6085,7 @@ async fn reconcile_publisher_media_tracks_after_answer_retains_unbound_tracks_wh
     assert_eq!(
         participant_after.tracks.len(),
         1,
-        "an unbound publication must remain available for later browser RTP correlation"
+        "a single-PC inactive reserve section must not remove an unbound publication"
     );
     assert_eq!(participant_after.tracks[0].sid, published_track.sid);
 }
@@ -6136,6 +6136,7 @@ async fn reconcile_publisher_media_tracks_falls_back_to_single_unbound_browser_t
         offer_sdp,
         &sdp_track_ids,
         &signal_cids,
+        false,
     )
     .await;
 
@@ -6282,6 +6283,7 @@ async fn reconcile_publisher_media_tracks_after_answer_does_not_remove_a_track_a
         old_offer_sdp,
         &old_offer_mid_to_track_id,
         &HashMap::new(),
+        false,
     )
     .await;
 
@@ -6315,7 +6317,7 @@ async fn reconcile_publisher_media_tracks_after_answer_does_not_remove_a_track_a
 }
 
 #[tokio::test]
-async fn reconcile_publisher_media_tracks_after_answer_removes_negotiated_track_when_offer_has_no_active_publish_mids()
+async fn reconcile_publisher_media_tracks_after_answer_removes_dual_pc_track_when_sender_is_removed()
  {
     let state = state();
     let room = "reconcile-no-active-mids-removes-negotiated-room";
@@ -6341,22 +6343,17 @@ async fn reconcile_publisher_media_tracks_after_answer_removes_negotiated_track_
         panic!("expected TrackPublished response");
     };
     let published_track = track_published.track.expect("track info should be present");
-
-    let participant_with_mid = state
-        .rooms
-        .set_participant_track_mid(room, publisher, &published_track.sid, "0")
-        .expect("track mid should be set");
-    assert_eq!(participant_with_mid.tracks.len(), 1);
-    assert_eq!(participant_with_mid.tracks[0].mid, "0");
-    state
-        .rooms
-        .set_participant_track_sdp_cid(
-            room,
-            publisher,
-            &published_track.sid,
-            "negotiated-browser-track-id",
-        )
-        .expect("track SDP CID should be set");
+    assert_eq!(
+        state
+            .rooms
+            .get_participant(room, publisher)
+            .expect("participant should exist")
+            .tracks
+            .first()
+            .expect("publication should be stored")
+            .sid,
+        published_track.sid,
+    );
 
     let unpublish_offer_sdp = "v=0\r\n\
             m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
@@ -6369,6 +6366,7 @@ async fn reconcile_publisher_media_tracks_after_answer_removes_negotiated_track_
         unpublish_offer_sdp,
         &HashMap::new(),
         &HashMap::new(),
+        false,
     )
     .await;
 
@@ -6378,8 +6376,56 @@ async fn reconcile_publisher_media_tracks_after_answer_removes_negotiated_track_
         .expect("participant should still exist");
     assert!(
         participant_after.tracks.is_empty(),
-        "negotiated publish track should be removed when no active publish mids remain"
+        "a dual-PC publisher's inactive section must unpublish its uniquely matching unbound track"
     );
+}
+
+#[tokio::test]
+async fn reconcile_publisher_media_tracks_keeps_single_pc_unbound_track_for_inactive_reserve() {
+    let state = state();
+    let room = "reconcile-single-pc-recvonly-reserve-room";
+    let publisher = "publisher";
+
+    join_participant_for_data_track_test(&state, room, publisher);
+    let response = add_track_response(
+        &state,
+        room,
+        publisher,
+        proto::AddTrackRequest {
+            cid: "audio-cid-single-pc-reserve".to_string(),
+            name: "mic".to_string(),
+            r#type: proto::TrackType::Audio as i32,
+            source: proto::TrackSource::Microphone as i32,
+            ..Default::default()
+        },
+    )
+    .await;
+    let Some(proto::signal_response::Message::TrackPublished(track_published)) = response.message
+    else {
+        panic!("expected TrackPublished response");
+    };
+    let published_track = track_published.track.expect("track info should be present");
+    let reserve_offer_sdp = "v=0\r\n\
+            m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+            a=mid:0\r\n\
+            a=inactive\r\n";
+    reconcile_publisher_media_tracks_after_answer(
+        &state,
+        room,
+        publisher,
+        reserve_offer_sdp,
+        &HashMap::new(),
+        &HashMap::new(),
+        true,
+    )
+    .await;
+
+    let participant_after = state
+        .rooms
+        .get_participant(room, publisher)
+        .expect("participant should still exist");
+    assert_eq!(participant_after.tracks.len(), 1);
+    assert_eq!(participant_after.tracks[0].sid, published_track.sid);
 }
 
 #[test]

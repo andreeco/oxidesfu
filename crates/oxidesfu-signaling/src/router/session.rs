@@ -3890,6 +3890,7 @@ pub(crate) async fn answer_publisher_offer(
             &offer_sdp,
             &reconcile_mid_to_track_id,
             &offer_proto_mid_to_track_id,
+            single_pc_mode,
         )
         .await;
         ensure_existing_media_forwarding_for_subscriber(state, room_name, identity).await;
@@ -4081,6 +4082,7 @@ pub(crate) async fn answer_publisher_offer(
         &offer_sdp,
         &reconcile_mid_to_track_id,
         &offer_proto_mid_to_track_id,
+        single_pc_mode,
     )
     .await;
     ensure_existing_media_forwarding_for_subscriber(state, room_name, identity).await;
@@ -6549,6 +6551,7 @@ pub(super) async fn reconcile_publisher_media_tracks_after_answer(
     offer_sdp: &str,
     mid_to_sdp_track_id: &HashMap<String, String>,
     mid_to_signal_cid: &HashMap<String, String>,
+    single_pc_mode: bool,
 ) {
     let active_mids = active_publisher_mids_from_offer(offer_sdp);
     let offered_mids = publisher_mids_from_offer(offer_sdp);
@@ -6630,16 +6633,44 @@ pub(super) async fn reconcile_publisher_media_tracks_after_answer(
     let Ok(publisher) = state.rooms.get_participant(room_name, publisher_identity) else {
         return;
     };
-
     let stale_tracks: Vec<proto::TrackInfo> = publisher
         .tracks
         .iter()
         .filter(|track| {
-            !track.mid.is_empty()
+            let is_bound_to_removed_mid = !track.mid.is_empty()
                 && track.codecs.iter().any(|codec| !codec.sdp_cid.is_empty())
                 && offered_mids.contains(&track.mid)
                 && !active_mids.contains(&track.mid)
-                && explicitly_removed_mids.contains(&track.mid)
+                && explicitly_removed_mids.contains(&track.mid);
+
+            let is_uniquely_unbound_dual_pc_track = !single_pc_mode
+                && track.mid.is_empty()
+                && track.codecs.iter().all(|codec| codec.sdp_cid.is_empty())
+                && offer_sections.iter().any(|section| {
+                    section.kind
+                        == Some(if track.r#type == proto::TrackType::Video as i32 {
+                            ReceiveSectionKind::Video
+                        } else {
+                            ReceiveSectionKind::Audio
+                        })
+                        && explicitly_removed_mids.contains(&section.mid)
+                })
+                && publisher
+                    .tracks
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.r#type == track.r#type
+                            && candidate.mid.is_empty()
+                            && candidate
+                                .codecs
+                                .iter()
+                                .all(|codec| codec.sdp_cid.is_empty())
+                    })
+                    .take(2)
+                    .count()
+                    == 1;
+
+            is_bound_to_removed_mid || is_uniquely_unbound_dual_pc_track
         })
         .cloned()
         .collect();
