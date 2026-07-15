@@ -62,7 +62,7 @@ if (!role || !url || !token) {
 }
 
 try {
-  const { Room, RoomEvent, Track, VideoQuality, createLocalVideoTrack } =
+  const { LocalVideoTrack, Room, RoomEvent, Track, VideoQuality } =
     await import('livekit-client');
   const room = new Room();
     let publication;
@@ -86,10 +86,28 @@ try {
   await room.connect(signalUrl, token);
 
   if (role === 'publisher') {
-    ready.textContent = 'acquiring-video';
-    const track = await createLocalVideoTrack({
-      resolution: { width: 1280, height: 720 },
-    });
+    ready.textContent = 'creating-synthetic-video';
+    const canvas = document.createElement('canvas');
+    canvas.width = 1280;
+    canvas.height = 720;
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('Could not create a canvas rendering context');
+
+    let frame = 0;
+    const drawFrame = () => {
+      context.fillStyle = '#1a365d';
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.fillStyle = '#f7fafc';
+      context.font = 'bold 64px sans-serif';
+      context.fillText(`OxideSFU frame ${frame++}`, 80, 180);
+      context.fillStyle = '#63b3ed';
+      context.fillRect((frame * 13) % 1000, 300, 180, 180);
+    };
+    drawFrame();
+    window.setInterval(drawFrame, 33);
+    const mediaTrack = canvas.captureStream(30).getVideoTracks()[0];
+    if (!mediaTrack) throw new Error('Canvas capture did not provide a video track');
+    const track = new LocalVideoTrack(mediaTrack, undefined, true);
     ready.textContent = 'publishing-video';
     await room.localParticipant.publishTrack(track, { simulcast: true });
   }

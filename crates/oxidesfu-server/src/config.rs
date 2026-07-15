@@ -131,10 +131,19 @@ pub fn signal_ice_servers_for_participant(
 pub fn rtc_transport_config_from_server_config(
     config: &ServerConfig,
 ) -> oxidesfu_rtc::RtcTransportConfig {
-    // Bind the RTC sockets to the configured server address rather than a wildcard.
-    // A wildcard candidate is not a routable TURN peer address: packets arrive from
-    // the concrete interface address and must match RFC 8656's IP-scoped permission.
-    let rtc_bind_ip = config.bind.ip();
+    // A loopback HTTP bind is convenient for local signaling, but browser test
+    // sandboxes can use a separate network namespace. Bind RTC UDP to all local
+    // interfaces in that case so ICE can advertise a routable host candidate.
+    // Non-loopback production binds remain explicit for TURN permission scoping.
+    let configured_bind_ip = config.bind.ip();
+    let rtc_bind_ip = if configured_bind_ip.is_loopback() {
+        match configured_bind_ip {
+            IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+        }
+    } else {
+        configured_bind_ip
+    };
     let udp_addrs = if let Some(udp_port) = config.rtc_udp_port {
         vec![SocketAddr::new(rtc_bind_ip, udp_port).to_string()]
     } else if let (Some(start), Some(end)) = (

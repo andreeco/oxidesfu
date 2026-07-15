@@ -914,6 +914,7 @@ mod tests {
 
         assert!(!candidate.is_final);
         assert!(candidate.candidate_init_json.contains("candidate:"));
+        assert!(candidate.candidate_init_json.contains("\"sdpMid\":\"0\""));
         assert!(candidate.candidate_init_json.contains("sdpMLineIndex"));
 
         offerer.close().await.expect("offerer should close");

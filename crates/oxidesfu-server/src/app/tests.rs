@@ -1110,6 +1110,17 @@ fn rtc_transport_config_external_ip_mode_advertises_only_configured_node_ip() {
 }
 
 #[test]
+fn rtc_transport_config_widens_loopback_signaling_bind_for_browser_ice() {
+    let mut config = ServerConfig::development();
+    config.bind = "127.0.0.1:7880".parse().expect("socket should parse");
+    config.rtc_udp_port = Some(50_100);
+
+    let transport = rtc_transport_config_from_server_config(&config);
+
+    assert_eq!(transport.udp_addrs, vec!["0.0.0.0:50100"]);
+}
+
+#[test]
 fn rtc_transport_config_from_server_config_does_not_bind_fixed_tcp_per_peer_connection() {
     let mut enabled = ServerConfig::development();
     enabled.rtc_allow_tcp_fallback = true;
@@ -1119,7 +1130,7 @@ fn rtc_transport_config_from_server_config_does_not_bind_fixed_tcp_per_peer_conn
     enabled.rtc_tcp_port = 7991;
 
     let enabled_transport = rtc_transport_config_from_server_config(&enabled);
-    assert_eq!(enabled_transport.udp_addrs, vec!["127.0.0.1:50100"]);
+    assert_eq!(enabled_transport.udp_addrs, vec!["0.0.0.0:50100"]);
     assert!(
         enabled_transport.tcp_addrs.is_empty(),
         "fixed ICE/TCP ports require a shared listener; binding them per peer connection collides"
@@ -1129,7 +1140,7 @@ fn rtc_transport_config_from_server_config_does_not_bind_fixed_tcp_per_peer_conn
     let mut disabled = enabled.clone();
     disabled.rtc_allow_tcp_fallback = false;
     let disabled_transport = rtc_transport_config_from_server_config(&disabled);
-    assert_eq!(disabled_transport.udp_addrs, vec!["127.0.0.1:50100"]);
+    assert_eq!(disabled_transport.udp_addrs, vec!["0.0.0.0:50100"]);
     assert!(disabled_transport.tcp_addrs.is_empty());
     assert_eq!(disabled_transport.nat_1to1_ips, vec!["203.0.113.10"]);
 
@@ -1156,9 +1167,9 @@ fn rtc_transport_config_from_server_config_expands_udp_port_range() {
     assert_eq!(
         transport.udp_addrs,
         vec![
-            "127.0.0.1:50100".to_string(),
-            "127.0.0.1:50101".to_string(),
-            "127.0.0.1:50102".to_string(),
+            "0.0.0.0:50100".to_string(),
+            "0.0.0.0:50101".to_string(),
+            "0.0.0.0:50102".to_string(),
         ]
     );
     assert!(transport.tcp_addrs.is_empty());
@@ -1172,7 +1183,7 @@ fn rtc_transport_config_from_server_config_uses_udp_mux_port_when_configured() {
     config.rtc_udp_port_range_end = None;
 
     let transport = rtc_transport_config_from_server_config(&config);
-    assert_eq!(transport.udp_addrs, vec!["127.0.0.1:51820"]);
+    assert_eq!(transport.udp_addrs, vec!["0.0.0.0:51820"]);
 }
 
 #[test]
@@ -1183,7 +1194,7 @@ fn rtc_transport_config_from_server_config_prefers_udp_mux_port_over_range() {
     config.rtc_udp_port_range_end = Some(50102);
 
     let transport = rtc_transport_config_from_server_config(&config);
-    assert_eq!(transport.udp_addrs, vec!["127.0.0.1:51821"]);
+    assert_eq!(transport.udp_addrs, vec!["0.0.0.0:51821"]);
 }
 
 #[test]
