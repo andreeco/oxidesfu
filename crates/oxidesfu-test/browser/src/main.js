@@ -32,7 +32,10 @@ try {
     track.attach(video);
   });
 
-  await room.connect(url, token);
+  const signalUrl = url
+    .replace(/^http:/, 'ws:')
+    .replace(/^https:/, 'wss:');
+  await room.connect(signalUrl, token);
 
   if (role === 'publisher') {
     const track = await createLocalVideoTrack({
