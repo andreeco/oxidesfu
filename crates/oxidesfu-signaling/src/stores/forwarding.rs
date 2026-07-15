@@ -14,7 +14,8 @@ pub(crate) struct ForwardTrackStore {
     tracks: Arc<Mutex<HashMap<ForwardTrackKey, oxidesfu_rtc::LocalRtpTrack>>>,
     active: Arc<Mutex<HashSet<ForwardTrackKey>>>,
     active_by_track: Arc<Mutex<HashMap<ForwardTrackReaderKey, HashSet<ForwardTrackKey>>>>,
-    started: Arc<Mutex<HashSet<ForwardTrackReaderKey>>>,
+    started: Arc<Mutex<HashMap<ForwardTrackReaderKey, u64>>>,
+    next_reader_lease: Arc<AtomicU64>,
     revision: Arc<AtomicU64>,
 }
 
@@ -575,44 +576,54 @@ impl ForwardTrackStore {
         removed
     }
 
-    pub(crate) fn mark_track_reader_started(
+    /// Acquires exclusive ownership of the reader for one inbound remote-track instance.
+    ///
+    /// The returned lease must be released when that instance ends. A stale reader cannot
+    /// release a lease acquired by a replacement remote track.
+    pub(crate) fn acquire_track_reader(
         &self,
         room: &str,
         publisher_identity: &str,
         track_sid: &str,
-    ) -> bool {
-        self.started
-            .lock()
-            .map(|mut started| {
-                started.insert((
-                    room.to_string(),
-                    publisher_identity.to_string(),
-                    track_sid.to_string(),
-                ))
-            })
-            .unwrap_or(false)
+    ) -> Option<u64> {
+        let key = Self::reader_key(room, publisher_identity, track_sid);
+        let lease = self.next_reader_lease.fetch_add(1, Ordering::Relaxed);
+        self.started.lock().ok().and_then(|mut started| {
+            if started.contains_key(&key) {
+                None
+            } else {
+                started.insert(key, lease);
+                Some(lease)
+            }
+        })
     }
 
-    pub(crate) fn clear_track_reader_started(
+    /// Releases a reader lease only when it is still owned by that remote-track instance.
+    pub(crate) fn release_track_reader(
         &self,
         room: &str,
         publisher_identity: &str,
         track_sid: &str,
-    ) {
-        if let Ok(mut started) = self.started.lock() {
-            started.remove(&(
-                room.to_string(),
-                publisher_identity.to_string(),
-                track_sid.to_string(),
-            ));
-        }
+        lease: u64,
+    ) -> bool {
+        let key = Self::reader_key(room, publisher_identity, track_sid);
+        self.started
+            .lock()
+            .ok()
+            .and_then(|mut started| {
+                (started.get(&key) == Some(&lease)).then(|| started.remove(&key))
+            })
+            .flatten()
+            .is_some()
     }
 
     pub(crate) fn clear_track_readers_for_publisher(&self, room: &str, publisher_identity: &str) {
         if let Ok(mut started) = self.started.lock() {
-            started.retain(|(candidate_room, candidate_publisher, _track_sid)| {
-                candidate_room != room || candidate_publisher != publisher_identity
-            });
+            started.retain(
+                |(candidate_room, candidate_publisher, _track_sid), _lease| {
+                    candidate_room != room || candidate_publisher != publisher_identity
+                },
+            );
         }
     }
 
@@ -669,7 +680,7 @@ impl ForwardTrackStore {
 
         if let Ok(mut started) = self.started.lock() {
             started.retain(
-                |(candidate_room, candidate_publisher_identity, _track_sid)| {
+                |(candidate_room, candidate_publisher_identity, _track_sid), _lease| {
                     !(candidate_room == room && candidate_publisher_identity == publisher_identity)
                 },
             );
@@ -715,7 +726,7 @@ impl ForwardTrackStore {
         self.bump_revision();
         if let Ok(mut started) = self.started.lock() {
             let before = started.len();
-            started.retain(|(candidate_room, publisher_identity, _track_sid)| {
+            started.retain(|(candidate_room, publisher_identity, _track_sid), _lease| {
                 candidate_room != room || publisher_identity != identity
             });
             tracing::debug!(

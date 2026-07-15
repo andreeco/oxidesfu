@@ -5024,7 +5024,9 @@ async fn forward_publisher_remote_track(
     )
     .await?;
 
-    if !forward_tracks.mark_track_reader_started(room_name, publisher_identity, &track_info.sid) {
+    let Some(reader_lease) =
+        forward_tracks.acquire_track_reader(room_name, publisher_identity, &track_info.sid)
+    else {
         tracing::debug!(
             room = room_name,
             publisher_identity,
@@ -5032,7 +5034,7 @@ async fn forward_publisher_remote_track(
             "forward_track_reader_already_started"
         );
         return Ok(());
-    }
+    };
 
     let forward_tracks = forward_tracks.clone();
     let media_forwarding = media_forwarding.clone();
@@ -5860,6 +5862,21 @@ async fn forward_publisher_remote_track(
                 }
             }
         }
+
+        let released = forward_tracks.release_track_reader(
+            &room_name,
+            &publisher_identity,
+            &track_sid,
+            reader_lease,
+        );
+        tracing::debug!(
+            room = %room_name,
+            publisher_identity = %publisher_identity,
+            track_sid = %track_sid,
+            reader_lease,
+            released,
+            "forward_track_reader_lease_released"
+        );
     });
 
     Ok(())

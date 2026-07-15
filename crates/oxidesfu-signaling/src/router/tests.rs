@@ -7502,18 +7502,40 @@ fn track_subscribed_signal_emission_requires_distinct_known_subscriber_identity(
 }
 
 #[test]
-fn forward_track_store_marks_reader_started_once_per_track() {
+fn forward_track_reader_lease_is_owned_by_one_remote_track_instance() {
     let store = ForwardTrackStore::default();
 
-    assert!(store.mark_track_reader_started("room", "publisher", "TR_a"));
-    assert!(!store.mark_track_reader_started("room", "publisher", "TR_a"));
-    assert!(store.mark_track_reader_started("room", "publisher", "TR_b"));
+    let first = store
+        .acquire_track_reader("room", "publisher", "TR_a")
+        .expect("first remote track should acquire its reader lease");
+    assert!(
+        store
+            .acquire_track_reader("room", "publisher", "TR_a")
+            .is_none(),
+        "a concurrent remote track must not share the reader lease"
+    );
+    assert!(
+        !store.release_track_reader("room", "publisher", "TR_a", first.wrapping_add(1)),
+        "a stale remote track must not release the current reader lease"
+    );
+    assert!(store.release_track_reader("room", "publisher", "TR_a", first));
 
-    store.clear_track_reader_started("room", "publisher", "TR_a");
-    assert!(store.mark_track_reader_started("room", "publisher", "TR_a"));
+    let replacement = store
+        .acquire_track_reader("room", "publisher", "TR_a")
+        .expect("a replacement remote track should acquire after the old reader ends");
+    assert_ne!(replacement, first);
+    assert!(
+        !store.release_track_reader("room", "publisher", "TR_a", first),
+        "the old reader must not clear the replacement reader lease"
+    );
 
     store.clear_track_readers_for_publisher("room", "publisher");
-    assert!(store.mark_track_reader_started("room", "publisher", "TR_b"));
+    assert!(
+        store
+            .acquire_track_reader("room", "publisher", "TR_a")
+            .is_some(),
+        "publisher teardown must release all reader leases"
+    );
 }
 
 #[tokio::test]
