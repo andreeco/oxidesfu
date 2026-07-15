@@ -24,7 +24,7 @@ Reference revisions inspected:
 |---|---|---|---|
 | LiveKit | `ae09b7d0ad94d764f0c97d183efd36476163e819` | `pkg/rtc/subscribedtrack.go`, `pkg/sfu/downtrack.go`, `pkg/sfu/forwarder.go`, `pkg/sfu/videolayerselector/{base.go,simulcast.go}` | Subscriber settings set max spatial/temporal bounds; forwarding retains max, target, current, and seen layers; spatial changes are decodable-boundary gated. |
 | WebRTC Rust fork (currently pinned by Oxide) | `24b69d02220ffdaf67af4550482d5986089a95aa` | `rtc-rtp/src/codec/{vp9,h264,av1}`, `rtc-media/src/io/ivf_writer` | VP9 frame-start/non-predicted, H264 IDR, and AV1 new-coded-sequence boundaries usable for source-switch detection. |
-| WebRTC Rust compatibility fork (publication in progress) | outer `9f49b55260836d7aaff6768ac14acd5557600dcc`, nested RTC `bd54faa2a648a88c9434f095130e4a5f0b078a8e`; local nested RTC successor `56a36e408913475baeeb5672bd3e30036dea820f` | `rtc-rtp/src/extension/dependency_descriptor_extension/{mod.rs,dependency_descriptor_extension_test.rs}` | `bd54faa` exposes active-target packet metadata and frame boundaries. `56a36e4` additionally distinguishes an active decode target with DTI `Switch`; a frame boundary by itself is not a safe source-switch point. |
+| WebRTC Rust compatibility fork (published/pinned) | outer `3b0b2f0d8f0443deeab47fb83dada7eb4d7778ea`, nested RTC `56a36e408913475baeeb5672bd3e30036dea820f` | `rtc-rtp/src/extension/dependency_descriptor_extension/{mod.rs,dependency_descriptor_extension_test.rs}` | Exposes active-target packet metadata and distinguishes an active decode target with DTI `Switch`; a frame boundary by itself is not a safe source-switch point. |
 | OxideSFU | working tree following `3d6331078e8a2a2c0587fe5bb16da939efb89bd2` | `crates/oxidesfu-signaling/src/{media/video_ingress.rs,router/session.rs}` | Original first-eligible-SSRC latch was in the reader-owned forwarding target. |
 
 ## Completed work
@@ -119,18 +119,14 @@ Remaining work:
 
 ### 3. Dependency-descriptor decode targets are not yet used for switching
 
-The dependency-descriptor parser extension is implemented and tested in the local WebRTC compatibility fork, but it is deliberately **not yet pinned by OxideSFU**:
+The dependency-descriptor parser extension is published and pinned by OxideSFU at outer WebRTC `3b0b2f0d8f0443deeab47fb83dada7eb4d7778ea`, nested RTC `56a36e408913475baeeb5672bd3e30036dea820f`.
 
-- published outer fork `9f49b55260836d7aaff6768ac14acd5557600dcc` carries nested RTC `bd54faa2a648a88c9434f095130e4a5f0b078a8e`, which exposes active-target packet metadata and frame boundaries;
-- local nested RTC commit `56a36e408913475baeeb5672bd3e30036dea820f` adds `has_switching_decode_target`, requiring both a frame start and an active DTI `Switch` indication before a consumer may treat descriptor metadata as a decodable source-switch point;
-- publication of `56a36e4`, the matching outer-fork submodule advance, and the Oxide dependency-pin update are blocked by a transient DNS failure resolving `github.com` over SSH. The published `bd54faa` API is intentionally insufficient for production source switching because a frame boundary alone is not safe.
+`DependencyDescriptorParser::parse_packet_metadata` exposes active-target layer metadata, frame boundaries, and `has_switching_decode_target`. A consumer must require both a frame start and an active DTI `Switch` indication before treating descriptor metadata as a decodable source-switch point. The nested parser regressions pass (nine dependency-descriptor parser tests).
 
-The local parser regressions pass (nine dependency-descriptor parser tests), but no production Oxide behavior depends on this unpublished work.
+No production Oxide forwarding behavior uses the newly pinned API yet.
 
-Required work once publication is unblocked:
+Required production work:
 
-- push `56a36e4` to `andreeco/rtc` compatibility branch and publish an outer `webrtc` commit that advances its submodule;
-- update Oxide's Git-pinned WebRTC dependencies and lockfile to that published outer revision;
 - expose target-local descriptor switch-point metadata from the RTC track parser;
 - prefer the verified descriptor switch point where available, while retaining the codec-keyframe fallback when metadata is absent;
 - add signaling packet-sequence regressions proving that a descriptor frame boundary without DTI `Switch` does not switch, and that an eligible descriptor switch point does.
