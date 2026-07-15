@@ -321,6 +321,14 @@ Workspace validation after the fork pin exposed and repaired three lost rebase c
 
 `cargo test --workspace` still has unrelated combined-run failures: the two Rust SDK video FPS cadence contracts are sensitive to suite load/timing (both pass when targeted), and upstream `TestSingleNodeUpdateSubscriptionPermissions` times out waiting for subscriber data-track bytes. Do not weaken these contracts to make the suite green; reproduce them on an idle host and repair their scheduling/data-track behavior in a separate compatibility slice.
 
+### 2026-07-15: timer-driven diagnostic heartbeat
+
+The publisher reader previously called `Instant::now()` for every RTP packet and checked the same three-second debug-heartbeat deadline twice. The timestamp was only used for a throttled debug log. The reader now uses its existing three-second video keyframe-retry interval to mark one heartbeat due; the next video RTP packet consumes that marker and performs the same bounded diagnostic target scan. This removes the steady per-video-packet clock reads without changing forwarding, keyframe retry, or settings behavior.
+
+A focused unit test proves one timer tick is consumed exactly once. `cargo test -p oxidesfu-signaling` (486 passed, 3 ignored) and the real Rust SDK simulcast quality-switch contract passed. The 90-second `mixed_room_high_simulcast_large` profile on OxideSFU `20ad02bec97a6beaeb894a86f19d128e8725e1f6` delivered `160/160` tracks with zero loss and captured 22K samples with zero loss. Its leading self samples remain RTC `poll_write` (3.92%), `__vdso_clock_gettime` (2.87%), AEAD GCM `Polyval::mul` (2.33%), and the WebRTC driver loop (1.89%). This is evidence that a direct RTC/SRTP redesign—not another forwarding-map change—is required for a material next reduction.
+
+Reference map: LiveKit `ae09b7d0ad94d764f0c97d183efd36476163e819` `pkg/rtc/subscribedtrack.go` and `pkg/sfu/downtrack.go` retain target-local settings/recovery behavior; WebRTC fork `884354a7e81d6ae308d143b0ab8063e082fdb729` `src/media_stream/track_local/static_rtp.rs` and `src/peer_connection/driver.rs`, plus RTC `89a132cd952d3de3b148ce3c33ae10f53eeaf8c6` `rtc/src/peer_connection/handler/mod.rs`, show the remaining queue/retry ownership boundary. Do not remove the `RTCMessageInternal::clone` retry copy or bypass the driver event hop without separate ordering, backpressure, renegotiation, and disconnect tests.
+
 ### Phase 5 — WebRTC and transport investigation
 
 **Objective:** separate OxideSFU-specific overhead from `webrtc-rs` behavior.

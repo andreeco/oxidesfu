@@ -8,7 +8,7 @@ use crate::media::{ForwardTrackKey, SubscriberVideoLayerSelector, VideoIngressDe
 
 static NEXT_TRACK_SID_COUNTER: AtomicU64 = AtomicU64::new(0);
 const RTCP_EFFECTS_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
-const FORWARDING_DEBUG_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(3);
+
 const REMOTE_TRACK_EVENT_IDLE_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
 fn next_track_sid() -> String {
@@ -1174,6 +1174,11 @@ impl ForwardTarget {
     fn subscriber_identity(&self) -> &str {
         &self.key.3
     }
+}
+
+/// Returns whether a timer requested one diagnostic scan, consuming that request.
+pub(super) fn take_forwarding_debug_heartbeat(heartbeat_due: &mut bool) -> bool {
+    std::mem::take(heartbeat_due)
 }
 
 fn refresh_forward_targets_for_track(
@@ -5569,7 +5574,7 @@ async fn forward_publisher_remote_track(
         let mut dropped_repair_video_ssrc_count: u64 = 0;
         let mut had_forward_targets: Option<bool> = None;
         let mut track_subscribed_signaled_to_publisher = false;
-        let mut last_heartbeat_log_at = std::time::Instant::now();
+        let mut forwarding_debug_heartbeat_due = false;
         let mut cached_forward_tracks_revision: Option<u64> = None;
         let mut observed_track_settings_generation: Option<u64> = None;
         let mut cached_forward_targets = Vec::<ForwardTarget>::new();
@@ -5612,6 +5617,7 @@ async fn forward_publisher_remote_track(
                         remote_track.recv_event(),
                     ) => result,
                     _ = keyframe_retry_tick.tick() => {
+                        forwarding_debug_heartbeat_due = true;
                         if let Some(media_ssrc) = last_video_media_ssrc
                             && !cached_forward_targets.is_empty()
                         {
@@ -5733,7 +5739,6 @@ async fn forward_publisher_remote_track(
 
             match recv_event {
                 Ok(oxidesfu_rtc::RemoteTrackEvent::RtpPacket(packet)) => {
-                    let rtp_event_at = std::time::Instant::now();
                     let mut packet_video_quality: Option<proto::VideoQuality> = None;
                     let mut effective_video_ssrc = packet.header.ssrc;
                     if is_video_track {
@@ -5872,7 +5877,7 @@ async fn forward_publisher_remote_track(
                     let total_forward_targets = cached_forward_targets.len();
                     let mut filtered_out_targets = 0usize;
                     let collect_forwarding_debug_counts = is_video_track
-                        && last_heartbeat_log_at.elapsed() >= FORWARDING_DEBUG_HEARTBEAT;
+                        && take_forwarding_debug_heartbeat(&mut forwarding_debug_heartbeat_due);
                     let mut media_forwarding_true_targets = 0usize;
                     let mut signaling_subscribed_targets = 0usize;
                     let mut room_subscribed_targets = 0usize;
@@ -6193,15 +6198,12 @@ async fn forward_publisher_remote_track(
                         }
                     }
 
-                    if is_video_track
-                        && last_heartbeat_log_at.elapsed() >= FORWARDING_DEBUG_HEARTBEAT
-                    {
+                    if collect_forwarding_debug_counts {
                         tracing::debug!(
                             room = %room_name,
                             publisher_identity = %publisher_identity,
                             track_sid = %track_sid,
                             last_recv_event_kind = "rtp",
-                            last_recv_event_age_ms = rtp_event_at.elapsed().as_millis(),
                             total_forward_targets,
                             filtered_out_targets,
                             media_forwarding_true_targets,
@@ -6209,7 +6211,6 @@ async fn forward_publisher_remote_track(
                             room_subscribed_targets,
                             "video_forwarding_loop_heartbeat"
                         );
-                        last_heartbeat_log_at = std::time::Instant::now();
                     }
                 }
                 Ok(oxidesfu_rtc::RemoteTrackEvent::RtcpPacket(rtcp_packets)) => {

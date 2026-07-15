@@ -5468,6 +5468,19 @@ fn target_settings_revision_refreshes_only_for_new_targets_or_new_generation() {
 }
 
 #[test]
+fn forwarding_debug_heartbeat_is_consumed_by_the_next_video_packet() {
+    let mut heartbeat_due = true;
+
+    assert!(super::session::take_forwarding_debug_heartbeat(
+        &mut heartbeat_due
+    ));
+    assert!(
+        !super::session::take_forwarding_debug_heartbeat(&mut heartbeat_due),
+        "one timer tick must produce at most one debug-count scan"
+    );
+}
+
+#[test]
 fn vp8_temporal_layer_id_from_payload_extracts_tid_when_present() {
     // Minimal VP8 payload descriptor with extension and T/K byte present.
     // 0x90 => X=1, S=1. 0x20 => T/K present only. 0x80 => TID=2 (10b).
