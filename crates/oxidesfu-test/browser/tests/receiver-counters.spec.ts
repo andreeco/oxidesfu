@@ -33,15 +33,17 @@ test('final adaptive low request keeps the active Firefox receiver advancing', a
   const serverUrl = process.env.OXIDESFU_URL;
 
   const room = `browser-adaptive-${randomUUID()}`;
-  const publisher = await browser.newPage();
-  const subscriber = await browser.newPage();
+  const publisherContext = await browser.newContext({ permissions: ['camera', 'microphone'] });
+  const subscriberContext = await browser.newContext({ permissions: ['camera', 'microphone'] });
+  const publisher = await publisherContext.newPage();
+  const subscriber = await subscriberContext.newPage();
   const publisherUrl = `/?role=publisher&url=${encodeURIComponent(serverUrl!)}&token=${encodeURIComponent(token('browser-publisher', room))}`;
   const subscriberUrl = `/?role=subscriber&url=${encodeURIComponent(serverUrl!)}&token=${encodeURIComponent(token('browser-subscriber', room))}`;
 
   await publisher.goto(publisherUrl);
-  await expect(publisher.getByTestId('browser-harness-ready')).toHaveText('ready');
+  await expect(publisher.getByTestId('browser-harness-ready')).toHaveText('ready', { timeout: 15_000 });
   await subscriber.goto(subscriberUrl);
-  await expect(subscriber.getByTestId('browser-harness-ready')).toHaveText('ready');
+  await expect(subscriber.getByTestId('browser-harness-ready')).toHaveText('ready', { timeout: 15_000 });
   await expect(subscriber.getByTestId('remote-video')).toHaveJSProperty('srcObject', expect.anything());
 
   await subscriber.evaluate(() => {
@@ -63,4 +65,6 @@ test('final adaptive low request keeps the active Firefox receiver advancing', a
 
   await publisher.evaluate(() => window.oxidesfuClose());
   await subscriber.evaluate(() => window.oxidesfuClose());
+  await publisherContext.close();
+  await subscriberContext.close();
 });

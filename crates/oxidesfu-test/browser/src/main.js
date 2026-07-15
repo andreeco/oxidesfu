@@ -24,9 +24,15 @@ try {
   const { Room, RoomEvent, Track, VideoQuality, createLocalVideoTrack } =
     await import('livekit-client');
   const room = new Room();
-  let publication;
+    let publication;
 
-  room.on(RoomEvent.TrackSubscribed, (track, remotePublication) => {
+    room.on(RoomEvent.Connected, () => {
+      ready.textContent = 'connected';
+    });
+    room.on(RoomEvent.Disconnected, (reason) => {
+      ready.textContent = `disconnected: ${reason ?? 'unknown'}`;
+    });
+    room.on(RoomEvent.TrackSubscribed, (track, remotePublication) => {
     if (track.kind !== Track.Kind.Video) return;
     publication = remotePublication;
     track.attach(video);
@@ -35,12 +41,15 @@ try {
   const signalUrl = url
     .replace(/^http:/, 'ws:')
     .replace(/^https:/, 'wss:');
+  ready.textContent = 'connecting';
   await room.connect(signalUrl, token);
 
   if (role === 'publisher') {
+    ready.textContent = 'acquiring-video';
     const track = await createLocalVideoTrack({
       resolution: { width: 1280, height: 720 },
     });
+    ready.textContent = 'publishing-video';
     await room.localParticipant.publishTrack(track, { simulcast: true });
   }
 
