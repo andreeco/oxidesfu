@@ -16,7 +16,8 @@ profilers below identify the functions, tasks, locks, or allocations responsible
 - Tokio 1.52.3 feature metadata was inspected through `cargo info tokio@1.52.3`;
   the `tracing` feature supplies the instrumentation consumed by Tokio Console.
 - The workspace currently pins `webrtc-rs` to
-  `55f80aff4f7d9ce1ffda0e5a403cab3db21157c8`.
+  `24b69d02220ffdaf67af4550482d5986089a95aa` (RTC
+  `6d436970b437bb8c7572e4ab8d970333496a1edb`).
 
 ## Linux packages and tools
 
@@ -89,6 +90,38 @@ tools/profiling/profile-load-test.sh --duration 90s mixed_room_high_simulcast_la
 Use `--print-load-command` to inspect a preset without starting a server. The
 runner deliberately covers only the seven media-load scenarios; the
 `unit_summary_output` benchmark artifact is a unit test and has no `lk` workload.
+
+## Paired Go/Oxide high-mixed scale profiles
+
+`profile-paired-scale-sweep.sh` profiles the real Go LiveKit server and OxideSFU
+separately with identical `lk` traffic. It exists specifically for the
+high-mixed benchmark regression: it varies one workload dimension at a time
+while preserving independent `perf.data`, flamegraph, server-log, load-log, and
+metadata artifacts for each implementation.
+
+```sh
+# Inspect the five fixed scale points and alternating order without starting processes.
+tools/profiling/profile-paired-scale-sweep.sh --print-plan \
+  mixed_room_high_simulcast_large
+
+# Run one 60-second Go/Oxide pair per point.
+tools/profiling/profile-paired-scale-sweep.sh --duration 60s --runs 1 \
+  mixed_room_high_simulcast_large
+```
+
+The default Go checkout is `../othercode/livekit`; pass `--livekit-root` or set
+`OXIDESFU_LIVEKIT_ROOT` if it lives elsewhere. The runner builds the Go
+`cmd/server` binary and OxideSFU's `profiling` binary once, then runs Go before
+Oxide on odd repetitions and Oxide before Go on even ones to reduce thermal and
+background-order bias. Its plan is: baseline (`4V/4A/20S`), video-only
+(`4V/0A/20S`), audio-only (`0V/4A/20S`), and subscriber reductions
+(`4V/4A/10S`, `4V/4A/15S`).
+
+It is an opt-in investigation tool, not a benchmark gate. Use DWARF on the
+current AMD host: raw branch-stack recording works, but `perf --call-graph lbr`
+is unsupported. A live 5-second lifecycle sweep has been validated; retain the
+full profile artifacts under `target/profiles/` and require complete `lk`
+delivery before drawing a performance conclusion.
 
 The commands below remain useful for ad hoc profiling with a custom server or
 load shape. In a second terminal, attach `perf` to the server after its Tokio
