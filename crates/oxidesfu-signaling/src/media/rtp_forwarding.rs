@@ -275,6 +275,7 @@ impl RetransmissionCache {
 #[derive(Debug, Clone, Default)]
 struct SubscriberRtpState {
     highest_incoming_ext_seq_by_ssrc: HashMap<u32, u64>,
+    active_incoming_ext_seq: Option<(u32, u64)>,
     seen_incoming_ext_seq: HashSet<(u32, u64)>,
     incoming_ext_seq_order: VecDeque<(u32, u64)>,
     next_outgoing_ext_seq: Option<u64>,
@@ -454,21 +455,36 @@ impl SubscriberRtpState {
         incoming_sequence_number: u16,
     ) -> (u64, bool) {
         let incoming_sequence_number = incoming_sequence_number as u64;
-        match self.highest_incoming_ext_seq_by_ssrc.entry(incoming_ssrc) {
-            std::collections::hash_map::Entry::Occupied(mut entry) => {
-                let extended =
-                    extend_sequence_number_from_reference(incoming_sequence_number, *entry.get());
-                let should_update = extended > *entry.get();
+
+        if let Some((active_ssrc, active_reference)) = self.active_incoming_ext_seq {
+            if active_ssrc == incoming_ssrc {
+                let extended = extend_sequence_number_from_reference(
+                    incoming_sequence_number,
+                    active_reference,
+                );
+                let should_update = extended > active_reference;
                 if should_update {
-                    entry.insert(extended);
+                    self.active_incoming_ext_seq = Some((incoming_ssrc, extended));
                 }
-                (extended, should_update)
+                return (extended, should_update);
             }
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(incoming_sequence_number);
-                (incoming_sequence_number, true)
-            }
+
+            self.highest_incoming_ext_seq_by_ssrc
+                .insert(active_ssrc, active_reference);
         }
+
+        let reference = self.highest_incoming_ext_seq_by_ssrc.remove(&incoming_ssrc);
+        let extended = reference.map_or(incoming_sequence_number, |reference| {
+            extend_sequence_number_from_reference(incoming_sequence_number, reference)
+        });
+        let should_update = reference.is_none_or(|reference| extended > reference);
+        let active_reference = should_update
+            .then_some(extended)
+            .or(reference)
+            .unwrap_or(extended);
+        self.active_incoming_ext_seq = Some((incoming_ssrc, active_reference));
+
+        (extended, should_update)
     }
 }
 
@@ -823,10 +839,10 @@ mod tests {
                 .lock()
                 .expect("subscriber forwarding state lock should not be poisoned");
             state
-                .highest_incoming_ext_seq_by_ssrc
-                .get(&123)
-                .copied()
-                .expect("ssrc sequence state should exist")
+                .active_incoming_ext_seq
+                .filter(|(ssrc, _)| *ssrc == 123)
+                .map(|(_, sequence_number)| sequence_number)
+                .expect("active ssrc sequence state should exist")
         };
 
         assert_eq!(highest as u16, 2);
@@ -851,6 +867,180 @@ mod tests {
             .rewrite_packet_for_subscriber(&key, packet_with_seq_ssrc_timestamp(23334, 123, 1_960))
             .expect("next unique packet should forward");
         assert_eq!(next.header.sequence_number, 23334);
+    }
+
+    #[test]
+    fn rewrite_packet_restores_independent_extended_sequence_history_after_a_b_c_a_switches() {
+        let store = RtpForwardingStore::default();
+        let key = forwarding_key("subscriber-a");
+        let source_a = 0x1111_0001;
+        let source_b = 0x2222_0002;
+        let source_c = 0x3333_0003;
+
+        for (sequence_number, ssrc) in [
+            (65_000, source_a),
+            (100, source_b),
+            (200, source_c),
+            (65_001, source_a),
+        ] {
+            store
+                .rewrite_packet_for_subscriber(
+                    &key,
+                    packet_with_seq_ssrc_timestamp(sequence_number, ssrc, sequence_number as u32),
+                )
+                .expect("unique packet should forward");
+        }
+
+        let states = store
+            .states
+            .lock()
+            .expect("rtp forwarding store lock should not be poisoned");
+        let state = states
+            .get(&key)
+            .expect("subscriber forwarding state should exist")
+            .lock()
+            .expect("subscriber forwarding state lock should not be poisoned");
+
+        assert_eq!(
+            state.active_incoming_ext_seq,
+            Some((source_a, 65_001)),
+            "the resumed source should use its own sequence history as the active cache"
+        );
+        assert_eq!(
+            state.highest_incoming_ext_seq_by_ssrc.get(&source_b),
+            Some(&100),
+            "inactive source B should retain its exact fallback history"
+        );
+        assert_eq!(
+            state.highest_incoming_ext_seq_by_ssrc.get(&source_c),
+            Some(&200),
+            "inactive source C should retain its exact fallback history"
+        );
+    }
+
+    #[test]
+    fn rewrite_packet_extends_sequence_numbers_across_wraps_on_both_sides_of_a_switch() {
+        let store = RtpForwardingStore::default();
+        let key = forwarding_key("subscriber-a");
+        let source_a = 0x1111_0001;
+        let source_b = 0x2222_0002;
+
+        for (sequence_number, ssrc) in [
+            (u16::MAX - 1, source_a),
+            (u16::MAX, source_a),
+            (123, source_b),
+            (0, source_a),
+            (124, source_b),
+            (1, source_a),
+        ] {
+            store
+                .rewrite_packet_for_subscriber(
+                    &key,
+                    packet_with_seq_ssrc_timestamp(sequence_number, ssrc, sequence_number as u32),
+                )
+                .expect("unique packet should forward");
+        }
+
+        let states = store
+            .states
+            .lock()
+            .expect("rtp forwarding store lock should not be poisoned");
+        let state = states
+            .get(&key)
+            .expect("subscriber forwarding state should exist")
+            .lock()
+            .expect("subscriber forwarding state lock should not be poisoned");
+
+        assert_eq!(
+            state.active_incoming_ext_seq,
+            Some((source_a, 65_537)),
+            "source A should retain its wrapped extended sequence after resuming"
+        );
+        assert_eq!(
+            state.highest_incoming_ext_seq_by_ssrc.get(&source_b),
+            Some(&124),
+            "source B should retain its independent post-switch history"
+        );
+    }
+
+    #[test]
+    fn rewrite_packet_drops_duplicate_late_packet_from_an_inactive_source_after_switching() {
+        let store = RtpForwardingStore::default();
+        let key = forwarding_key("subscriber-a");
+        let source_a = 0x1111_0001;
+        let source_b = 0x2222_0002;
+
+        let first = store
+            .rewrite_packet_for_subscriber(
+                &key,
+                packet_with_seq_ssrc_timestamp(100, source_a, 1_000),
+            )
+            .expect("first packet should forward");
+        let switched = store
+            .rewrite_packet_for_subscriber(
+                &key,
+                packet_with_seq_ssrc_timestamp(200, source_b, 2_000),
+            )
+            .expect("switched packet should forward");
+        let late = store
+            .rewrite_packet_for_subscriber(&key, packet_with_seq_ssrc_timestamp(99, source_a, 960))
+            .expect("a previously unseen late packet should forward");
+        let duplicate_late = store
+            .rewrite_packet_for_subscriber(&key, packet_with_seq_ssrc_timestamp(99, source_a, 960));
+        let duplicate_old_source = store.rewrite_packet_for_subscriber(
+            &key,
+            packet_with_seq_ssrc_timestamp(200, source_b, 2_000),
+        );
+
+        assert_eq!(first.header.sequence_number, 100);
+        assert_eq!(switched.header.sequence_number, 101);
+        assert_eq!(late.header.sequence_number, 102);
+        assert!(
+            duplicate_late.is_none(),
+            "late duplicate must remain suppressed"
+        );
+        assert!(
+            duplicate_old_source.is_none(),
+            "duplicate from the now-inactive source must remain suppressed"
+        );
+    }
+
+    #[test]
+    fn rewrite_packet_preserves_timestamp_continuity_when_resuming_a_after_b_and_c() {
+        let store = RtpForwardingStore::default();
+        let key = forwarding_key("subscriber-a");
+        let source_a = 0x1111_0001;
+        let source_b = 0x2222_0002;
+        let source_c = 0x3333_0003;
+
+        let first_a = store
+            .rewrite_packet_for_subscriber(&key, packet_with_seq_ssrc_timestamp(1, source_a, 1_000))
+            .expect("first A packet should forward");
+        let b = store
+            .rewrite_packet_for_subscriber(&key, packet_with_seq_ssrc_timestamp(1, source_b, 120))
+            .expect("B packet should forward");
+        let c = store
+            .rewrite_packet_for_subscriber(&key, packet_with_seq_ssrc_timestamp(1, source_c, 240))
+            .expect("C packet should forward");
+        let resumed_a = store
+            .rewrite_packet_for_subscriber(&key, packet_with_seq_ssrc_timestamp(2, source_a, 1_960))
+            .expect("resumed A packet should forward");
+        let resumed_a_next = store
+            .rewrite_packet_for_subscriber(&key, packet_with_seq_ssrc_timestamp(3, source_a, 2_920))
+            .expect("next resumed A packet should forward");
+
+        assert_eq!(first_a.header.timestamp, 1_000);
+        assert_eq!(b.header.timestamp, 1_001);
+        assert_eq!(c.header.timestamp, 1_002);
+        assert_eq!(resumed_a.header.timestamp, 1_003);
+        assert_eq!(
+            resumed_a_next
+                .header
+                .timestamp
+                .wrapping_sub(resumed_a.header.timestamp),
+            960,
+            "the resumed source should preserve its own timestamp delta"
+        );
     }
 
     #[test]
