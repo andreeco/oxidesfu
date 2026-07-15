@@ -72,10 +72,27 @@ RUST_LOG=error ./target/profiling/oxidesfu-server \
   --api-secret secret
 ```
 
-## CPU flamegraph from real media load
+## CPU flamegraph from a benchmark scenario
 
-In a second terminal, attach `perf` to the server after its Tokio worker threads
-have started:
+Use the repository-owned runner to profile any real media scenario defined in
+`crates/oxidesfu-test/src/benchmark/load.rs`. It builds the profileable server,
+owns its lifecycle, records `perf`, runs the matching `lk perf load-test`
+arguments, and writes `perf.data`, `flamegraph.svg`, logs, and metadata under
+`target/profiles/`.
+
+```sh
+tools/profiling/profile-load-test.sh --list
+tools/profiling/profile-load-test.sh video_room_high_simulcast_large
+tools/profiling/profile-load-test.sh --duration 90s mixed_room_high_simulcast_large
+```
+
+Use `--print-load-command` to inspect a preset without starting a server. The
+runner deliberately covers only the seven media-load scenarios; the
+`unit_summary_output` benchmark artifact is a unit test and has no `lk` workload.
+
+The commands below remain useful for ad hoc profiling with a custom server or
+load shape. In a second terminal, attach `perf` to the server after its Tokio
+worker threads have started:
 
 ```sh
 perf record \
