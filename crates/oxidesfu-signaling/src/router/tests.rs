@@ -3595,6 +3595,163 @@ async fn single_pc_mid_reclaim_requeues_still_published_track_instead_of_unsubsc
 }
 
 #[tokio::test]
+async fn single_pc_local_publisher_mid_collision_reclaims_remote_forward_and_requeues_audio() {
+    let state = state();
+    let room = "single-pc-local-publisher-mid-collision-room";
+    let remote_publisher = "remote-publisher";
+    let subscriber = "subscriber";
+    let remote_track_sid = "TR_remote_audio";
+    let local_track_cid = "local-audio-cid";
+
+    join_participant_for_data_track_test(&state, room, remote_publisher);
+    join_participant_for_data_track_test(&state, room, subscriber);
+    state
+        .rooms
+        .add_participant_track(
+            room,
+            remote_publisher,
+            proto::TrackInfo {
+                sid: remote_track_sid.to_string(),
+                r#type: proto::TrackType::Audio as i32,
+                mime_type: "audio/opus".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("remote audio track should be added");
+    state
+        .media_track_cids
+        .insert(room, subscriber, local_track_cid, "TR_local_audio");
+    state.pending_media_section_requests.insert_once(
+        room,
+        remote_publisher,
+        remote_track_sid,
+        subscriber,
+        crate::stores::PendingMediaSectionKind::Audio,
+    );
+
+    let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::unbounded_channel();
+    let receive_offer_sdp = "v=0\r\n\
+            o=- 1 2 IN IP4 0.0.0.0\r\n\
+            s=-\r\n\
+            t=0 0\r\n\
+            a=fingerprint:sha-256 D9:D5:EF:C3:37:B8:DC:12:14:87:47:0B:C9:73:2C:6F:D8:1A:1E:3C:C4:CE:2B:D4:EE:32:AC:B6:9B:26:D4:BF\r\n\
+            a=group:BUNDLE 1\r\n\
+            m=audio 9 UDP/TLS/RTP/SAVPF 109 0 8\r\n\
+            c=IN IP4 0.0.0.0\r\n\
+            a=rtpmap:109 opus/48000/2\r\n\
+            a=rtpmap:0 PCMU/8000\r\n\
+            a=rtpmap:8 PCMA/8000\r\n\
+            a=setup:actpass\r\n\
+            a=mid:1\r\n\
+            a=recvonly\r\n\
+            a=ice-ufrag:test\r\n\
+            a=ice-pwd:testpwd\r\n\
+            a=rtcp-mux\r\n";
+
+    let initial_response = answer_publisher_offer(
+        proto::SessionDescription {
+            r#type: "offer".to_string(),
+            sdp: receive_offer_sdp.to_string(),
+            id: 1,
+            ..Default::default()
+        },
+        &state,
+        room,
+        subscriber,
+        &outbound_tx,
+        &state.rtc_transport_config(),
+    )
+    .await
+    .expect("initial receive offer should be answered");
+    let Some(proto::signal_response::Message::Answer(initial_answer)) = initial_response.message
+    else {
+        panic!("expected initial answer response");
+    };
+    assert_eq!(
+        initial_answer.mid_to_track_id.get("1").map(String::as_str),
+        Some(remote_track_sid),
+        "the receive section should initially carry the remote forward"
+    );
+    assert_eq!(
+        state
+            .forward_tracks
+            .list_for_track(room, remote_publisher, remote_track_sid)
+            .len(),
+        1,
+        "the remote audio forward should occupy MID 1 before the collision"
+    );
+
+    let publisher_offer_sdp = "v=0\r\n\
+            o=- 1 3 IN IP4 0.0.0.0\r\n\
+            s=-\r\n\
+            t=0 0\r\n\
+            a=fingerprint:sha-256 D9:D5:EF:C3:37:B8:DC:12:14:87:47:0B:C9:73:2C:6F:D8:1A:1E:3C:C4:CE:2B:D4:EE:32:AC:B6:9B:26:D4:BF\r\n\
+            a=group:BUNDLE 1\r\n\
+            m=audio 9 UDP/TLS/RTP/SAVPF 109 0 8\r\n\
+            c=IN IP4 0.0.0.0\r\n\
+            a=rtpmap:109 opus/48000/2\r\n\
+            a=rtpmap:0 PCMU/8000\r\n\
+            a=rtpmap:8 PCMA/8000\r\n\
+            a=setup:actpass\r\n\
+            a=mid:1\r\n\
+            a=sendonly\r\n\
+            a=msid:local-stream local-audio-cid\r\n\
+            a=ssrc:123456 cname:local-stream\r\n\
+            a=ssrc:123456 msid:local-stream local-audio-cid\r\n\
+            a=ice-ufrag:test\r\n\
+            a=ice-pwd:testpwd\r\n\
+            a=rtcp-mux\r\n";
+
+    let response = answer_publisher_offer(
+        proto::SessionDescription {
+            r#type: "offer".to_string(),
+            sdp: publisher_offer_sdp.to_string(),
+            id: 2,
+            mid_to_track_id: HashMap::from([("1".to_string(), local_track_cid.to_string())]),
+        },
+        &state,
+        room,
+        subscriber,
+        &outbound_tx,
+        &state.rtc_transport_config(),
+    )
+    .await
+    .expect("publisher MID collision offer should be answered");
+    let Some(proto::signal_response::Message::Answer(answer)) = response.message else {
+        panic!("expected collision answer response");
+    };
+
+    assert!(
+        state
+            .forward_tracks
+            .list_for_track(room, remote_publisher, remote_track_sid)
+            .is_empty(),
+        "a local publisher section must reclaim the old remote forwarding row on its MID"
+    );
+    assert!(
+        state.pending_media_section_requests.contains(
+            room,
+            remote_publisher,
+            remote_track_sid,
+            subscriber,
+        ),
+        "the still-published remote audio track must be re-queued for a later receive section"
+    );
+    let publisher_mid_lines = sdp_media_section_lines_for_mid(&answer.sdp, "1");
+    assert_eq!(
+        sdp_direction_for_mid(&answer.sdp, "1").as_deref(),
+        Some("recvonly"),
+        "the repurposed local publisher section must answer as recvonly"
+    );
+    assert!(
+        publisher_mid_lines
+            .iter()
+            .all(|line| !line.contains(remote_track_sid)),
+        "a recvonly publisher section must not retain the reclaimed remote forwarding MSID"
+    );
+}
+
+#[tokio::test]
 async fn single_pc_cross_publisher_audio_mid_stays_mapped_when_other_publisher_adds_video() {
     let state = state();
     let room = "single-pc-cross-publisher-audio-video-room";

@@ -4,13 +4,17 @@
 
 After the owned-loopback TURN ICE-candidate fix in OxideSFU commit `97030583`,
 the focused upstream LiveKit TURN contract passes. The latest recheck on
-2026-07-15 at OxideSFU `HEAD` `e00e6b73` distinguishes two reproducible
-single-worker external compatibility gaps from timing-sensitive failures:
+2026-07-15 distinguishes one reproducible single-worker external compatibility
+gap from timing-sensitive failures:
 
 1. media lifecycle during disconnect, same-identity rejoin, and republish
-   (`TestMultinodePublishingUponJoining`);
-2. single-peer-connection media forwarding when both participants publish
-   (`TestConnectionStats`).
+   (`TestMultinodePublishingUponJoining`).
+
+`TestConnectionStats` is now resolved. In single-PC/v1, a client can reuse a
+MID that previously carried a remote forwarding sender for its own publishing
+section. Oxide now detaches that sender, clears its stale forwarding state, and
+requeues the still-published remote track for a fresh receive section before
+answering the publishing offer.
 
 `TestMultiNodeUpdateAttributes` failed in the preceding 4-worker full suite,
 but passed in a clean single-worker rerun for `v0`, `v0-single-peer-connection`,
@@ -133,23 +137,27 @@ the replacement tracks.
 
 ### Isolated result
 
-Rerun timestamp: `2026-07-15 15:51`; shard log:
-`target/conformance-investigation/isolated-multinode-publishing/livekit-shards-20260715-155138/TestMultinodePublishingUponJoining/go-test.log`.
+Latest rerun timestamp: `2026-07-15 16:06`; shard log:
+`target/conformance-investigation/fix-rejoin-coalesced/livekit-shards-20260715-160632/TestMultinodePublishingUponJoining/go-test.log`.
 
 ```text
-FAIL TestMultinodePublishingUponJoining (93.73s)
+FAIL TestMultinodePublishingUponJoining (94.03s)
   FAIL v0:
     c3 should be subscribed to 2 tracks from c2, actual: 1
   FAIL v0-single-peer-connection:
-    did not receive tracks from c1
+    c3 should be subscribed to 0 tracks from c2, actual: 2
   FAIL v1:
-    did not receive tracks from c1
+    c3 should be subscribed to 0 tracks from c2, actual: 2
 ```
 
-The v0 log shows that replacement c2's audio reaches c3 while its replacement
-video section is offered as `inactive`; c3 therefore observes only one of the
-two replacement tracks. The single-PC and v1 variants fail earlier in their
-combined-PC lifecycle, so they require separate topology-aware tracing.
+The v0 log still shows replacement c2 audio reaching c3 while replacement
+video is initially `inactive`. More importantly, the single-PC and v1 results
+now show that c2's original two tracks are not removed from c3 after disconnect.
+The remaining defect is therefore distributed disconnect/unpublish lifecycle
+propagation, not a generic SDP-offer debounce. The local reconnect-grace path
+in `router.rs` removes tracks locally; trace why the non-owner topology does
+not receive the corresponding participant update and forwarding cleanup before
+same-identity rejoin.
 
 ### Upstream behavior to preserve
 
@@ -184,9 +192,9 @@ Relevant upstream files:
 Do not treat the existing narrow inactive-SDP unpublish handling as sufficient:
 it only covers one unbound dual-PC reconciliation case.
 
-## Gap 2: single-PC simultaneous media subscriptions
+## Resolved: single-PC simultaneous media subscriptions
 
-### Failing contract
+### Former failing contract
 
 `livekit/test/singlenode_test.go:TestConnectionStats` first requires both
 participants to publish audio and video and receive both tracks from each
@@ -195,20 +203,22 @@ precondition succeeds.
 
 ### Isolated result
 
-Rerun timestamp: `2026-07-15 15:50`; shard log:
-`target/conformance-investigation/isolated-connection-stats/livekit-shards-20260715-155013/TestConnectionStats/go-test.log`.
+The former failure was reproduced in v0-single-PC and v1, then fixed with
+`single_pc_local_publisher_mid_collision_reclaims_remote_forward_and_requeues_audio`
+in `crates/oxidesfu-signaling/src/router/tests.rs`. That regression failed
+before the repair and verifies that a repurposed local publishing MID removes
+the old remote forwarding row, detaches its sender, and requeues the remote
+audio track.
+
+External validation after the repair:
 
 ```text
-FAIL TestConnectionStats (63.30s)
-  PASS v0
-  FAIL v0-single-peer-connection (31.61s):
-    c2 did not subscribe to both tracks from c1
-  FAIL v1 (31.45s):
-    c2 did not subscribe to both tracks from c1
+PASS TestConnectionStats
 ```
 
-This is not an analytics-statistics defect. It is a single-PC/v1 forwarding or
-negotiation failure when two participants publish concurrently.
+The isolated upstream shard is under
+`target/conformance-investigation/fix-single-pc-connection-stats/` and passes
+all v0, v0-single-PC, and v1 modes.
 
 ### Upstream behavior to preserve
 
@@ -224,20 +234,13 @@ Relevant upstream files:
 - `livekit/pkg/rtc/participant.go` — single-PC setup;
 - `livekit/test/integration_helpers.go` — test mode matrix.
 
-### Repair plan
+### Repair delivered
 
-1. The native `test_connection_stats` now asserts two concurrent tracks in
-   both directions for every topology. Keep it as a fast local regression.
-2. Add or adapt a protocol-level integration harness that reproduces the Go
-   client's sequential `MediaSectionsRequirement` / receive-only offer flow;
-   the native test alone currently passes.
-3. Trace the connection kind used for `ensure_subscriber_forwarding`, sender
-   attachment, offer generation, answer acceptance, and remote-track-to-track
-   correlation.
-4. Ensure each single-PC subscriber negotiation includes both media kinds and
-   that its result is not overwritten by concurrent publication negotiation.
-5. Prove the fix with isolated `TestConnectionStats`, then a broader single-PC
-   media suite.
+1. Keep the native `test_connection_stats` as a fast RTP regression.
+2. Keep the router-level MID-reuse regression as the deterministic signaling
+   guard.
+3. Keep the external `TestConnectionStats` shard as the authoritative Go/Pion
+   wire-compatibility check.
 
 ## Watch item: classic v0 slow reliable-data subscriber
 

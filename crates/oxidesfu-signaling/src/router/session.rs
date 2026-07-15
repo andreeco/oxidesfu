@@ -3941,6 +3941,84 @@ fn single_pc_offer_media_kinds(
         .collect()
 }
 
+async fn reclaim_single_pc_forwarding_on_publisher_mids(
+    state: &SignalState,
+    room_name: &str,
+    subscriber_identity: &str,
+    subscriber_pc: &oxidesfu_rtc::PeerConnection,
+    publisher_mids: &HashSet<String>,
+) -> oxidesfu_rtc::RtcResult<()> {
+    for publisher_mid in publisher_mids {
+        let reclaimed_tracks = state.forward_tracks.remove_subscriber_mid(
+            room_name,
+            subscriber_identity,
+            publisher_mid,
+        );
+
+        for (publisher_identity, track_sid, forward_track) in reclaimed_tracks {
+            state.media_forwarding.remove(
+                room_name,
+                &publisher_identity,
+                &track_sid,
+                subscriber_identity,
+            );
+            state.pending_media_section_requests.remove(
+                room_name,
+                &publisher_identity,
+                &track_sid,
+                subscriber_identity,
+            );
+            state.rtp_forwarding.remove(
+                room_name,
+                &publisher_identity,
+                &track_sid,
+                subscriber_identity,
+            );
+
+            subscriber_pc
+                .remove_forwarding_track(&forward_track)
+                .await?;
+
+            let track = state
+                .rooms
+                .get_participant(room_name, &publisher_identity)
+                .ok()
+                .and_then(|participant| {
+                    participant
+                        .tracks
+                        .into_iter()
+                        .find(|track| track.sid == track_sid)
+                });
+            let Some(track) = track else {
+                continue;
+            };
+
+            let track_kind = if track.r#type == proto::TrackType::Video as i32 {
+                rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Video
+            } else {
+                rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Audio
+            };
+            state.pending_media_section_requests.insert_once(
+                room_name,
+                &publisher_identity,
+                &track_sid,
+                subscriber_identity,
+                pending_media_section_kind_from_track_kind(track_kind),
+            );
+            tracing::info!(
+                room = %room_name,
+                subscriber_identity,
+                publisher_identity,
+                track_sid,
+                publisher_mid,
+                "single_pc_forwarding_reclaimed_for_local_publisher_mid"
+            );
+        }
+    }
+
+    Ok(())
+}
+
 pub(crate) async fn answer_publisher_offer(
     offer: proto::SessionDescription,
     state: &SignalState,
@@ -4017,6 +4095,15 @@ pub(crate) async fn answer_publisher_offer(
             "single_pc_existing_pc_offer_classified"
         );
         let offer_uses_ice_trickle = offer_advertises_ice_trickle(&offer_sdp);
+        reclaim_single_pc_forwarding_on_publisher_mids(
+            state,
+            room_name,
+            identity,
+            &existing_peer_connection,
+            &publisher_mids,
+        )
+        .await
+        .map_err(|err| prost::DecodeError::new(err.to_string()))?;
         let receive_mids = receive_sections
             .iter()
             .map(|section| section.mid.clone())
@@ -4176,6 +4263,15 @@ pub(crate) async fn answer_publisher_offer(
         "single_pc_new_pc_offer_classified"
     );
     let offer_uses_ice_trickle = offer_advertises_ice_trickle(&offer_sdp);
+    reclaim_single_pc_forwarding_on_publisher_mids(
+        state,
+        room_name,
+        identity,
+        &peer_connection,
+        &publisher_mids,
+    )
+    .await
+    .map_err(|err| prost::DecodeError::new(err.to_string()))?;
     let receive_mids = receive_sections
         .iter()
         .map(|section| section.mid.clone())
