@@ -33,8 +33,10 @@ test('final adaptive low request keeps the active Firefox receiver advancing', a
   const serverUrl = process.env.OXIDESFU_URL;
 
   const room = `browser-adaptive-${randomUUID()}`;
-  const publisherContext = await browser.newContext({ permissions: ['camera', 'microphone'] });
-  const subscriberContext = await browser.newContext({ permissions: ['camera', 'microphone'] });
+  // Firefox does not support Playwright's context-level camera permission API.
+  // The project-level media.navigator.* preferences provide fake media access.
+  const publisherContext = await browser.newContext();
+  const subscriberContext = await browser.newContext();
   const publisher = await publisherContext.newPage();
   const subscriber = await subscriberContext.newPage();
   const publisherUrl = `/?role=publisher&url=${encodeURIComponent(serverUrl!)}&token=${encodeURIComponent(token('browser-publisher', room))}`;
