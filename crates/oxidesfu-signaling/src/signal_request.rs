@@ -21,6 +21,12 @@ fn emit_track_setting_quality_update(state: &SignalState, room_name: &str, track
     else {
         return;
     };
+    tracing::info!(
+        room = room_name,
+        publisher_identity,
+        track_sid,
+        "track_settings_effective_publisher_demand_update"
+    );
     crate::router::session::emit_aggregate_subscribed_quality_update_for_track(
         state,
         room_name,
@@ -748,6 +754,15 @@ pub(crate) async fn signal_response_for_request(
                 .schedule_from_request(room_name, identity, &request);
 
             for track_sid in immediate {
+                tracing::info!(
+                    room = room_name,
+                    subscriber_identity = identity,
+                    track_sid,
+                    settings_revision = state
+                        .track_settings
+                        .revision_for_track(room_name, identity, &track_sid,),
+                    "track_settings_effective_immediate"
+                );
                 emit_track_setting_quality_update(state, room_name, &track_sid);
             }
 
@@ -761,6 +776,17 @@ pub(crate) async fn signal_response_for_request(
                         .track_settings
                         .apply_pending_for_track(&room_name, &identity, &track_sid, generation)
                     {
+                        tracing::info!(
+                            room = %room_name,
+                            subscriber_identity = %identity,
+                            track_sid = %track_sid,
+                            settings_revision = state.track_settings.revision_for_track(
+                                &room_name,
+                                &identity,
+                                &track_sid,
+                            ),
+                            "track_settings_effective_debounced"
+                        );
                         emit_track_setting_quality_update(&state, &room_name, &track_sid);
                     }
                 });

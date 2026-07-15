@@ -5667,8 +5667,10 @@ async fn forward_publisher_remote_track(
                                         publisher_identity = %publisher_identity,
                                         track_sid = %track_sid,
                                         subscriber_identity = %key.3,
+                                        settings_revision,
+                                        requested_max_quality = ?decision.requested_max_quality,
                                         selected_incoming_ssrc = effective_video_ssrc,
-                                        "subscriber_video_layer_selected"
+                                        "subscriber_video_layer_selected_and_pli_requested"
                                     );
                                 }
                             }
