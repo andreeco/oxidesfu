@@ -1864,6 +1864,8 @@ async fn test_single_publisher_data_track() {
     server.abort();
 }
 
+static OWNED_TURN_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn reserve_local_udp_port(bind_ip: &str) -> u16 {
     std::net::UdpSocket::bind(format!("{bind_ip}:0"))
         .expect("ephemeral UDP port should bind")
@@ -1894,6 +1896,8 @@ fn owned_turn_config(
 // Upstream: livekit/test/singlenode_test.go::TestTurnRelay
 #[tokio::test]
 async fn test_turn_relay() {
+    let _turn_test_guard = OWNED_TURN_TEST_LOCK.lock().await;
+
     struct Case {
         name: &'static str,
         allow_restricted_peer_cidrs: Vec<String>,
@@ -2061,6 +2065,8 @@ const STUN_ATTR_DATA: u16 = 0x0013;
 const STUN_ATTR_REALM: u16 = 0x0014;
 const STUN_ATTR_NONCE: u16 = 0x0015;
 const STUN_ATTR_REQUESTED_TRANSPORT: u16 = 0x0019;
+const STUN_ATTR_MESSAGE_INTEGRITY_SHA256: u16 = 0x001C;
+const STUN_ATTR_PASSWORD_ALGORITHM: u16 = 0x001D;
 
 #[derive(Debug)]
 struct TurnResponse {
@@ -2106,6 +2112,26 @@ fn turn_long_term_key(username: &str, realm: &str, password: &str) -> Vec<u8> {
     Md5::digest(format!("{username}:{realm}:{password}").as_bytes()).to_vec()
 }
 
+fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+
+    let mut padded_key = [0_u8; 64];
+    if key.len() > padded_key.len() {
+        padded_key[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        padded_key[..key.len()].copy_from_slice(key);
+    }
+
+    let mut inner = Sha256::new();
+    inner.update(padded_key.map(|byte| byte ^ 0x36));
+    inner.update(message);
+
+    let mut outer = Sha256::new();
+    outer.update(padded_key.map(|byte| byte ^ 0x5c));
+    outer.update(inner.finalize());
+    outer.finalize().into()
+}
+
 fn build_allocate_request(
     transaction_id: [u8; 12],
     credentials: Option<(&str, &str, &str, &str)>,
@@ -2149,6 +2175,43 @@ fn build_allocate_request(
     request.extend_from_slice(&STUN_MAGIC_COOKIE.to_be_bytes());
     request.extend_from_slice(&transaction_id);
     request.extend_from_slice(&attributes);
+    request
+}
+
+fn build_sha256_allocate_request(
+    transaction_id: [u8; 12],
+    username: &str,
+    realm: &str,
+    nonce: &str,
+    password: &str,
+) -> Vec<u8> {
+    let mut attributes = Vec::new();
+    append_stun_attribute(
+        &mut attributes,
+        STUN_ATTR_REQUESTED_TRANSPORT,
+        &[17, 0, 0, 0],
+    );
+    append_stun_attribute(&mut attributes, STUN_ATTR_USERNAME, username.as_bytes());
+    append_stun_attribute(&mut attributes, STUN_ATTR_REALM, realm.as_bytes());
+    append_stun_attribute(&mut attributes, STUN_ATTR_NONCE, nonce.as_bytes());
+    append_stun_attribute(&mut attributes, STUN_ATTR_PASSWORD_ALGORITHM, &[0, 2, 0, 0]);
+
+    let message_length = attributes.len() + 36;
+    let mut request = Vec::with_capacity(20 + message_length);
+    request.extend_from_slice(&TURN_ALLOCATE_REQUEST.to_be_bytes());
+    request.extend_from_slice(&(message_length as u16).to_be_bytes());
+    request.extend_from_slice(&STUN_MAGIC_COOKIE.to_be_bytes());
+    request.extend_from_slice(&transaction_id);
+    request.extend_from_slice(&attributes);
+
+    use sha2::{Digest, Sha256};
+    let key = Sha256::digest(format!("{username}:{realm}:{password}").as_bytes());
+    let integrity = hmac_sha256(&key, &request);
+    append_stun_attribute(
+        &mut request,
+        STUN_ATTR_MESSAGE_INTEGRITY_SHA256,
+        &integrity,
+    );
     request
 }
 
@@ -2423,9 +2486,64 @@ async fn allocate_response_for(
     send_allocate(&socket, Some((username, &realm, &nonce, password))).await
 }
 
+#[tokio::test]
+async fn test_turn_sha256_allocate_authentication() {
+    let _turn_test_guard = OWNED_TURN_TEST_LOCK.lock().await;
+
+    let turn_port = reserve_local_udp_port("127.0.0.1");
+    let fixture = spawn_single_node_with_owned_turn(owned_turn_config(turn_port, Vec::new(), Vec::new())).await;
+    let turn_addr = std::net::SocketAddr::from(([127, 0, 0, 1], turn_port));
+    let credentials = oxidesfu_server::signal_ice_servers_for_participant(&fixture.config, "PA_sha256")
+        .into_iter()
+        .find(|server| server.urls.iter().any(|url| url.starts_with("turn:")))
+        .expect("enabled TURN should advertise a TURN server");
+
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("TURN test client socket should bind");
+    socket.connect(turn_addr).await.expect("TURN test client should connect");
+    let challenge = send_allocate(&socket, None).await;
+    assert_eq!(challenge.message_type, TURN_ALLOCATE_ERROR, "initial Allocate should challenge");
+    assert_eq!(turn_error_code(&challenge), 401, "initial Allocate should be unauthorized");
+    let realm = required_turn_attribute(&challenge, STUN_ATTR_REALM);
+    let nonce = required_turn_attribute(&challenge, STUN_ATTR_NONCE);
+
+    let transaction_id = turn_transaction_id();
+    socket
+        .send(&build_sha256_allocate_request(
+            transaction_id,
+            &credentials.username,
+            &realm,
+            &nonce,
+            &credentials.credential,
+        ))
+        .await
+        .expect("SHA-256 authenticated Allocate should send");
+    let mut response_bytes = [0_u8; 2048];
+    let response_length = tokio::time::timeout(Duration::from_secs(3), socket.recv(&mut response_bytes))
+        .await
+        .expect("SHA-256 Allocate response should arrive")
+        .expect("SHA-256 Allocate response should read");
+    let response = parse_turn_response(&response_bytes[..response_length])
+        .expect("SHA-256 Allocate response should be a valid STUN message");
+
+    assert_eq!(response.transaction_id, transaction_id, "response must match Allocate transaction");
+    assert_eq!(response.message_type, TURN_ALLOCATE_SUCCESS, "SHA-256 credentials should allocate");
+    let integrity = response
+        .attributes
+        .iter()
+        .find_map(|(kind, value)| (*kind == STUN_ATTR_MESSAGE_INTEGRITY_SHA256).then_some(value))
+        .expect("SHA-256 Allocate response should carry SHA-256 integrity");
+    assert_eq!(integrity.len(), 32, "SHA-256 integrity must be 32 bytes");
+
+    fixture.shutdown().await;
+}
+
 // Upstream: livekit/test/singlenode_test.go::TestTurnAuthFailure
 #[tokio::test]
 async fn test_turn_auth_failure() {
+    let _turn_test_guard = OWNED_TURN_TEST_LOCK.lock().await;
+
     let turn_port = reserve_local_udp_port("127.0.0.1");
     let fixture = spawn_single_node_with_owned_turn(owned_turn_config(turn_port, Vec::new(), Vec::new())).await;
     let turn_addr = std::net::SocketAddr::from(([127, 0, 0, 1], turn_port));

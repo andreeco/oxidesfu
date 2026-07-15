@@ -64,7 +64,7 @@ tokio-tungstenite = "0.29.0"
 tower = { version = "0.5.3", features = ["util"] }
 # Pinned from andreeco/turn-rs' oxidesfu/turn-runtime-integration branch for
 # LiveKit-compatible in-process TURN integration.
-turn-server = { git = "https://github.com/andreeco/turn-rs.git", rev = "672eddb660a7d462bdbe10c4aa10924fa7170cec", default-features = false, features = ["udp"] }
+turn-server = { git = "https://github.com/andreeco/turn-rs.git", rev = "79d1bc2a0b92329df51f827036d284ad577ca1ff", default-features = false, features = ["udp"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 # Pinned from andreeco/webrtc's oxidesfu/webrtc-compat branch for LiveKit compatibility.
