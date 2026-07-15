@@ -5,64 +5,19 @@ OxideSFU is a personal _unfinished_ Rust implementation of LiveKit. It should wo
 
 This project is **not affiliated with LiveKit**.
 
-**The project was developed primarily by LLM agents, constrained by TDD, source inspection, compatibility tests, and differential checks against LiveKit behavior.** Some portions may be adapted from Apache-2.0-licensed LiveKit source; see [`NOTICE`](NOTICE) and [`docs/provenance.md`](docs/provenance.md). This is important context so you know what to expect from this project.
+**The project was developed primarily by LLM agents, constrained by TDD, source inspection, compatibility tests, and differential checks against LiveKit behavior.** This is important context so you know what to expect from this project.
 
-This project hopefully helps develop and debug WebRTC implementations in Rust. It also helps benchmark against official LiveKit to find performance gaps.
-
-**Don't expect that I will further develop this project.** Ideally, LiveKit developers or someone else from the Rust community who sees value in the code picks up this project and finishes it well. This publishing may be a handsoff to someone else.
-
-## Licensing status
-
-OxideSFU is currently published under the [Apache License, Version 2.0](LICENSE-APACHE). The maintainer may consider publishing future versions under the MIT License if that is legally permissible for the complete codebase, its provenance, and all contributors. This is only a statement of intent, not a license change: until an explicit future release says otherwise, the Apache-2.0 license remains controlling.
-
-## Benchmarks
-
-Run the full comparison against upstream Go LiveKit from the repository root. Five runs per scenario are recommended for stable results:
-
-```bash
-OXIDESFU_ENABLE_BENCHMARKS=1 OXIDESFU_BENCHMARK_MODE=full OXIDESFU_BENCHMARK_RUNS=1 \
-  cargo test -p oxidesfu-test benchmark_ -- --nocapture
-```
-
-Results are written to `target/benchmarks/`. See the [benchmark guide](crates/oxidesfu-test/src/benchmark/README.md) for prerequisites and regression controls. For CPU, task, lock, and allocation tracing under the same real client load, see the [profiling guide](docs/profiling.md).
+**Don't expect that I will further develop this project.** Ideally, some gifted developers from the Rust community see value in the code and pick it up and finishes this project well. This publishing may be a handsoff to someone else.
 
 ## Conformance status
 
-OxideSFU keeps external compatibility checks in `tools/conformance/` and runs them against upstream-style SDK and server checkouts. These are black-box discovery checks; the OxideSFU Rust tests remain the required regression suite.
-
-| Surface | Latest local result (2026-07-13) | Notes |
-| --- | --- | --- |
-| Rust SDK | ✅ Passed | `rust-sdks-full-suite.sh`; the complete workspace and all targets passed against a local OxideSFU. |
-| LiveKit CLI | ✅ Passed | `livekit-cli-full-suite.sh`. |
-| JavaScript SDK | ✅ Passed | `client-sdk-js-full-suite.sh`. |
-| Go server SDK | ❌ Owned-TURN full run blocked | Focused codec, E2EE H.264, dynacast, region-fallback, ForceTLS, and payload contracts pass. The unfiltered owned-TURN run fails at `TestJoinSinglePeerConnection` because the subscriber misses its immediate reliable data packet. See the [investigation](docs/go-sdk-single-pc-reliable-data-investigation.md). |
-| Native upstream LiveKit ports | ⚠️ 51 / 52 passed | Full serial run on 2026-07-13. `TestDataPublishSlowSubscriber` failed its above-threshold contiguity assertion twice; it is timing-sensitive and remains under investigation. |
-| LiveKit external contracts | 46 / 49 passed | Latest 4-worker full local run on 2026-07-15. `TestConnectionStats`, `TestMultiNodeUpdateAttributes`, and `TestMultinodePublishingUponJoining` failed; `TestMultinodeDataPublishing` passed. Single-worker reruns reproduce `TestConnectionStats` and `TestMultinodePublishingUponJoining`, while `TestMultiNodeUpdateAttributes` passes and is timing-sensitive. |
-
-The owned TURN runtime is externally covered by `TestTurnRelay/allow`, `TestTurnRelay/not-allowed`, `TestTurnRelay/denied-overrides-allowed`, and `TestTurnAuthFailure`. The focused Go SDK owned-TURN probe (`TestForceTLS` and `TestLimitPayloadSize`) passed on 2026-07-13; it still observed bounded relay allocation `486 Allocation Quota Reached` responses while host candidate pairs connected. Do not treat this as general owned-TURN robustness evidence until the unfiltered Go SDK suite passes.
-
-
-
-The canonical named external-contract inventory and its evidence live in [`crates/oxidesfu-test/src/upstream_livekit/README.md`](crates/oxidesfu-test/src/upstream_livekit/README.md#known-external-contract-inventory). Run instructions and per-run log locations are in [`tools/conformance/README.md`](tools/conformance/README.md).
-
-Latest Rust workspace regression run (2026-07-15): `cargo test --workspace` finished with 113 passed, 1 failed, 7 ignored in `oxidesfu-test`; the remaining failure was `upstream_livekit::singlenode::test_single_node_update_subscription_permissions` (timeout waiting for data-track bytes). Two immediate serial isolated reruns produced one failure and one pass, so this test is timing-sensitive rather than a confirmed deterministic regression.
+OxideSFU keeps external compatibility checks in `tools/conformance/` and runs them against upstream-style SDK and server checkouts. There is also a high internal test coverage.
 
 _Passing tests sadly do not mean that everything works as expected._
 
-## Devcontainer + required sibling repositories
+## License
 
-If you use the devcontainer, read `.devcontainer/README.md` first.
-It includes an explicit source map for required sibling repositories used by `tools/conformance/*`.
-
-Current recommended forks/branches for compatibility work:
-
-- `../webrtc` → `git@github.com:andreeco/webrtc.git` on branch `oxidesfu/webrtc-compat`
-  (Cargo fetches its `webrtc`, `rtc`, and `rtc-stun` crates from this branch; `rtc` is not a submodule.)
-- `../othercode/livekit` → `git@github.com:andreeco/livekit.git` on branch `oxidesfu/livekit-compat`
-
-Other sibling repos (`livekit-cli`, `server-sdk-go`, `client-sdk-js`) can be cloned from upstream defaults unless you need custom patches. `rust-sdks` is an exception: workspace tests pin Git dependencies to `andreeco/rust-sdks` commit `d5e98afd78fcf4129393ab75cc9436c564a6f105`; use that fork and revision for compatibility work.
-
-For the backup, rebase, validation, and downstream pin-update procedure for these forks, see [dependency fork rebasing](docs/dependency-fork-rebase.md).
+OxideSFU is currently published under the [Apache License, Version 2.0](LICENSE-APACHE). I may consider publishing future versions under the MIT License if there are so legal restrictions. See also [`NOTICE`](NOTICE) and [`docs/provenance.md`](docs/provenance.md). 
 
 ## Quickstart
 
