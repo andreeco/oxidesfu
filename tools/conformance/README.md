@@ -361,8 +361,11 @@ This is the default/scoped discovery gate and works with clean upstream `livekit
 isolated `./test` shards against a locally spawned OxideSFU. **46 passed and 3
 failed.** The failures are `TestConnectionStats`,
 `TestMultiNodeUpdateAttributes`, and `TestMultinodePublishingUponJoining`.
-`TestMultinodeDataPublishing` passed in this run; the remaining three failures
-still require focused multinode/signaling follow-up.
+`TestMultinodeDataPublishing` passed in this run. A subsequent single-worker
+rerun passed `TestMultiNodeUpdateAttributes` in all three topology variants,
+so that failure is timing-sensitive under the sharded load; isolated
+`TestConnectionStats` and `TestMultinodePublishingUponJoining` still fail and
+remain the reproducible media follow-ups.
 
 ### Broad all-packages mode (`livekit` integration package included)
 

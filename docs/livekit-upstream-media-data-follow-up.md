@@ -3,20 +3,27 @@
 ## Status
 
 After the owned-loopback TURN ICE-candidate fix in OxideSFU commit `97030583`,
-the focused upstream LiveKit TURN contract passes. Three independent upstream
-`./test` compatibility failures remain:
+the focused upstream LiveKit TURN contract passes. The latest recheck on
+2026-07-15 at OxideSFU `HEAD` `e00e6b73` distinguishes two reproducible
+single-worker external compatibility gaps from timing-sensitive failures:
 
-1. media lifecycle during disconnect, same-identity rejoin, and republish;
-2. single-peer-connection media forwarding when both participants publish;
-3. classic dual-PC reliable-data slow-reader backpressure.
+1. media lifecycle during disconnect, same-identity rejoin, and republish
+   (`TestMultinodePublishingUponJoining`);
+2. single-peer-connection media forwarding when both participants publish
+   (`TestConnectionStats`).
 
-These are reproducible in isolated, single-worker shards. They are not caused
-by conformance-shard parallelism and are not TURN allocation or relay failures.
+`TestMultiNodeUpdateAttributes` failed in the preceding 4-worker full suite,
+but passed in a clean single-worker rerun for `v0`, `v0-single-peer-connection`,
+and `v1`; classify it as shard-load/timing-sensitive until repeated-run evidence
+proves otherwise. `TestDataPublishSlowSubscriber` also passed its latest
+single-worker rerun, so it is a watch item rather than a currently reproducible
+reliable-data compatibility gap.
 
-The results in this note were rechecked on 2026-07-15 at OxideSFU `HEAD`
-`55e7751d69e12bfe559ba0390ede30c7c67dbe4a`. That commit optimizes the media
-forwarding hot path but does not change the observed compatibility outcomes
-below.
+The native Rust port
+`upstream_livekit::singlenode::test_single_node_update_subscription_permissions`
+failed once and passed once in consecutive serial isolated runs. Its timeout
+waiting for data-track bytes is therefore also timing-sensitive; it must not be
+reported as a deterministic regression without a stable reproduction.
 
 ## Current Oxide-side test changes
 
@@ -47,7 +54,7 @@ wire-compatibility regression.
 
 | Repository | Revision | Inspected behavior |
 | --- | --- | --- |
-| OxideSFU | `55e7751d69e12bfe559ba0390ede30c7c67dbe4a` | Current rerun baseline; forwarding-state performance optimization. |
+| OxideSFU | `e00e6b73` | Current documentation/rerun baseline; latest isolated external and native-test evidence. |
 | OxideSFU TURN fix | `97030583b587a4038c6d728b7297a866b6c9e185` | Corrected owned loopback TURN candidate configuration and runner isolation. |
 | LiveKit server | `ae09b7d0ad94d764f0c97d183efd36476163e819` | Upstream `./test` contracts and media/data lifecycle behavior. |
 | Pion WebRTC | `6fbce156e0de9764f1ce46ac581c0469ec1d7a04` | Relay candidate gathering and SCTP buffered-amount primitives. |
@@ -74,6 +81,13 @@ OXIDESFU_DISCOVERY_GO_TEST_RUN_PATTERN='^TestConnectionStats$' \
 
 OXIDESFU_DISCOVERY_GO_TEST_RUN_PATTERN='^TestDataPublishSlowSubscriber$' \
   bash tools/conformance/livekit-full-suite-all.sh
+
+OXIDESFU_DISCOVERY_GO_TEST_RUN_PATTERN='^TestMultiNodeUpdateAttributes$' \
+  bash tools/conformance/livekit-full-suite-all.sh
+
+cargo test -p oxidesfu-test \
+  upstream_livekit::singlenode::test_single_node_update_subscription_permissions \
+  -- --nocapture --test-threads=1
 ```
 
 The runner prints the exact per-shard `go-test.log` location. Preserve that
@@ -119,15 +133,15 @@ the replacement tracks.
 
 ### Isolated result
 
-Rerun timestamp: `2026-07-15 14:25`; shard log:
-`target/conformance-investigation/livekit-shards-20260715-142511/TestMultinodePublishingUponJoining/go-test.log`.
+Rerun timestamp: `2026-07-15 15:51`; shard log:
+`target/conformance-investigation/isolated-multinode-publishing/livekit-shards-20260715-155138/TestMultinodePublishingUponJoining/go-test.log`.
 
 ```text
-FAIL TestMultinodePublishingUponJoining (67.12s)
+FAIL TestMultinodePublishingUponJoining (93.73s)
   FAIL v0:
     c3 should be subscribed to 2 tracks from c2, actual: 1
   FAIL v0-single-peer-connection:
-    puj_1 could not connect after timeout
+    did not receive tracks from c1
   FAIL v1:
     did not receive tracks from c1
 ```
@@ -181,15 +195,15 @@ precondition succeeds.
 
 ### Isolated result
 
-Rerun timestamp: `2026-07-15 14:26`; shard log:
-`target/conformance-investigation/livekit-shards-20260715-142646/TestConnectionStats/go-test.log`.
+Rerun timestamp: `2026-07-15 15:50`; shard log:
+`target/conformance-investigation/isolated-connection-stats/livekit-shards-20260715-155013/TestConnectionStats/go-test.log`.
 
 ```text
 FAIL TestConnectionStats (63.30s)
   PASS v0
-  FAIL v0-single-peer-connection (31.43s):
+  FAIL v0-single-peer-connection (31.61s):
     c2 did not subscribe to both tracks from c1
-  FAIL v1 (31.63s):
+  FAIL v1 (31.45s):
     c2 did not subscribe to both tracks from c1
 ```
 
@@ -225,9 +239,9 @@ Relevant upstream files:
 5. Prove the fix with isolated `TestConnectionStats`, then a broader single-PC
    media suite.
 
-## Gap 3: classic v0 slow reliable-data subscriber
+## Watch item: classic v0 slow reliable-data subscriber
 
-### Failing contract
+### Contract under observation
 
 `livekit/test/singlenode_test.go:TestDataPublishSlowSubscriber` creates a
 publisher, fast subscriber, slow-but-not-dropping subscriber, and
@@ -237,22 +251,16 @@ for the fast and eligible slow subscribers.
 
 ### Isolated result
 
-Rerun timestamp: `2026-07-15 14:27`; shard log:
-`target/conformance-investigation/livekit-shards-20260715-142754/TestDataPublishSlowSubscriber/go-test.log`.
+Latest rerun timestamp: `2026-07-15 15:53`; shard log:
+`target/conformance-investigation/isolated-slow-subscriber/livekit-shards-20260715-155318/TestDataPublishSlowSubscriber/go-test.log`.
 
 ```text
-FAIL TestDataPublishSlowSubscriber (16.21s)
-  FAIL v0 (5.01s):
-    slowSubDrop could not connect after timeout
-    slowSubNotDrop could not connect after timeout
-  PASS v0-single-peer-connection
-  PASS v1
+PASS TestDataPublishSlowSubscriber
 ```
 
-This is isolated to classic dual-PC v0, but the current upstream failure is a
-data-only dual-PC connection/negotiation failure before the scenario reaches
-its slow-reader, ordering, or `ErrDataDroppedBySlowReader` assertions. Do not
-claim the reliable-writer policy itself is the confirmed root cause yet.
+The preceding isolated v0 connection failure did not reproduce in this rerun.
+Do not claim that the reliable-writer policy is fixed: retain this as a
+repeat-run watch item, and investigate only if it becomes reproducible again.
 
 ### Upstream behavior to preserve
 
@@ -277,12 +285,12 @@ the current focused failure does not yet reach the writer path.
 
 ### Repair plan
 
-1. Treat the initial v0 data-only dual-PC connection as the first defect:
-   both slow subscribers time out after receiving only the initial server
-   subscriber offer. The same topology succeeds in v0-single-PC and v1.
+1. If the v0 data-only dual-PC connection failure reappears, capture the
+   initial server subscriber offer and establish whether either slow subscriber
+   timed out before the writer policy was exercised.
 2. Repair or replace the existing ignored real-WebRTC port
-   (`upstream_livekit::singlenode::test_data_publish_slow_subscriber`) so it
-   reproduces this connection phase and can become a focused Oxide regression.
+   (`upstream_livekit::singlenode::test_data_publish_slow_subscriber`) so a
+   reproducible connection phase can become a focused Oxide regression.
 3. Once all data-only peers connect, use that regression with a configured slow
    threshold and an explicit reliable channel on the subscriber PC.
 4. Then verify the server selects the channel used by the v0 forwarding path,
