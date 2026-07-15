@@ -1,5 +1,7 @@
 # LiveKit upstream media and data conformance follow-up
 
+_This document serves as a kind of memory for an LLM to fix issues._
+
 ## Status
 
 After the owned-loopback TURN ICE-candidate fix in OxideSFU commit `97030583`,

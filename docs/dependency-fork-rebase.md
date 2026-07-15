@@ -1,5 +1,7 @@
 # Rebasing dependency forks safely
 
+_This document can be considered as a help for agents to update dependencies and was mostly written by an agent._
+
 OxideSFU uses a small number of Git dependency forks for compatibility work. Each
 consumer pins an immutable commit in `Cargo.toml` and `Cargo.lock`; never depend
 on a moving branch for a reproducible build.
@@ -174,18 +176,6 @@ and signaling tests plus the Firefox browser receiver contract.
 Do not change crates.io dependencies such as the root workspace's production
 `livekit-protocol = "0.7.10"` merely because the Rust SDK test fork advances.
 They are separate dependency roles and must be upgraded deliberately.
-
-## Current published compatibility revisions
-
-These values are examples of the revisions recorded by the 2026-07-15 rebase;
-update this table after future rebases:
-
-| Fork | Published compatibility revision |
-| --- | --- |
-| Rust SDK | `88aab601eac42fbba83e196a9b30206cf63945b8` |
-| RTC core fork branch | `c7eee66` (full commit in the fork log) |
-| Outer WebRTC (recorded RTC submodule) | `4472644b29c85b1f2e5638f1feb662484823d2e5` (records RTC `fdc7492` in its submodule) |
-| TURN | `79d1bc2a0b92329df51f827036d284ad577ca1ff` |
 
 ## Commit record
 

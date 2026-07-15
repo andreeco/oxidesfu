@@ -1,5 +1,7 @@
 # Forwarding hot-path performance plan
 
+_This document serves as a kind of memory for an LLM on how to continue with performance optimization._
+
 ## Status
 
 **Phase 1 complete; further optimization is optional and evidence-driven.** The large simulcast forwarding workloads are functionally healthy and the latest two-round mixed high-simulcast comparison is within 5% CPU of the upstream Go LiveKit reference.
