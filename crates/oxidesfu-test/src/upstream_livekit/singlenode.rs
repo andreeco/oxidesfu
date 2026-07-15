@@ -227,51 +227,19 @@ async fn test_connection_stats() {
             .publish_track("c2-vp8", "video", RtpCodecKind::Video, "video/vp8")
             .await;
 
-        let (c1_audio_received, c2_audio_received) = tokio::join!(
-            c1.receive_tracks(1, vec![c2_audio.clone()]),
-            c2.receive_tracks(1, vec![c1_audio.clone()]),
+        let (c1_received, c2_received) = tokio::join!(
+            c1.receive_tracks(2, vec![c2_audio.clone(), c2_vp8.clone()]),
+            c2.receive_tracks(2, vec![c1_audio.clone(), c1_vp8.clone()]),
         );
-        let c1_audio_received = c1_audio_received.unwrap_or_else(|error| {
-            panic!("c1 should receive c2 audio in {}: {error}", topology.name())
+        let c1_received = c1_received.unwrap_or_else(|error| {
+            panic!("c1 should retain both c2 tracks in {}: {error}", topology.name())
         });
-        let c2_audio_received = c2_audio_received.unwrap_or_else(|error| {
-            panic!("c2 should receive c1 audio in {}: {error}", topology.name())
+        let c2_received = c2_received.unwrap_or_else(|error| {
+            panic!("c2 should retain both c1 tracks in {}: {error}", topology.name())
         });
-        assert_eq!(
-            c1_audio_received[0].mime_type.to_ascii_lowercase(),
-            "audio/opus",
-            "c1 should first receive c2 audio in {}",
-            topology.name()
-        );
-        assert_eq!(
-            c2_audio_received[0].mime_type.to_ascii_lowercase(),
-            "audio/opus",
-            "c2 should first receive c1 audio in {}",
-            topology.name()
-        );
 
-        let (c1_video_received, c2_video_received) = tokio::join!(
-            c1.receive_tracks(1, vec![c2_vp8.clone()]),
-            c2.receive_tracks(1, vec![c1_vp8.clone()]),
-        );
-        let c1_video_received = c1_video_received.unwrap_or_else(|error| {
-            panic!("c1 should receive c2 VP8 in {}: {error}", topology.name())
-        });
-        let c2_video_received = c2_video_received.unwrap_or_else(|error| {
-            panic!("c2 should receive c1 VP8 in {}: {error}", topology.name())
-        });
-        assert_eq!(
-            c1_video_received[0].mime_type.to_ascii_lowercase(),
-            "video/vp8",
-            "c1 should then receive c2 VP8 in {}",
-            topology.name()
-        );
-        assert_eq!(
-            c2_video_received[0].mime_type.to_ascii_lowercase(),
-            "video/vp8",
-            "c2 should then receive c1 VP8 in {}",
-            topology.name()
-        );
+        assert_opus_and_vp8_rtp(&c1_received, "c1", "c2", topology);
+        assert_opus_and_vp8_rtp(&c2_received, "c2", "c1", topology);
 
         server.abort();
     }
