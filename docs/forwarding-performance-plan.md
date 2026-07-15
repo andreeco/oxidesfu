@@ -283,7 +283,7 @@ This profile has `exclude_callchain_user=1`; flat VDSO and shared hash samples d
 
 ### 2026-07-15: LBR attempt and non-loopback fallback
 
-The runner's LBR preflight failed on this host before server startup: its CPU PMU does not support branch-stack sampling for `cpu/cycles/PH`. The capability log is retained only in the ignored profile directory; do not report an LBR caller attribution from this machine.
+The runner's LBR preflight failed on this host before server startup. This AMD Zen 5 host exposes a 16-entry raw branch stack (`perf record -e cycles -b` succeeds), but Linux `perf` rejects its LBR **call-graph** request (`perf record --call-graph lbr -e cycles` fails because `cycles:H` does not support branch-stack sampling). The capability log is retained only in the ignored profile directory; raw branch samples alone are not a substituted caller-attribution result, so do not report an LBR caller attribution from this machine.
 
 No `ip netns` client namespace was configured. As a fallback, the profile bound OxideSFU and addressed `lk` through the host LAN address (`192.168.178.196:7880`) in the same network namespace. The resulting 90-second run (`mixed_room_high_simulcast_large-20260715T211528Z-8a59e987`) delivered `160/160` tracks with zero loss and recorded 34K samples with none lost. Its leading samples were `__vdso_clock_gettime` (3.04%), driver event loop (2.08%), `ep_poll_callback` (1.35%), kernel queued spinlock slow path (1.31%), RTC `poll_write_pipeline` (1.13%), `ring` AES-GCM (0.98%), `BuildHasher::hash_one` (0.86%), and the forwarding reader closure (0.85%).
 
