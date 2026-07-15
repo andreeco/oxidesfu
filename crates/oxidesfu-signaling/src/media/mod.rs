@@ -31,6 +31,7 @@ mod rtp_stats_sender;
 mod sequencer;
 mod stream_tracker;
 mod subscriptions;
+mod track_allocation;
 mod track_settings;
 mod trickle;
 mod video_ingress;
@@ -42,6 +43,7 @@ pub(crate) use offer::*;
 pub(crate) use rtcp::*;
 pub(crate) use rtp_forwarding::*;
 pub(crate) use subscriptions::*;
+pub(crate) use track_allocation::*;
 pub(crate) use track_settings::*;
 pub(crate) use video_ingress::*;
 

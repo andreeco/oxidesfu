@@ -104,7 +104,24 @@ LiveKit takes the requested dimensions/quality/FPS in `pkg/rtc/subscribedtrack.g
 
 The Go write architecture differs—`DownTrack.WriteRTP` uses the default pass-through pacer into Pion, while Oxide enqueues selected RTP into a bounded WebRTC driver channel—but it cannot choose the selected source layer because selection precedes the write. It remains a secondary capacity hypothesis only: prove equal selected pre-write bytes and measure driver-channel waits/queue depth before redesigning the write pipeline.
 
-**Required next TDD slice:** replace the first-eligible selector contract with target-aware keyframe-gated selection. Tests must first prove (1) a high target does not latch a low layer that arrives first, (2) desired-layer absence performs one bounded fallback after an injectable acquisition grace, (3) high → low → high transitions converge independently per subscriber, (4) PLI retries stop once locked, and (5) a real native-SDK high/low subscriber probe observes different post-warm-up decoded dimensions and restores high dimensions after a transition. Preserve existing downstream PLI/FIR throttling tests; they cover a separate feedback path.
+### 2026-07-16: selector implementation status and remaining compatibility work
+
+The initial production slice now replaces first-eligible-SSRC latching with a reader-local `SubscriberVideoLayerSelector` (`crates/oxidesfu-signaling/src/media/video_ingress.rs`). It tracks policy, current source, observed sources, acquisition/fallback state, and a bounded target-specific PLI budget. `router/session.rs` invokes it before RTP rewriting, keeps RTP source-switch continuity in the existing `SubscriberRtpForwarder`, uses a dedicated 250 ms selector timer, and retains the independent three-second diagnostics heartbeat. Decodable switch boundaries are implemented for VP8, VP9, H264, and AV1 RTP formats. The native Rust SDK high → low → high contract now asserts decoded-frame dimensions, not just delivery.
+
+This is an important compatibility slice, **not the completed simulcast-layer-selection program**. The remaining work is intentionally explicit:
+
+| Status | Missing behavior / evidence | Required implementation and test |
+|---|---|---|
+| Partial | Allocator-driven policy | `TrackAllocationStore` now supplies a revisioned, target-scoped desired quality to forwarding readers; it is merged with and clamped by the `UpdateTrackSettings` maximum before keyframe-gated selection. A real bandwidth/layout allocator producer and end-to-end allocation transitions remain. |
+| Pending | Temporal target state | Replace the separate admission-style FPS filter with target/current/max temporal-layer state where codec metadata supports it. Preserve the current FPS fallback for metadata-poor codecs. |
+| Pending | Dependency-descriptor switching | Use dependency-descriptor decode-target indications to accept a decodable switching point when it is valid without a codec keyframe. Add VP9/AV1 scalable-stream contract packets derived from the local WebRTC parser. |
+| Partial | Availability and fallback liveness | The reader-local 250 ms timer now expires sources after two seconds and reacquires a live fallback once; the selector regression proves no retry storm/oscillation. Availability is still recently observed RTP rather than descriptor-verified decoder usability. |
+| Partial | Reader-local observability | The three-second target heartbeat now exports maximum/desired/current spatial layer, RID/SSRC, transitions, categorized drops, selector PLIs, rewrite drops, successful RTP packet count/payload bytes, and write errors without hot-path locks, allocation, formatting, or clock reads. Temporal state, PLI suppression/feedback counters, wire-byte rate windows, and a machine-readable profiler snapshot remain. |
+| Complete | Native target isolation | `rust_sdk_room_simulcast_video_quality_isolated_per_subscriber_contract` proves simultaneous low/high decoded dimensions and that upgrading one target does not lower the other. |
+| Pending | Differential evidence | Extend profiling to retain machine-readable post-warm-up selection reports. The report must define bytes/sec as successfully written rewritten RTP bytes over the reporting window, and distinguish selector PLIs from downstream feedback. A Go-comparable result requires client-observed reporting or separately scoped Go instrumentation; Oxide-only internals cannot reveal Go's selected layer. |
+| Pending | Broader validation | Run focused source-switch/RTP-continuity integration coverage, then the workspace suite and clippy. Existing workspace flakes must be reported separately rather than hidden by this feature work. |
+
+**Completed selector TDD coverage:** high does not latch low; non-keyframe source switches drop; high → low → high is keyframe-gated; acquisition falls back; PLI retries are bounded; and target-local controllers isolate state. Existing downstream PLI/FIR throttling remains a separate receiver-feedback path and must not be merged with selector acquisition.
 
 ### Findings
 

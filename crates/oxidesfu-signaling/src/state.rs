@@ -16,7 +16,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::{
     data::DataChannelMessageStore,
     errors::SignalResult,
-    media::TrackSettingsStore,
+    media::{TrackAllocationStore, TrackSettingsStore},
     relay::{
         NonLocalRelayDispatcher, NonLocalRelayRoomServiceIntent, NonLocalRelayRoomServiceResponse,
         NonLocalRelaySignalRequestResponse, NoopNonLocalRelayDispatcher,
@@ -74,6 +74,7 @@ pub struct SignalState {
     pub(crate) subscribe_permissions: SubscribePermissionStore,
     pub(crate) auto_subscribe_preferences: AutoSubscribePreferenceStore,
     pub(crate) track_settings: TrackSettingsStore,
+    pub(crate) track_allocations: TrackAllocationStore,
     pub(crate) media_subscription_limit_audio: Option<usize>,
     pub(crate) media_subscription_limit_video: Option<usize>,
     pub(crate) media_forwarding: MediaForwardingStore,
@@ -194,6 +195,7 @@ impl SignalState {
             subscribe_permissions: SubscribePermissionStore::default(),
             auto_subscribe_preferences: AutoSubscribePreferenceStore::default(),
             track_settings: TrackSettingsStore::default(),
+            track_allocations: TrackAllocationStore::default(),
             media_subscription_limit_audio: None,
             media_subscription_limit_video: None,
             media_forwarding: MediaForwardingStore::default(),

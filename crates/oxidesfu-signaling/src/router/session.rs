@@ -4,7 +4,10 @@ use std::{
 };
 
 use super::*;
-use crate::media::{ForwardTrackKey, SubscriberVideoLayerSelector, VideoIngressDecision};
+use crate::media::{
+    ForwardTrackKey, LayerPacketMetadata, LayerPolicy, SpatialLayer, SubscriberVideoLayerSelector,
+    VideoIngressDecision,
+};
 
 static NEXT_TRACK_SID_COUNTER: AtomicU64 = AtomicU64::new(0);
 const RTCP_EFFECTS_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
@@ -232,6 +235,7 @@ fn retry_pending_remote_tracks_after_track_published(
         let subscribe_permissions = state.subscribe_permissions.clone();
         let auto_subscribe_preferences = state.auto_subscribe_preferences.clone();
         let track_settings = state.track_settings.clone();
+        let track_allocations = state.track_allocations.clone();
         let media_track_cids = state.media_track_cids.clone();
         let pending_remote_tracks = state.pending_remote_tracks.clone();
         let subscriber_offer_ids = state.subscriber_offer_ids.clone();
@@ -254,6 +258,7 @@ fn retry_pending_remote_tracks_after_track_published(
                 &subscribe_permissions,
                 &auto_subscribe_preferences,
                 &track_settings,
+                &track_allocations,
                 &media_track_cids,
                 &pending_remote_tracks,
                 &subscriber_offer_ids,
@@ -1103,6 +1108,7 @@ struct ForwardingDecisionRevisions {
     media_subscription: u64,
     auto_subscribe: u64,
     track_settings: u64,
+    track_allocation: u64,
     room_media_subscription: u64,
 }
 
@@ -1110,8 +1116,22 @@ struct ForwardingDecisionRevisions {
 struct CachedForwardingDecision {
     should_forward_media: bool,
     requested_max_quality: Option<proto::VideoQuality>,
+    desired_quality: Option<proto::VideoQuality>,
     requested_fps: Option<u32>,
     revisions: ForwardingDecisionRevisions,
+}
+
+#[derive(Debug, Default)]
+struct VideoForwardingCounters {
+    layer_switches: u64,
+    drop_waiting_for_keyframe: u64,
+    drop_non_selected_ssrc: u64,
+    drop_above_maximum: u64,
+    drop_unknown_layer: u64,
+    selector_pli_requests: u64,
+    rewrite_drops: u64,
+    successful_rtp_packets: u64,
+    successful_rtp_payload_bytes: u64,
 }
 
 /// Reader-owned state for one subscriber forwarding target.
@@ -1125,7 +1145,9 @@ struct ForwardTarget {
     rtp_forwarder: crate::media::SubscriberRtpForwarder,
     decision: Option<CachedForwardingDecision>,
     settings_revision: Option<u64>,
+    allocation_revision: Option<u64>,
     video_layer_selector: SubscriberVideoLayerSelector,
+    video_counters: VideoForwardingCounters,
     fps_state: FpsForwardingState,
     target_primary_ssrc: Option<Option<u32>>,
     target_payload_type: Option<Option<u8>>,
@@ -1149,7 +1171,9 @@ impl ForwardTarget {
             rtp_forwarder,
             decision: None,
             settings_revision: None,
+            allocation_revision: None,
             video_layer_selector: SubscriberVideoLayerSelector::default(),
+            video_counters: VideoForwardingCounters::default(),
             fps_state: FpsForwardingState::default(),
             target_primary_ssrc: None,
             target_payload_type: None,
@@ -1215,6 +1239,7 @@ fn cached_forwarding_decision_for_subscriber(
     media_subscriptions: &MediaSubscriptionStore,
     auto_subscribe_preferences: &crate::stores::AutoSubscribePreferenceStore,
     track_settings: &crate::media::TrackSettingsStore,
+    track_allocations: &crate::media::TrackAllocationStore,
     rooms: &RoomStore,
     track_info: Option<&proto::TrackInfo>,
     audio_subscription_limit: Option<usize>,
@@ -1229,6 +1254,10 @@ fn cached_forwarding_decision_for_subscriber(
 
     let (room_name, publisher_identity, track_sid, subscriber_identity) = key;
     let settings = track_settings.get_for_track(room_name, subscriber_identity, track_sid);
+    let requested_max_quality =
+        requested_video_quality_from_settings(settings.as_ref(), track_info);
+    let allocated_desired_quality =
+        track_allocations.get_desired_quality_for_track(room_name, subscriber_identity, track_sid);
     let should_forward_media = should_forward_media_for_subscriber_with_settings_value(
         media_subscriptions,
         auto_subscribe_preferences,
@@ -1252,7 +1281,11 @@ fn cached_forwarding_decision_for_subscriber(
     );
     let decision = CachedForwardingDecision {
         should_forward_media,
-        requested_max_quality: requested_video_quality_from_settings(settings.as_ref(), track_info),
+        requested_max_quality,
+        desired_quality: desired_video_quality_from_allocation(
+            requested_max_quality,
+            allocated_desired_quality,
+        ),
         requested_fps: requested_video_fps_from_settings(settings.as_ref()),
         revisions,
     };
@@ -1267,6 +1300,7 @@ fn cached_forwarding_decision_for_target(
     media_subscriptions: &MediaSubscriptionStore,
     auto_subscribe_preferences: &crate::stores::AutoSubscribePreferenceStore,
     track_settings: &crate::media::TrackSettingsStore,
+    track_allocations: &crate::media::TrackAllocationStore,
     rooms: &RoomStore,
     track_info: Option<&proto::TrackInfo>,
     audio_subscription_limit: Option<usize>,
@@ -1280,6 +1314,10 @@ fn cached_forwarding_decision_for_target(
 
     let (room_name, publisher_identity, track_sid, subscriber_identity) = &target.key;
     let settings = track_settings.get_for_track(room_name, subscriber_identity, track_sid);
+    let requested_max_quality =
+        requested_video_quality_from_settings(settings.as_ref(), track_info);
+    let allocated_desired_quality =
+        track_allocations.get_desired_quality_for_track(room_name, subscriber_identity, track_sid);
     let decision = CachedForwardingDecision {
         should_forward_media: should_forward_media_for_subscriber_with_settings_value(
             media_subscriptions,
@@ -1302,7 +1340,11 @@ fn cached_forwarding_decision_for_target(
             audio_subscription_limit,
             video_subscription_limit,
         ),
-        requested_max_quality: requested_video_quality_from_settings(settings.as_ref(), track_info),
+        requested_max_quality,
+        desired_quality: desired_video_quality_from_allocation(
+            requested_max_quality,
+            allocated_desired_quality,
+        ),
         requested_fps: requested_video_fps_from_settings(settings.as_ref()),
         revisions,
     };
@@ -1316,8 +1358,17 @@ fn apply_target_settings_revision(target: &mut ForwardTarget, settings_revision:
     target.settings_revision = Some(settings_revision);
     if changed {
         target.decision = None;
-        target.video_layer_selector = SubscriberVideoLayerSelector::default();
         target.fps_state = FpsForwardingState::default();
+    }
+    changed
+}
+
+/// Applies one effective allocation revision to its reader-owned forwarding target.
+fn apply_target_allocation_revision(target: &mut ForwardTarget, allocation_revision: u64) -> bool {
+    let changed = target.allocation_revision != Some(allocation_revision);
+    target.allocation_revision = Some(allocation_revision);
+    if changed {
+        target.decision = None;
     }
     changed
 }
@@ -1339,6 +1390,23 @@ fn apply_effective_track_settings_change(
         .count()
 }
 
+/// Applies an allocation mutation only to its matching reader target.
+fn apply_effective_track_allocation_change(
+    targets: &mut [ForwardTarget],
+    change: &crate::media::EffectiveTrackAllocationChange,
+) -> usize {
+    targets
+        .iter_mut()
+        .map(|target| {
+            (target.key.0 == change.room
+                && target.key.2 == change.track_sid
+                && target.key.3 == change.subscriber_identity)
+                && apply_target_allocation_revision(target, change.revision)
+        })
+        .filter(|changed| *changed)
+        .count()
+}
+
 /// Recovers from a bounded notification receiver lag without returning to packet polling.
 fn resync_target_settings_revisions(
     targets: &mut [ForwardTarget],
@@ -1350,6 +1418,22 @@ fn resync_target_settings_revisions(
             let revision =
                 track_settings.revision_for_track(&target.key.0, &target.key.3, &target.key.2);
             apply_target_settings_revision(target, revision)
+        })
+        .filter(|changed| *changed)
+        .count()
+}
+
+/// Recovers allocation revisions from bounded receiver lag.
+fn resync_target_allocation_revisions(
+    targets: &mut [ForwardTarget],
+    track_allocations: &crate::media::TrackAllocationStore,
+) -> usize {
+    targets
+        .iter_mut()
+        .map(|target| {
+            let revision =
+                track_allocations.revision_for_track(&target.key.0, &target.key.3, &target.key.2);
+            apply_target_allocation_revision(target, revision)
         })
         .filter(|changed| *changed)
         .count()
@@ -1470,6 +1554,23 @@ fn requested_video_quality_from_settings(
     }
 
     Some(proto::VideoQuality::try_from(settings.quality).unwrap_or(proto::VideoQuality::High))
+}
+
+#[allow(deprecated)]
+fn desired_video_quality_from_allocation(
+    requested_max_quality: Option<proto::VideoQuality>,
+    allocated_desired_quality: Option<proto::VideoQuality>,
+) -> Option<proto::VideoQuality> {
+    match (requested_max_quality, allocated_desired_quality) {
+        (None, None) => None,
+        (None, Some(desired)) => Some(desired),
+        (Some(maximum), None) => Some(maximum),
+        (Some(maximum), Some(desired)) => Some(if (desired as i32) <= (maximum as i32) {
+            desired
+        } else {
+            maximum
+        }),
+    }
 }
 
 #[allow(deprecated)]
@@ -1604,7 +1705,13 @@ impl FpsForwardingState {
         if is_new_frame {
             self.current_timestamp = Some(packet_timestamp);
 
-            let min_timestamp_delta = (90_000_u32 / requested_fps.max(1)).max(1);
+            // RTP clocks are nominal: a 30 FPS source driven at a 33 ms application cadence
+            // advances by 2_970 ticks rather than exactly 3_000. Apply the same 10% tolerance
+            // used for temporal-layer selection so a request at source cadence is not decimated.
+            let min_timestamp_delta = (90_000_u32
+                .saturating_mul(9)
+                .saturating_div(10_u32.saturating_mul(requested_fps.max(1))))
+            .max(1);
             let allow = match self.last_forwarded_timestamp {
                 None => true,
                 Some(last) => packet_timestamp.wrapping_sub(last) >= min_timestamp_delta,
@@ -1660,6 +1767,114 @@ pub(crate) fn max_temporal_layer_for_requested_fps_from_receiver(
 
 pub(crate) fn vp8_temporal_layer_id_from_payload(payload: &[u8]) -> Option<u8> {
     rtc::rtp::codec::vp8::temporal_layer_id_from_payload(payload)
+}
+
+/// Returns whether this VP8 RTP payload begins partition zero of a keyframe.
+///
+/// A simulcast source switch must begin at this boundary. The parser only reads the RTP payload
+/// descriptor and frame tag, so it does not allocate or depend on packet history.
+pub(crate) fn vp8_is_keyframe_start(payload: &[u8]) -> bool {
+    let Some(descriptor) = payload.first().copied() else {
+        return false;
+    };
+    if descriptor & 0x10 == 0 || descriptor & 0x0f != 0 {
+        return false;
+    }
+
+    let mut offset = 1usize;
+    if descriptor & 0x80 != 0 {
+        let Some(extension) = payload.get(offset).copied() else {
+            return false;
+        };
+        offset += 1;
+        if extension & 0x80 != 0 {
+            let Some(picture_id) = payload.get(offset).copied() else {
+                return false;
+            };
+            offset += 1 + usize::from(picture_id & 0x80 != 0);
+        }
+        if extension & 0x40 != 0 {
+            offset += 1;
+        }
+        if extension & 0x20 != 0 || extension & 0x10 != 0 {
+            offset += 1;
+        }
+    }
+
+    payload
+        .get(offset)
+        .is_some_and(|frame_tag| frame_tag & 1 == 0)
+}
+
+/// Returns whether a VP9 RTP packet starts a non-predicted frame.
+pub(crate) fn vp9_is_keyframe_start(payload: &[u8]) -> bool {
+    let Some(descriptor) = payload.first().copied() else {
+        return false;
+    };
+    // RFC draft-ietf-payload-vp9: B marks the start of a frame and P marks an
+    // inter-picture predicted frame. A switch may begin only at B with P clear.
+    descriptor & 0x08 != 0 && descriptor & 0x40 == 0
+}
+
+/// Returns whether an H264 RTP packet begins an IDR NAL unit.
+pub(crate) fn h264_is_keyframe_start(payload: &[u8]) -> bool {
+    let Some(indicator) = payload.first().copied() else {
+        return false;
+    };
+    match indicator & 0x1f {
+        5 => true, // Single NAL unit IDR.
+        24 => {
+            // STAP-A: inspect the contained NAL units without allocating.
+            let mut offset = 1usize;
+            while let Some(length_bytes) = payload.get(offset..offset + 2) {
+                let length = u16::from_be_bytes([length_bytes[0], length_bytes[1]]) as usize;
+                offset += 2;
+                let Some(nal) = payload.get(offset..offset + length) else {
+                    return false;
+                };
+                if nal.first().is_some_and(|header| header & 0x1f == 5) {
+                    return true;
+                }
+                offset += length;
+            }
+            false
+        }
+        28 | 29 => payload
+            .get(1)
+            .is_some_and(|header| header & 0x80 != 0 && header & 0x1f == 5),
+        _ => false,
+    }
+}
+
+/// Returns whether an AV1 RTP packet begins a new decodable coded-video sequence.
+pub(crate) fn av1_is_keyframe_start(payload: &[u8]) -> bool {
+    let Some(aggregation_header) = payload.first().copied() else {
+        return false;
+    };
+    // RFC 9364 N marks a new coded video sequence. This is the same boundary used by the local
+    // AV1 depacketizer before it accepts decoded frames.
+    aggregation_header & 0x08 != 0
+}
+
+/// Determines whether a packet may start a decodable spatial simulcast source after a switch.
+/// Codec formats without a verified detector deliberately return false rather than allowing an
+/// arbitrary delta frame to become the new source.
+pub(crate) fn video_is_decodable_switch_point(codec_mime: Option<&str>, payload: &[u8]) -> bool {
+    let Some(codec_mime) = codec_mime else {
+        return false;
+    };
+    let mime = codec_mime.to_ascii_lowercase();
+    if mime.contains("vp8") {
+        vp8_is_keyframe_start(payload)
+    } else if mime.contains("vp9") {
+        vp9_is_keyframe_start(payload)
+    } else if mime.contains("h264") {
+        h264_is_keyframe_start(payload)
+    } else if mime.contains("av1") {
+        av1_is_keyframe_start(payload)
+    } else {
+        false
+    }
 }
 
 pub(crate) fn vp9_temporal_layer_id_from_payload(payload: &[u8]) -> Option<u8> {
@@ -2653,6 +2868,11 @@ pub(crate) async fn handle_media_subscription_request(
                     subscriber_identity,
                     &prior_track.sid,
                 );
+                state.track_allocations.remove_for_track(
+                    room_name,
+                    subscriber_identity,
+                    &prior_track.sid,
+                );
                 let _ = remove_subscriber_media_forwarding_for_track(
                     state,
                     room_name,
@@ -2713,6 +2933,9 @@ pub(crate) async fn handle_media_subscription_request(
             state
                 .track_settings
                 .remove_for_track(room_name, subscriber_identity, &track_sid);
+            state
+                .track_allocations
+                .remove_for_track(room_name, subscriber_identity, &track_sid);
             let _ = remove_subscriber_media_forwarding_for_track(
                 state,
                 room_name,
@@ -2741,6 +2964,9 @@ pub(crate) async fn handle_media_subscription_request(
             );
             state
                 .track_settings
+                .remove_for_track(room_name, subscriber_identity, &track_sid);
+            state
+                .track_allocations
                 .remove_for_track(room_name, subscriber_identity, &track_sid);
             state.media_forwarding.remove(
                 room_name,
@@ -3878,6 +4104,7 @@ pub(crate) async fn create_subscriber_offer(
             subscribe_permissions: state.subscribe_permissions.clone(),
             auto_subscribe_preferences: state.auto_subscribe_preferences.clone(),
             track_settings: state.track_settings.clone(),
+            track_allocations: state.track_allocations.clone(),
             pending_remote_tracks: state.pending_remote_tracks.clone(),
             forward_tracks: state.forward_tracks.clone(),
             rtp_forwarding: state.rtp_forwarding.clone(),
@@ -4352,6 +4579,7 @@ pub(crate) async fn answer_publisher_offer(
             subscribe_permissions: state.subscribe_permissions.clone(),
             auto_subscribe_preferences: state.auto_subscribe_preferences.clone(),
             track_settings: state.track_settings.clone(),
+            track_allocations: state.track_allocations.clone(),
             pending_remote_tracks: state.pending_remote_tracks.clone(),
             forward_tracks: state.forward_tracks.clone(),
             rtp_forwarding: state.rtp_forwarding.clone(),
@@ -4467,6 +4695,7 @@ struct PeerConnectionEventForwardingContext {
     media_track_cids: crate::stores::MediaTrackCidStore,
     pending_remote_tracks: crate::stores::PendingPublisherRemoteTrackStore,
     track_settings: crate::media::TrackSettingsStore,
+    track_allocations: crate::media::TrackAllocationStore,
     forward_tracks: ForwardTrackStore,
     rtp_forwarding: RtpForwardingStore,
     signal_connections: SignalConnectionStore,
@@ -4514,6 +4743,7 @@ fn forward_peer_connection_events(
             media_track_cids,
             pending_remote_tracks,
             track_settings,
+            track_allocations,
             forward_tracks,
             rtp_forwarding,
             signal_connections,
@@ -4564,6 +4794,7 @@ fn forward_peer_connection_events(
                     let subscribe_permissions = subscribe_permissions.clone();
                     let auto_subscribe_preferences = auto_subscribe_preferences.clone();
                     let track_settings = track_settings.clone();
+                    let track_allocations = track_allocations.clone();
                     let media_track_cids = media_track_cids.clone();
                     let pending_remote_tracks = pending_remote_tracks.clone();
                     let subscriber_offer_ids = state.subscriber_offer_ids.clone();
@@ -4590,6 +4821,7 @@ fn forward_peer_connection_events(
                             &subscribe_permissions,
                             &auto_subscribe_preferences,
                             &track_settings,
+                            &track_allocations,
                             &media_track_cids,
                             &pending_remote_tracks,
                             &subscriber_offer_ids,
@@ -5352,6 +5584,7 @@ async fn forward_publisher_remote_track(
     subscribe_permissions: &crate::stores::SubscribePermissionStore,
     auto_subscribe_preferences: &crate::stores::AutoSubscribePreferenceStore,
     track_settings: &crate::media::TrackSettingsStore,
+    track_allocations: &crate::media::TrackAllocationStore,
     media_track_cids: &crate::stores::MediaTrackCidStore,
     pending_remote_tracks: &crate::stores::PendingPublisherRemoteTrackStore,
     subscriber_offer_ids: &crate::stores::SubscriberOfferIdStore,
@@ -5559,6 +5792,7 @@ async fn forward_publisher_remote_track(
     let media_subscriptions = media_subscriptions.clone();
     let auto_subscribe_preferences = auto_subscribe_preferences.clone();
     let track_settings = track_settings.clone();
+    let track_allocations = track_allocations.clone();
     let rooms = rooms.clone();
     let rtp_forwarding = rtp_forwarding.clone();
     let signal_connections = signal_connections.clone();
@@ -5577,11 +5811,16 @@ async fn forward_publisher_remote_track(
         let mut logged_no_forward_tracks = false;
         let mut logged_first_rtp = false;
         let mut keyframe_retry_tick = tokio::time::interval_at(
+            tokio::time::Instant::now() + std::time::Duration::from_millis(250),
+            std::time::Duration::from_millis(250),
+        );
+        keyframe_retry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut forwarding_debug_tick = tokio::time::interval_at(
             tokio::time::Instant::now() + std::time::Duration::from_secs(3),
             std::time::Duration::from_secs(3),
         );
-        keyframe_retry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut last_video_media_ssrc: Option<u32> = None;
+        forwarding_debug_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         let mut video_ssrc_rids = HashMap::<u32, Option<String>>::new();
         let mut video_ssrc_codec_mime = HashMap::<u32, Option<String>>::new();
         let mut video_ssrc_is_repair = HashMap::<u32, bool>::new();
@@ -5590,8 +5829,10 @@ async fn forward_publisher_remote_track(
         let mut had_forward_targets: Option<bool> = None;
         let mut track_subscribed_signaled_to_publisher = false;
         let mut forwarding_debug_heartbeat_due = false;
+        let mut last_video_media_ssrc: Option<u32> = None;
         let mut cached_forward_tracks_revision: Option<u64> = None;
         let mut track_settings_changes = track_settings.subscribe_effective_changes();
+        let mut track_allocation_changes = track_allocations.subscribe_effective_changes();
         let mut cached_forward_targets = Vec::<ForwardTarget>::new();
 
         loop {
@@ -5632,25 +5873,41 @@ async fn forward_publisher_remote_track(
                         remote_track.recv_event(),
                     ) => result,
                     _ = keyframe_retry_tick.tick() => {
+                        let keyframe_requests = cached_forward_targets
+                            .iter_mut()
+                            .filter_map(|target| {
+                                let request = target.video_layer_selector.on_timer();
+                                if request.is_some() {
+                                    target.video_counters.selector_pli_requests += 1;
+                                }
+                                request
+                            })
+                            .map(|request| Box::new(
+                                rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication {
+                                    sender_ssrc: 0,
+                                    media_ssrc: request.media_ssrc,
+                                },
+                            ) as Box<dyn rtc::rtcp::Packet>)
+                            .collect::<Vec<_>>();
+                        if !keyframe_requests.is_empty() {
+                            let _ = remote_track.write_rtcp_packets(keyframe_requests).await;
+                        }
+                        continue;
+                    }
+                    _ = forwarding_debug_tick.tick() => {
                         forwarding_debug_heartbeat_due = true;
+                        // This is track-level recovery, distinct from target-layer acquisition.
+                        // It preserves the prior periodic keyframe behavior for an already
+                        // locked stream without adding time checks to the RTP packet path.
                         if let Some(media_ssrc) = last_video_media_ssrc
                             && !cached_forward_targets.is_empty()
                         {
-                            tracing::debug!(
-                                room = %room_name,
-                                publisher_identity = %publisher_identity,
-                                track_sid = %track_sid,
-                                media_ssrc,
-                                "requesting_periodic_keyframe_for_video_forwarding_track"
-                            );
-                            let _ = remote_track
-                                .write_rtcp_packets(vec![Box::new(
-                                    rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication {
-                                        sender_ssrc: 0,
-                                        media_ssrc,
-                                    },
-                                )])
-                                .await;
+                            let _ = remote_track.write_rtcp_packets(vec![Box::new(
+                                rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication {
+                                    sender_ssrc: 0,
+                                    media_ssrc,
+                                },
+                            )]).await;
                         }
                         continue;
                     }
@@ -5683,6 +5940,35 @@ async fn forward_publisher_remote_track(
                         }
                         continue;
                     }
+                    change = track_allocation_changes.recv() => {
+                        match change {
+                            Ok(change) => {
+                                let changed_targets = apply_effective_track_allocation_change(
+                                    &mut cached_forward_targets,
+                                    &change,
+                                );
+                                if changed_targets > 0 {
+                                    tracing::debug!(
+                                        room = %room_name,
+                                        publisher_identity = %publisher_identity,
+                                        track_sid = %track_sid,
+                                        subscriber_identity = %change.subscriber_identity,
+                                        allocation_revision = change.revision,
+                                        changed_targets,
+                                        "subscriber_track_allocation_applied_to_forwarding_target"
+                                    );
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                resync_target_allocation_revisions(
+                                    &mut cached_forward_targets,
+                                    &track_allocations,
+                                );
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                        continue;
+                    }
                 }
             } else {
                 tokio::select! {
@@ -5702,6 +5988,24 @@ async fn forward_publisher_remote_track(
                                 resync_target_settings_revisions(
                                     &mut cached_forward_targets,
                                     &track_settings,
+                                );
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                        continue;
+                    }
+                    change = track_allocation_changes.recv() => {
+                        match change {
+                            Ok(change) => {
+                                apply_effective_track_allocation_change(
+                                    &mut cached_forward_targets,
+                                    &change,
+                                );
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                resync_target_allocation_revisions(
+                                    &mut cached_forward_targets,
+                                    &track_allocations,
                                 );
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -5739,6 +6043,7 @@ async fn forward_publisher_remote_track(
                                 media_subscription: media_subscription_revision,
                                 auto_subscribe: auto_subscribe_revision,
                                 track_settings: target.settings_revision.unwrap_or_default(),
+                                track_allocation: target.allocation_revision.unwrap_or_default(),
                                 room_media_subscription: room_media_subscription_revision,
                             };
                             let (key_room, key_publisher, key_track_sid, key_subscriber) =
@@ -5776,6 +6081,7 @@ async fn forward_publisher_remote_track(
                                 &media_subscriptions,
                                 &auto_subscribe_preferences,
                                 &track_settings,
+                                &track_allocations,
                                 &rooms,
                                 Some(&track_info),
                                 audio_subscription_limit,
@@ -5905,6 +6211,10 @@ async fn forward_publisher_remote_track(
                         had_forward_targets = Some(had_targets_now);
                     }
 
+                    if is_video_track {
+                        last_video_media_ssrc = Some(packet.header.ssrc);
+                    }
+
                     if cached_forward_targets.is_empty() {
                         if !logged_no_forward_tracks {
                             tracing::debug!(
@@ -5919,9 +6229,6 @@ async fn forward_publisher_remote_track(
                     }
                     logged_no_forward_tracks = false;
 
-                    if is_video_track {
-                        last_video_media_ssrc = Some(packet.header.ssrc);
-                    }
                     if is_video_track && forwarding_targets_changed {
                         tracing::debug!(
                             room = %room_name,
@@ -5989,6 +6296,7 @@ async fn forward_publisher_remote_track(
                             media_subscription: media_subscription_revision,
                             auto_subscribe: auto_subscribe_revision,
                             track_settings: settings_revision,
+                            track_allocation: target.allocation_revision.unwrap_or_default(),
                             room_media_subscription: room_media_subscription_revision,
                         };
                         let (key_room, key_publisher, key_track_sid, key_subscriber) = &target.key;
@@ -6025,6 +6333,7 @@ async fn forward_publisher_remote_track(
                             &media_subscriptions,
                             &auto_subscribe_preferences,
                             &track_settings,
+                            &track_allocations,
                             &rooms,
                             Some(&track_info),
                             audio_subscription_limit,
@@ -6035,43 +6344,69 @@ async fn forward_publisher_remote_track(
                             continue;
                         }
 
-                        let packet_is_eligible_for_subscriber = !track_supports_quality_control
-                            || should_forward_video_packet_for_requested_quality(
-                                decision.requested_max_quality,
-                                packet_video_quality,
-                            );
-                        let layer_selection = target.video_layer_selector.observe_packet(
-                            effective_video_ssrc,
-                            packet_is_eligible_for_subscriber,
-                        );
-                        match layer_selection {
-                            VideoIngressDecision::Forward {
-                                selected_ssrc_changed,
-                            } => {
-                                if selected_ssrc_changed {
-                                    let _ = remote_track
-                                        .write_rtcp_packets(vec![Box::new(
-                                            rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication {
-                                                sender_ssrc: 0,
-                                                media_ssrc: packet.header.ssrc,
-                                            },
-                                        )])
-                                        .await;
-                                    tracing::debug!(
-                                        room = %room_name,
-                                        publisher_identity = %publisher_identity,
-                                        track_sid = %track_sid,
-                                        subscriber_identity = %target.subscriber_identity(),
-                                        settings_revision,
-                                        requested_max_quality = ?decision.requested_max_quality,
-                                        selected_incoming_ssrc = effective_video_ssrc,
-                                        "subscriber_video_layer_selected_and_pli_requested"
-                                    );
+                        if is_video_track && track_supports_quality_control {
+                            let requested_quality = decision
+                                .requested_max_quality
+                                .unwrap_or(proto::VideoQuality::High);
+                            let desired_quality =
+                                decision.desired_quality.unwrap_or(requested_quality);
+                            let policy = LayerPolicy {
+                                max: SpatialLayer::from_quality(requested_quality),
+                                desired: SpatialLayer::from_quality(desired_quality),
+                            };
+                            target.video_layer_selector.set_policy(policy);
+                            let layer_selection =
+                                target
+                                    .video_layer_selector
+                                    .observe_packet(LayerPacketMetadata {
+                                        ssrc: effective_video_ssrc,
+                                        spatial: packet_video_quality
+                                            .map(SpatialLayer::from_quality),
+                                        is_decodable_switch_point: video_is_decodable_switch_point(
+                                            packet_codec_mime,
+                                            &packet.payload,
+                                        ),
+                                    });
+                            match layer_selection {
+                                VideoIngressDecision::Forward {
+                                    selected_ssrc_changed,
+                                } => {
+                                    if selected_ssrc_changed {
+                                        target.video_counters.layer_switches += 1;
+                                        tracing::debug!(
+                                            room = %room_name,
+                                            publisher_identity = %publisher_identity,
+                                            track_sid = %track_sid,
+                                            subscriber_identity = %target.subscriber_identity(),
+                                            settings_revision,
+                                            requested_max_quality = ?decision.requested_max_quality,
+                                            desired_quality = ?decision.desired_quality,
+                                            selected_incoming_ssrc = effective_video_ssrc,
+                                            selected_spatial = ?target.video_layer_selector.current_spatial(),
+                                            "subscriber_video_layer_switched"
+                                        );
+                                    }
                                 }
-                            }
-                            VideoIngressDecision::DropNonSelectedSsrc => {
-                                filtered_out_targets += 1;
-                                continue;
+                                VideoIngressDecision::DropNonSelectedSsrc => {
+                                    target.video_counters.drop_non_selected_ssrc += 1;
+                                    filtered_out_targets += 1;
+                                    continue;
+                                }
+                                VideoIngressDecision::DropWaitingForKeyframe => {
+                                    target.video_counters.drop_waiting_for_keyframe += 1;
+                                    filtered_out_targets += 1;
+                                    continue;
+                                }
+                                VideoIngressDecision::DropAboveMaximum => {
+                                    target.video_counters.drop_above_maximum += 1;
+                                    filtered_out_targets += 1;
+                                    continue;
+                                }
+                                VideoIngressDecision::DropUnknownLayer => {
+                                    target.video_counters.drop_unknown_layer += 1;
+                                    filtered_out_targets += 1;
+                                    continue;
+                                }
                             }
                         }
 
@@ -6159,10 +6494,14 @@ async fn forward_publisher_remote_track(
                                     "audio_forwarding_packet_rewrite_dropped"
                                 );
                             }
+                            if is_video_track {
+                                target.video_counters.rewrite_drops += 1;
+                            }
                             continue;
                         };
 
                         let forwarded_payload_type = rewritten_packet.header.payload_type;
+                        let rewritten_payload_bytes = rewritten_packet.payload.len() as u64;
                         let write_result = if is_video_track {
                             target
                                 .local_forward_track
@@ -6204,6 +6543,13 @@ async fn forward_publisher_remote_track(
                                 }
                             }
                             continue;
+                        }
+                        if is_video_track {
+                            target.video_counters.successful_rtp_packets += 1;
+                            target.video_counters.successful_rtp_payload_bytes = target
+                                .video_counters
+                                .successful_rtp_payload_bytes
+                                .saturating_add(rewritten_payload_bytes);
                         }
 
                         if !target.forwarded_once {
@@ -6249,6 +6595,36 @@ async fn forward_publisher_remote_track(
                     }
 
                     if collect_forwarding_debug_counts {
+                        for target in &cached_forward_targets {
+                            let layer_policy = target.video_layer_selector.policy();
+                            let selected_incoming_ssrc =
+                                target.video_layer_selector.selected_ssrc();
+                            let selected_rid = selected_incoming_ssrc.and_then(|ssrc| {
+                                video_ssrc_rids.get(&ssrc).and_then(|rid| rid.as_deref())
+                            });
+                            tracing::debug!(
+                                room = %room_name,
+                                publisher_identity = %publisher_identity,
+                                track_sid = %track_sid,
+                                subscriber_identity = %target.subscriber_identity(),
+                                maximum_spatial = ?layer_policy.max,
+                                desired_spatial = ?layer_policy.desired,
+                                current_spatial = ?target.video_layer_selector.current_spatial(),
+                                selected_incoming_ssrc = ?selected_incoming_ssrc,
+                                selected_rid = ?selected_rid,
+                                layer_switches = target.video_counters.layer_switches,
+                                drop_waiting_for_keyframe = target.video_counters.drop_waiting_for_keyframe,
+                                drop_non_selected_ssrc = target.video_counters.drop_non_selected_ssrc,
+                                drop_above_maximum = target.video_counters.drop_above_maximum,
+                                drop_unknown_layer = target.video_counters.drop_unknown_layer,
+                                selector_pli_requests = target.video_counters.selector_pli_requests,
+                                rewrite_drops = target.video_counters.rewrite_drops,
+                                successful_rtp_packets = target.video_counters.successful_rtp_packets,
+                                successful_rtp_payload_bytes = target.video_counters.successful_rtp_payload_bytes,
+                                video_write_errors = target.video_write_errors,
+                                "video_forwarding_target_heartbeat"
+                            );
+                        }
                         tracing::debug!(
                             room = %room_name,
                             publisher_identity = %publisher_identity,
@@ -7229,16 +7605,18 @@ mod tests {
     use prost::Message;
 
     use super::{
-        ForwardingDecisionRevisions, add_track_response,
-        apply_publisher_codec_preferences_to_answer, cached_forwarding_decision_for_subscriber,
+        ForwardingDecisionRevisions, FpsForwardingState, add_track_response,
+        apply_publisher_codec_preferences_to_answer, av1_is_keyframe_start,
+        cached_forwarding_decision_for_subscriber,
         clear_publisher_subscription_active_if_no_remaining_tracks, data_channel_kind_for_label,
-        filter_h264_from_publisher_answer_for_client,
-        force_sendonly_sections_without_msid_recvonly, normalize_incoming_data_packet,
-        preferred_codec_mime_for_participant_track, relay_data_packet_after_channel_convergence,
-        relay_data_track_packet, reliable_channel_label_rank,
-        reorder_section_media_line_payloads_for_preferred_codec,
+        desired_video_quality_from_allocation, filter_h264_from_publisher_answer_for_client,
+        force_sendonly_sections_without_msid_recvonly, h264_is_keyframe_start,
+        normalize_incoming_data_packet, preferred_codec_mime_for_participant_track,
+        relay_data_packet_after_channel_convergence, relay_data_track_packet,
+        reliable_channel_label_rank, reorder_section_media_line_payloads_for_preferred_codec,
         resolved_destination_identities_for_packet, selected_forwarding_mime_type_for_subscriber,
-        signal_track_subscribed_to_publisher,
+        signal_track_subscribed_to_publisher, video_is_decodable_switch_point,
+        vp8_is_keyframe_start, vp9_is_keyframe_start,
     };
     use crate::{
         DataChannelStore,
@@ -7699,6 +8077,7 @@ mod tests {
         let media_subscriptions = crate::stores::MediaSubscriptionStore::default();
         let auto_subscribe_preferences = crate::stores::AutoSubscribePreferenceStore::default();
         let track_settings = crate::media::TrackSettingsStore::default();
+        let track_allocations = crate::media::TrackAllocationStore::default();
         media_subscriptions.set_subscribed("room", "publisher", "TR_audio_a", "subscriber", true);
         media_subscriptions.set_subscribed("room", "publisher", "TR_audio_b", "subscriber", true);
         let _ =
@@ -7723,6 +8102,7 @@ mod tests {
             media_subscription: media_subscriptions.revision(),
             auto_subscribe: auto_subscribe_preferences.revision(),
             track_settings: track_settings.revision(),
+            track_allocation: track_allocations.revision(),
             room_media_subscription: rooms.media_subscription_revision(),
         };
 
@@ -7732,6 +8112,7 @@ mod tests {
             &media_subscriptions,
             &auto_subscribe_preferences,
             &track_settings,
+            &track_allocations,
             &rooms,
             Some(&track_info),
             Some(1),
@@ -7755,6 +8136,7 @@ mod tests {
             media_subscription: media_subscriptions.revision(),
             auto_subscribe: auto_subscribe_preferences.revision(),
             track_settings: track_settings.revision(),
+            track_allocation: track_allocations.revision(),
             room_media_subscription: rooms.media_subscription_revision(),
         };
 
@@ -7764,6 +8146,7 @@ mod tests {
             &media_subscriptions,
             &auto_subscribe_preferences,
             &track_settings,
+            &track_allocations,
             &rooms,
             Some(&track_info),
             Some(1),
@@ -7812,6 +8195,7 @@ mod tests {
         let media_subscriptions = crate::stores::MediaSubscriptionStore::default();
         let auto_subscribe_preferences = crate::stores::AutoSubscribePreferenceStore::default();
         let track_settings = crate::media::TrackSettingsStore::default();
+        let track_allocations = crate::media::TrackAllocationStore::default();
         let mut cache = HashMap::new();
         let key = (
             "room".to_string(),
@@ -7824,6 +8208,7 @@ mod tests {
             media_subscription: media_subscriptions.revision(),
             auto_subscribe: auto_subscribe_preferences.revision(),
             track_settings: track_settings.revision(),
+            track_allocation: track_allocations.revision(),
             room_media_subscription: rooms.media_subscription_revision(),
         };
         let initial = cached_forwarding_decision_for_subscriber(
@@ -7832,6 +8217,7 @@ mod tests {
             &media_subscriptions,
             &auto_subscribe_preferences,
             &track_settings,
+            &track_allocations,
             &rooms,
             None,
             None,
@@ -7853,6 +8239,7 @@ mod tests {
             media_subscription: media_subscriptions.revision(),
             auto_subscribe: auto_subscribe_preferences.revision(),
             track_settings: track_settings.revision(),
+            track_allocation: track_allocations.revision(),
             room_media_subscription: rooms.media_subscription_revision(),
         };
         let updated = cached_forwarding_decision_for_subscriber(
@@ -7861,6 +8248,7 @@ mod tests {
             &media_subscriptions,
             &auto_subscribe_preferences,
             &track_settings,
+            &track_allocations,
             &rooms,
             None,
             None,
@@ -10484,5 +10872,65 @@ mod tests {
             panic!("expected TrackSubscribed response");
         };
         assert_eq!(second_track_subscribed.track_sid, "TR_b");
+    }
+
+    #[test]
+    fn allocation_desired_quality_is_independent_and_clamped_to_subscription_maximum() {
+        assert_eq!(
+            desired_video_quality_from_allocation(
+                Some(proto::VideoQuality::High),
+                Some(proto::VideoQuality::Low),
+            ),
+            Some(proto::VideoQuality::Low),
+            "an allocator may reduce a high-capable target"
+        );
+        assert_eq!(
+            desired_video_quality_from_allocation(
+                Some(proto::VideoQuality::Low),
+                Some(proto::VideoQuality::High),
+            ),
+            Some(proto::VideoQuality::Low),
+            "an allocator must never exceed the subscriber maximum"
+        );
+        assert_eq!(
+            desired_video_quality_from_allocation(Some(proto::VideoQuality::Medium), None),
+            Some(proto::VideoQuality::Medium),
+            "without allocation, desired quality defaults to the subscriber maximum"
+        );
+    }
+
+    #[test]
+    fn fps_filter_does_not_decimate_nominal_30_fps_33ms_cadence() {
+        let mut state = FpsForwardingState::default();
+        assert!(state.should_forward_packet(0, 30));
+        assert!(
+            state.should_forward_packet(2_970, 30),
+            "a nominal 33 ms frame interval must not be dropped for a 30 FPS request"
+        );
+        assert!(state.should_forward_packet(5_940, 30));
+    }
+
+    #[test]
+    fn vp8_switch_point_requires_partition_zero_keyframe_start() {
+        // S=1, partition ID=0, followed by a VP8 keyframe frame tag.
+        assert!(vp8_is_keyframe_start(&[0x10, 0x00]));
+        // The VP8 frame-tag P bit identifies an interframe.
+        assert!(!vp8_is_keyframe_start(&[0x10, 0x01]));
+        // A non-zero partition cannot start a decodable frame.
+        assert!(!vp8_is_keyframe_start(&[0x11, 0x00]));
+        assert!(video_is_decodable_switch_point(
+            Some("video/VP8"),
+            &[0x10, 0x00]
+        ));
+        assert!(vp9_is_keyframe_start(&[0x08]));
+        assert!(!vp9_is_keyframe_start(&[0x48]));
+        assert!(h264_is_keyframe_start(&[0x65]));
+        assert!(h264_is_keyframe_start(&[0x7c, 0x85]));
+        assert!(!h264_is_keyframe_start(&[0x7c, 0x05]));
+        assert!(av1_is_keyframe_start(&[0x08]));
+        assert!(!av1_is_keyframe_start(&[0x00]));
+        assert!(video_is_decodable_switch_point(Some("video/H264"), &[0x65]));
+        assert!(video_is_decodable_switch_point(Some("video/VP9"), &[0x08]));
+        assert!(video_is_decodable_switch_point(Some("video/AV1"), &[0x08]));
     }
 }
