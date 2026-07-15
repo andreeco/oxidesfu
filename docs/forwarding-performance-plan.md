@@ -4,18 +4,18 @@ _This document serves as a kind of memory for an LLM on how to continue with per
 
 ## Status
 
-**Phase 1 complete; further optimization is optional and evidence-driven.** The large simulcast forwarding workloads are functionally healthy and the latest two-round mixed high-simulcast comparison is within 5% CPU of the upstream Go LiveKit reference.
+**Phases 1–4 and the bounded RTC write batch are complete; remaining work is evidence-driven.** Large simulcast forwarding workloads are functionally healthy, but the current paired benchmark overview has one CPU outlier: `mixed_room_high_simulcast_large` is +19.7% CPU versus Go while every other real scenario is faster and uses substantially less RSS. Paired 5- and 20-second profiles also show unequal video bitrate between Go and OxideSFU, so the CPU delta is not yet an equal-work comparison.
 
-This plan records the evidence, reference behavior, target architecture, staged implementation plan, and completion gates for closing that gap without weakening LiveKit compatibility.
+This plan records the evidence, reference behavior, target architecture, staged implementation plan, and compatibility gates for normalizing delivered simulcast media before attributing or closing the remaining CPU gap.
 
 ## Problem statement
 
-The benchmark suite compares an upstream Go LiveKit server with OxideSFU under `lk perf load-test`. The large simulcast scenarios are the current CPU outliers:
+The benchmark suite compares an upstream Go LiveKit server with OxideSFU under `lk perf load-test`. The current generated overview has one real CPU outlier:
 
 | Scenario | LiveKit median CPU | OxideSFU median CPU | Observed delta |
 |---|---:|---:|---:|
-| `video_room_high_simulcast_large` | 3.67 s | 4.51 s | +22.9% |
-| `mixed_room_high_simulcast_large` | 7.33 s | 9.54 s | +30.2% |
+| `video_room_high_simulcast_large` | 3.520 s | 2.770 s | -21.3% |
+| `mixed_room_high_simulcast_large` | 7.100 s | 8.500 s | +19.7% |
 
 The workload shapes in `crates/oxidesfu-test/src/benchmark/load.rs` are:
 
@@ -24,7 +24,7 @@ The workload shapes in `crates/oxidesfu-test/src/benchmark/load.rs` are:
 | `video_room_high_simulcast_large` | 30 s | 3 | 0 | 18 | `3x3` | high | enabled |
 | `mixed_room_high_simulcast_large` | 30 s | 4 | 4 | 20 | speaker | high | enabled |
 
-Wall-clock completion remains close to the Go reference and peak RSS is lower. The issue is CPU efficiency in the high-fanout video forwarding path, not a correctness failure or an end-to-end latency regression proven by these artifacts.
+Wall-clock completion remains close to the Go reference and peak RSS is lower. However, paired profiles show the high-mixed video workload currently produces different aggregate bitrate/layer outcomes. The immediate issue is therefore to establish equivalent post-warm-up simulcast media before treating the remaining CPU difference as a forwarding, RTC, or transport efficiency regression.
 
 ## Evidence collected
 
@@ -315,14 +315,13 @@ The WebRTC fork now reuses the driver-owned core-output `Vec<TaggedBytesMut>` ba
 
 ### Completed and remaining opportunities, in priority order
 
-1. **Completed: fixed-size RTP retransmission cache.** Replace the fixed-256 `HashMap<u16, Packet>` plus eviction `VecDeque<u16>` with a 256-slot ring indexed by outgoing sequence number. Each slot stores its sequence number and rejects a stale colliding NACK after `u16` wrap. TDD covers retained/newest/evicted lookup, collision rejection across wrap, and the existing subscriber-owned SSRC/payload-type cache entries. The post-change 90-second workload delivered 160/160 tracks with zero loss and recorded 29K samples with none lost. Its aggregate `BuildHasher::hash_one` entries (0.96% and 0.89%) are effectively unchanged from the preceding 44K-sample run (0.96% and 0.88%); different workload bitrate and sample count make this one rerun insufficient for a CPU claim, but the per-packet cache no longer performs map hashing, map removal, or deque maintenance. Do not weaken the separate `(incoming_ssrc, incoming_extended_sequence)` duplicate window or replace its SipHash threat model without a security decision.
-2. **Completed: attribution-quality profiling tooling.** `tools/profiling/profile-load-test.sh` now offers opt-in `--attribution-mode lbr`, which preflights branch-stack caller capture before starting the workload, and records the selected call-graph mode in metadata. It also offers `--client-netns` and requires an explicitly non-loopback `OXIDESFU_PROFILE_URL`, so an operator can profile preconfigured remote/network-namespace clients without interpreting loopback epoll work as server CPU. Run a supported LBR capture and retain 160/160 zero-loss validation before assigning the current VDSO samples to a caller.
-3. **Completed: active-SSRC sequence-state fast path.** `SubscriberRtpState` now keeps the active SSRC and extended-sequence reference outside `highest_incoming_ext_seq_by_ssrc`, retaining the map only for inactive sources. The common selected-layer packet avoids a hash probe; source switches persist/restore exact fallback state. TDD covers `A → B → C → A` history, wraps on both sides of a switch, late and duplicate old-source packets, and timestamp continuity.
-4. **Completed: bounded core write batches.** RTC now exposes an internal bounded `poll_write_batch` primitive with an explicit immediately-sendable-work result. The driver sends at most 64 core datagrams, releases the core mutex before async socket I/O, and schedules one continuation before returning to timer/socket/close/application-event selection. TDD covers bounded FIFO output and continuation coalescing; existing core retry and outer data-channel, reactor-drop, and renegotiation tests remain green. **Limit:** one core pipeline invocation can still fill its retained ready-output queue before the batch boundary. A stricter per-handler-hop budget needs resumable handler-stage state and remains deferred.
-5. **Completed: event-driven settings propagation.** Effective TrackSettings upserts and removals now publish bounded target-specific revisions from `media/track_settings.rs`. The forwarding reader consumes those notifications, invalidating only the matching target decision and selector/FPS state; receiver lag performs one out-of-band target resynchronization. Pending debounced settings are canceled on track/participant removal so they cannot resurrect settings after teardown. TDD covers semantic no-ops, debounced effective changes, removal, and pending-update cancellation.
-6. **Next: caller-attributed profiling (LBR) and non-loopback clients.** `__vdso_clock_gettime`, `ep_poll_callback`, and kernel lock samples remain prominent. Run `--attribution-mode lbr` and a non-loopback client topology (`--client-netns` or remote host) before changing UDP/epoll/transport architecture.
-7. **Next: strict RTC-core handler budget design (if profiles still justify).** Current bounded driver/core batching limits datagrams per driver turn, but a single core pipeline invocation can still populate the retained ready-output queue. Any stricter budget must introduce resumable handler-stage state plus deterministic FIFO/fairness/backpressure tests.
-8. **Completed: MID extension lookup reuse.** Each compatible `TrackLocalStaticRTP` binding now captures its negotiated SDES MID extension ID. Packet writes reuse that bounded owner-local value while preserving independent queued packet ownership; no global pool or `unsafe` was introduced.
+1. **Next: normalize simulcast media before CPU attribution.** The paired 20-second Go/Oxide matrix has complete tracks and zero loss but unequal video bitrates that vary by subscriber count. Add a deterministic black-box contract that applies identical subscriber TrackSettings and records post-warm-up per-target selected layer, requested quality/FPS, keyframe timing, and delivered bitrate. Map Go `pkg/sfu/downtrack.go` / `pkg/rtc/subscribedtrack.go` selection behavior against Oxide `ForwardingDecision` and `SubscriberVideoLayerSelector`. Do not change driver, UDP, or hashing code until this is resolved or explicitly documented as an intentional wire-compatible delta.
+2. **Completed: paired scale profiling tooling.** `tools/profiling/profile-paired-scale-sweep.sh` runs Go LiveKit and OxideSFU separately over `4V/4A/20S`, `4V/0A/20S`, `0V/4A/20S`, `4V/4A/10S`, and `4V/4A/15S`, retaining independent `perf.data`, flamegraphs, logs, metadata, and alternating execution order. The 5- and 20-second runs validate lifecycle and expose the bitrate comparability gate; only normalized-media points may be used for CPU conclusions.
+3. **Completed: fixed-size RTP retransmission cache.** Replace the fixed-256 `HashMap<u16, Packet>` plus eviction `VecDeque<u16>` with a 256-slot ring indexed by outgoing sequence number. Each slot stores its sequence number and rejects a stale colliding NACK after `u16` wrap. TDD covers retained/newest/evicted lookup, collision rejection across wrap, and the existing subscriber-owned SSRC/payload-type cache entries. Do not weaken the separate `(incoming_ssrc, incoming_extended_sequence)` duplicate window or replace its SipHash threat model without a security decision.
+4. **Completed: attribution-quality profiling tooling.** `tools/profiling/profile-load-test.sh` supports DWARF, opt-in LBR preflight, and an existing client-network-namespace wrapper. This AMD host cannot collect LBR call graphs despite raw branch-stack support; provision an LBR-capable host if VDSO caller attribution becomes necessary.
+5. **Completed: active-SSRC sequence-state, bounded core write batches, event-driven settings, and MID lookup reuse.** These slices removed known packet-loop map work, bounded driver-visible writes while preserving FIFO/backpressure, moved effective TrackSettings updates out of the packet loop, and cached bind-time MID extension IDs. Their focused TDD/compatibility validation is recorded above.
+6. **Deferred: remote-client network profiling.** `ep_poll_callback` and kernel lock samples remain confounded by same-host clients. Use a routed namespace or remote `lk` host only after media delivery is normalized, before changing UDP/epoll/socket architecture.
+7. **Deferred: strict RTC-core handler budget.** Current bounded driver/core batching limits datagrams per driver turn, but one core pipeline invocation can still populate the retained ready-output queue. Consider resumable handler-stage state only if normalized paired profiles still show a material RTC write-path gap; it requires deterministic FIFO/fairness/backpressure tests.
 
 ### Reference evidence for the remaining work
 
@@ -374,14 +373,15 @@ Reference map: RTC `c90236e986dad80505eb2bc3f15f2cdffa4070cc` supplied the prior
 
 ### Phase 5 — WebRTC and transport investigation
 
-**Objective:** separate OxideSFU-specific overhead from `webrtc-rs` behavior.
+**Objective:** separate OxideSFU-specific overhead from `webrtc-rs` behavior **only after paired workloads deliver equivalent post-warm-up simulcast media**.
 
-1. Profile direct RTP forwarding with minimal signaling policy.
-2. Compare symbols under `webrtc::peer_connection` / `rtc::peer_connection` write path.
-3. Inspect the pinned `webrtc-rs` fork only after application packet-path work is removed from the profile.
-4. Add an upstream fork regression test before changing the pinned dependency.
+1. Establish equivalent per-target quality/layer, FPS, keyframe convergence, and bitrate between Go and OxideSFU.
+2. Profile direct RTP forwarding with minimal signaling policy at a normalized point.
+3. Compare symbols under `webrtc::peer_connection` / `rtc::peer_connection` write path.
+4. Inspect the pinned `webrtc-rs` fork only after application packet-path work is removed from the normalized profile.
+5. Add an upstream fork regression test before changing the pinned dependency.
 
-**Acceptance:** any WebRTC fork patch has a focused test, recorded fork commit, and OxideSFU compatibility validation.
+**Acceptance:** a WebRTC fork patch has a focused test, recorded fork commit, OxideSFU compatibility validation, and paired normalized-media evidence that it targets a material remaining cost.
 
 ## Test strategy
 
