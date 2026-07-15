@@ -1,0 +1,12 @@
+{
+  "name": "oxidesfu-browser-conformance",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "install:browsers": "playwright install --with-deps firefox",
+    "test:firefox": "playwright test --project=firefox"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.1"
+  }
+}
