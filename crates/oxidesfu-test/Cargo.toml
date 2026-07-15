@@ -33,9 +33,9 @@ futures-util = { workspace = true }
 hmac = "0.13.0"
 # Pinned andreeco/rust-sdks revision used by the in-process compatibility tests.
 # This fork carries APIs exercised by OxideSFU's media probes.
-livekit = { git = "https://github.com/andreeco/rust-sdks.git", rev = "d5e98afd78fcf4129393ab75cc9436c564a6f105", default-features = false, features = ["tokio"] }
-livekit-api = { git = "https://github.com/andreeco/rust-sdks.git", rev = "d5e98afd78fcf4129393ab75cc9436c564a6f105", default-features = false, features = ["access-token", "services-tokio", "signal-client-tokio"] }
-livekit-protocol = { git = "https://github.com/andreeco/rust-sdks.git", rev = "d5e98afd78fcf4129393ab75cc9436c564a6f105" }
+livekit = { git = "https://github.com/andreeco/rust-sdks.git", rev = "88aab601eac42fbba83e196a9b30206cf63945b8", default-features = false, features = ["tokio"] }
+livekit-api = { git = "https://github.com/andreeco/rust-sdks.git", rev = "88aab601eac42fbba83e196a9b30206cf63945b8", default-features = false, features = ["access-token", "services-tokio", "signal-client-tokio"] }
+livekit-protocol = { git = "https://github.com/andreeco/rust-sdks.git", rev = "88aab601eac42fbba83e196a9b30206cf63945b8" }
 md-5 = { workspace = true }
 prost = { workspace = true }
 rtc = { workspace = true }
