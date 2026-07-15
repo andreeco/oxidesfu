@@ -134,9 +134,10 @@ pub fn rtc_transport_config_from_server_config(
     // A loopback HTTP bind is convenient for local signaling, but browser test
     // sandboxes can use a separate network namespace. Bind RTC UDP to all local
     // interfaces in that case so ICE can advertise a routable host candidate.
-    // Non-loopback production binds remain explicit for TURN permission scoping.
+    // Owned loopback TURN needs a concrete server host candidate for the relay
+    // candidate to pair with, so preserve the loopback bind in that topology.
     let configured_bind_ip = config.bind.ip();
-    let rtc_bind_ip = if configured_bind_ip.is_loopback() {
+    let rtc_bind_ip = if configured_bind_ip.is_loopback() && !config.turn_enabled {
         match configured_bind_ip {
             IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),

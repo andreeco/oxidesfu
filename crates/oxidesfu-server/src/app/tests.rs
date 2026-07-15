@@ -1110,6 +1110,20 @@ fn rtc_transport_config_external_ip_mode_advertises_only_configured_node_ip() {
 }
 
 #[test]
+fn rtc_transport_config_keeps_loopback_rtc_bind_for_owned_loopback_turn() {
+    let mut config = ServerConfig::development();
+    config.bind = "127.0.0.1:7880".parse().expect("socket should parse");
+    config.rtc_udp_port = Some(50_100);
+    config.turn_enabled = true;
+    config.turn_domain = Some("127.0.0.1".to_string());
+    config.turn_udp_port = Some(34_78);
+
+    let transport = rtc_transport_config_from_server_config(&config);
+
+    assert_eq!(transport.udp_addrs, vec!["127.0.0.1:50100"]);
+}
+
+#[test]
 fn rtc_transport_config_widens_loopback_signaling_bind_for_browser_ice() {
     let mut config = ServerConfig::development();
     config.bind = "127.0.0.1:7880".parse().expect("socket should parse");

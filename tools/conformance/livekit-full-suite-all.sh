@@ -85,6 +85,7 @@ sanitize_test_name() {
 }
 
 write_log_header() {
+  mkdir -p "$LOG_DIR"
   {
     echo "=== livekit full suite discovery ==="
     echo "timestamp: $TIMESTAMP"
@@ -200,9 +201,11 @@ run_one_shard() {
   local shard_udp_start=$((shard_port + 10))
   local shard_udp_end=$((shard_port + 39))
   local shard_webhook_port=$((shard_port + 50))
-  local shard_turn_udp_port=$((shard_port + 70))
   local shard_webhook_url="http://$HOST:$shard_webhook_port"
   local shard_turn_enabled="false"
+  local shard_turn_domain=""
+  local shard_turn_udp_port=""
+  local shard_test_turn_udp_port=$((shard_port + 70))
   local shard_turn_allow_cidrs=""
   local shard_turn_deny_cidrs=""
   local local_turn_peer_cidr=""
@@ -256,6 +259,11 @@ run_one_shard() {
       ;;
   esac
 
+  if [[ "$shard_turn_enabled" == "true" ]]; then
+    shard_turn_domain="$HOST"
+    shard_turn_udp_port="$shard_test_turn_udp_port"
+  fi
+
   mkdir -p "$shard_dir"
 
   {
@@ -264,8 +272,10 @@ run_one_shard() {
     echo "rtc_tcp_port: $shard_tcp_port"
     echo "rtc_udp_range: $shard_udp_start-$shard_udp_end"
     echo "webhook_url: $shard_webhook_url"
-    echo "turn_udp_port: $shard_turn_udp_port"
+    echo "turn_udp_port: ${shard_turn_udp_port:-disabled}"
+    echo "test_turn_udp_port: $shard_test_turn_udp_port"
     echo "turn_enabled: $shard_turn_enabled"
+    echo "turn_domain: ${shard_turn_domain:-disabled}"
     echo "turn_allow_restricted_peer_cidrs: $shard_turn_allow_cidrs"
     echo "turn_deny_peer_cidrs: $shard_turn_deny_cidrs"
     echo "datachannel_slow_threshold: $shard_datachannel_slow_threshold"
@@ -278,24 +288,38 @@ run_one_shard() {
   if [[ "$REUSE_SERVER" == "true" ]]; then
     shard_http_url="$HTTP_URL"
   else
-    OXIDESFU_BIND="$HOST:$shard_port" \
-    OXIDESFU_API_KEY="$API_KEY" \
-    OXIDESFU_API_SECRET="$API_SECRET" \
-    OXIDESFU_RTC_TCP_PORT="$shard_tcp_port" \
-    OXIDESFU_RTC_UDP_PORT_RANGE_START="$shard_udp_start" \
-    OXIDESFU_RTC_UDP_PORT_RANGE_END="$shard_udp_end" \
-    OXIDESFU_TURN_ENABLED="$shard_turn_enabled" \
-    OXIDESFU_TURN_DOMAIN="$HOST" \
-    OXIDESFU_TURN_BIND="$HOST" \
-    OXIDESFU_TURN_UDP_PORT="$shard_turn_udp_port" \
-    OXIDESFU_TURN_ALLOW_RESTRICTED_PEER_CIDRS="$shard_turn_allow_cidrs" \
-    OXIDESFU_TURN_DENY_PEER_CIDRS="$shard_turn_deny_cidrs" \
-    OXIDESFU_DATACHANNEL_SLOW_THRESHOLD="$shard_datachannel_slow_threshold" \
-    OXIDESFU_PARTICIPANT_DATA_BLOB_ENABLED="$shard_participant_data_blob_enabled" \
-    OXIDESFU_ROOM_AUTO_CREATE="$shard_room_auto_create" \
-    OXIDESFU_WEBHOOK_API_KEY="$API_KEY" \
-    OXIDESFU_WEBHOOK_URLS="$shard_webhook_url" \
-    "$SERVER_BIN" >"$server_log" 2>&1 &
+    local -a server_env=(
+      "OXIDESFU_BIND=$HOST:$shard_port"
+      "OXIDESFU_API_KEY=$API_KEY"
+      "OXIDESFU_API_SECRET=$API_SECRET"
+      "OXIDESFU_RTC_TCP_PORT=$shard_tcp_port"
+      "OXIDESFU_RTC_UDP_PORT_RANGE_START=$shard_udp_start"
+      "OXIDESFU_RTC_UDP_PORT_RANGE_END=$shard_udp_end"
+      "OXIDESFU_TURN_ENABLED=$shard_turn_enabled"
+      "OXIDESFU_DATACHANNEL_SLOW_THRESHOLD=$shard_datachannel_slow_threshold"
+      "OXIDESFU_PARTICIPANT_DATA_BLOB_ENABLED=$shard_participant_data_blob_enabled"
+      "OXIDESFU_ROOM_AUTO_CREATE=$shard_room_auto_create"
+      "OXIDESFU_WEBHOOK_API_KEY=$API_KEY"
+      "OXIDESFU_WEBHOOK_URLS=$shard_webhook_url"
+    )
+    if [[ "$shard_turn_enabled" == "true" ]]; then
+      server_env+=(
+        "OXIDESFU_TURN_DOMAIN=$shard_turn_domain"
+        "OXIDESFU_TURN_BIND=$HOST"
+        "OXIDESFU_TURN_UDP_PORT=$shard_turn_udp_port"
+        "OXIDESFU_TURN_ALLOW_RESTRICTED_PEER_CIDRS=$shard_turn_allow_cidrs"
+        "OXIDESFU_TURN_DENY_PEER_CIDRS=$shard_turn_deny_cidrs"
+      )
+    fi
+    env \
+      -u OXIDESFU_TURN_DOMAIN \
+      -u OXIDESFU_TURN_BIND \
+      -u OXIDESFU_TURN_UDP_PORT \
+      -u OXIDESFU_TURN_TLS_PORT \
+      -u OXIDESFU_TURN_ALLOW_RESTRICTED_PEER_CIDRS \
+      -u OXIDESFU_TURN_DENY_PEER_CIDRS \
+      "${server_env[@]}" \
+      "$SERVER_BIN" >"$server_log" 2>&1 &
     server_pid="$!"
     if ! wait_for_http_url "$shard_http_url" >>"$server_log" 2>&1; then
       echo "SERVER_START_FAILED" >"$status_file"
@@ -316,7 +340,7 @@ run_one_shard() {
     LIVEKIT_KEYS="$API_KEY: $API_SECRET" \
     LK_TEST_SERVER_PORT="$LIVEKIT_TEST_SERVER_PORT" \
     LK_TEST_SERVER_PORT_SECOND="$LIVEKIT_TEST_SERVER_PORT_SECOND" \
-    LK_TEST_TURN_UDP_PORT="$shard_turn_udp_port" \
+    LK_TEST_TURN_UDP_PORT="$shard_test_turn_udp_port" \
     LK_TEST_WEBHOOK_PORT="$shard_webhook_port" \
     LK_TEST_TURN_RESTRICTED_PEER_CIDRS="$LIVEKIT_TEST_TURN_RESTRICTED_PEER_CIDRS" \
     LK_EXTERNAL_DATACHANNEL_SLOW_THRESHOLD="$shard_datachannel_slow_threshold" \
@@ -329,7 +353,7 @@ run_one_shard() {
     LIVEKIT_KEYS="$API_KEY: $API_SECRET" \
     LK_TEST_SERVER_PORT="$LIVEKIT_TEST_SERVER_PORT" \
     LK_TEST_SERVER_PORT_SECOND="$LIVEKIT_TEST_SERVER_PORT_SECOND" \
-    LK_TEST_TURN_UDP_PORT="$shard_turn_udp_port" \
+    LK_TEST_TURN_UDP_PORT="$shard_test_turn_udp_port" \
     LK_TEST_WEBHOOK_PORT="$shard_webhook_port" \
     LK_TEST_TURN_RESTRICTED_PEER_CIDRS="$LIVEKIT_TEST_TURN_RESTRICTED_PEER_CIDRS" \
     LK_EXTERNAL_DATACHANNEL_SLOW_THRESHOLD="$shard_datachannel_slow_threshold" \
