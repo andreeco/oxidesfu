@@ -66,6 +66,7 @@ impl SinglePcOfferMediaKindStore {
 
 #[derive(Clone)]
 pub(crate) struct PendingPublisherRemoteTrack {
+    pub(crate) publisher_sid: String,
     pub(crate) remote_track_id: String,
     pub(crate) remote_track: oxidesfu_rtc::RemoteTrack,
 }
@@ -265,10 +266,10 @@ impl PendingPublisherRemoteTrackStore {
             let queue = entries
                 .entry((room.to_string(), publisher_identity.to_string()))
                 .or_default();
-            if queue
-                .iter()
-                .any(|existing| existing.remote_track_id == pending.remote_track_id)
-            {
+            if queue.iter().any(|existing| {
+                existing.publisher_sid == pending.publisher_sid
+                    && existing.remote_track_id == pending.remote_track_id
+            }) {
                 return;
             }
             queue.push(pending);

@@ -7538,6 +7538,51 @@ fn forward_track_reader_lease_is_owned_by_one_remote_track_instance() {
     );
 }
 
+#[test]
+fn publisher_session_fence_rejects_a_rejoined_identitys_old_session() {
+    let state = state();
+    let (_, first, _) = state
+        .rooms
+        .join_participant(
+            "room",
+            "publisher",
+            "Publisher",
+            String::new(),
+            Default::default(),
+        )
+        .expect("publisher should join");
+
+    assert!(session::publisher_session_is_current(
+        &state.rooms,
+        "room",
+        "publisher",
+        &first.sid,
+    ));
+
+    let (_, replacement, _) = state
+        .rooms
+        .join_participant(
+            "room",
+            "publisher",
+            "Publisher",
+            String::new(),
+            Default::default(),
+        )
+        .expect("publisher should rejoin");
+
+    assert_ne!(first.sid, replacement.sid);
+    assert!(
+        !session::publisher_session_is_current(&state.rooms, "room", "publisher", &first.sid),
+        "a stale remote-track task must not resolve against the replacement publisher session"
+    );
+    assert!(session::publisher_session_is_current(
+        &state.rooms,
+        "room",
+        "publisher",
+        &replacement.sid,
+    ));
+}
+
 #[tokio::test]
 async fn inactive_forward_tracks_are_hidden_until_subscriber_answer_activates_them() {
     let store = ForwardTrackStore::default();

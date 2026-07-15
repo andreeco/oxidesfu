@@ -221,6 +221,7 @@ fn retry_pending_remote_tracks_after_track_published(
 
     for pending_remote_track in pending_remote_tracks {
         let remote_track = pending_remote_track.remote_track;
+        let publisher_sid = pending_remote_track.publisher_sid;
         let state = state.clone();
         let peer_connections = state.peer_connections.clone();
         let rooms = state.rooms.clone();
@@ -259,6 +260,7 @@ fn retry_pending_remote_tracks_after_track_published(
                 &signal_connections,
                 &room_name,
                 &publisher_identity,
+                &publisher_sid,
             )
             .await;
         });
@@ -4257,6 +4259,11 @@ fn forward_peer_connection_events(
                     let signal_connections = signal_connections.clone();
                     let room_name = room_name.clone();
                     let publisher_identity = identity.clone();
+                    let Ok(publisher) = rooms.get_participant(&room_name, &publisher_identity)
+                    else {
+                        continue;
+                    };
+                    let publisher_sid = publisher.sid;
                     tokio::spawn(async move {
                         if let Err(error) = forward_publisher_remote_track(
                             &state,
@@ -4277,6 +4284,7 @@ fn forward_peer_connection_events(
                             &signal_connections,
                             &room_name,
                             &publisher_identity,
+                            &publisher_sid,
                         )
                         .await
                         {
@@ -4923,6 +4931,17 @@ async fn resolve_forward_track_info(
     None
 }
 
+pub(crate) fn publisher_session_is_current(
+    rooms: &RoomStore,
+    room_name: &str,
+    publisher_identity: &str,
+    publisher_sid: &str,
+) -> bool {
+    rooms
+        .get_participant(room_name, publisher_identity)
+        .is_ok_and(|participant| participant.sid == publisher_sid)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn forward_publisher_remote_track(
     state: &SignalState,
@@ -4943,7 +4962,18 @@ async fn forward_publisher_remote_track(
     signal_connections: &SignalConnectionStore,
     room_name: &str,
     publisher_identity: &str,
+    publisher_sid: &str,
 ) -> oxidesfu_rtc::RtcResult<()> {
+    if !publisher_session_is_current(rooms, room_name, publisher_identity, publisher_sid) {
+        tracing::debug!(
+            room = room_name,
+            publisher_identity,
+            publisher_sid,
+            "skipping_forwarding_for_stale_publisher_session"
+        );
+        return Ok(());
+    }
+
     let remote_track_id = remote_track.track_id().await;
     let remote_track_kind = remote_track.kind().await;
     let Some(mut track_info) = resolve_forward_track_info(
@@ -4960,6 +4990,7 @@ async fn forward_publisher_remote_track(
             room_name,
             publisher_identity,
             crate::stores::PendingPublisherRemoteTrack {
+                publisher_sid: publisher_sid.to_string(),
                 remote_track_id: remote_track_id.clone(),
                 remote_track,
             },
@@ -4973,6 +5004,16 @@ async fn forward_publisher_remote_track(
         );
         return Ok(());
     };
+
+    if !publisher_session_is_current(rooms, room_name, publisher_identity, publisher_sid) {
+        tracing::debug!(
+            room = room_name,
+            publisher_identity,
+            publisher_sid,
+            "discarding_remote_track_resolved_for_stale_publisher_session"
+        );
+        return Ok(());
+    }
 
     if track_info.r#type == proto::TrackType::Video as i32 {
         for ssrc in remote_track.ssrcs().await {
@@ -5004,6 +5045,10 @@ async fn forward_publisher_remote_track(
         track_mime_type = %track_info.mime_type,
         "forwarding_remote_track_with_resolved_track_sid"
     );
+
+    if !publisher_session_is_current(rooms, room_name, publisher_identity, publisher_sid) {
+        return Ok(());
+    }
 
     // Ensure forwarding tracks exist for current subscribers before copying RTP.
     ensure_subscriber_forwarding_from_parts(
@@ -5047,6 +5092,7 @@ async fn forward_publisher_remote_track(
     let publisher_subscription_active_pairs = state.publisher_subscription_active_pairs();
     let room_name = room_name.to_string();
     let publisher_identity = publisher_identity.to_string();
+    let publisher_sid = publisher_sid.to_string();
     let is_video_track = track_info.r#type == proto::TrackType::Video as i32;
     let track_supports_quality_control =
         is_video_track && track_supports_layer_quality_control(&track_info);
@@ -5099,6 +5145,22 @@ async fn forward_publisher_remote_track(
             std::collections::HashSet::<(String, String, String, String)>::new();
 
         loop {
+            if !publisher_session_is_current(
+                &rooms,
+                &room_name,
+                &publisher_identity,
+                &publisher_sid,
+            ) {
+                tracing::debug!(
+                    room = %room_name,
+                    publisher_identity = %publisher_identity,
+                    publisher_sid,
+                    track_sid = %track_sid,
+                    "stopping_forward_track_reader_for_stale_publisher_session"
+                );
+                break;
+            }
+
             let recv_event_result = tokio::time::timeout(
                 REMOTE_TRACK_EVENT_IDLE_LOG_INTERVAL,
                 remote_track.recv_event(),
