@@ -1581,6 +1581,28 @@ pub(crate) fn should_forward_video_packet_for_requested_fps_with_codec_hint(
     fps_state.should_forward_packet(packet_timestamp, requested_fps)
 }
 
+pub(crate) fn forwarding_target_revision_changed(
+    cached_revision: Option<u64>,
+    current_revision: u64,
+) -> bool {
+    cached_revision != Some(current_revision)
+}
+
+pub(crate) fn target_settings_revision_needs_refresh(
+    observed_settings_generation: Option<u64>,
+    current_settings_generation: u64,
+    target_revision_is_known: bool,
+) -> bool {
+    observed_settings_generation != Some(current_settings_generation) || !target_revision_is_known
+}
+
+pub(crate) fn retain_forwarding_state_for_current_targets<T>(
+    states: &mut std::collections::HashMap<(String, String, String, String), T>,
+    current_forward_keys: &std::collections::HashSet<(String, String, String, String)>,
+) {
+    states.retain(|key, _| current_forward_keys.contains(key));
+}
+
 pub(crate) fn retain_fps_forwarding_state_for_current_targets(
     fps_states: &mut std::collections::HashMap<
         (String, String, String, String),
@@ -1588,7 +1610,7 @@ pub(crate) fn retain_fps_forwarding_state_for_current_targets(
     >,
     current_forward_keys: &std::collections::HashSet<(String, String, String, String)>,
 ) {
-    fps_states.retain(|key, _| current_forward_keys.contains(key));
+    retain_forwarding_state_for_current_targets(fps_states, current_forward_keys);
 }
 
 fn requested_video_fps_from_settings(settings: Option<&proto::UpdateTrackSettings>) -> Option<u32> {
@@ -5272,6 +5294,7 @@ async fn forward_publisher_remote_track(
         let mut keyframe_requested_forward_keys =
             std::collections::HashMap::<(String, String, String, String), std::time::Instant>::new(
             );
+        let mut last_keyframe_request_sweep_at: Option<std::time::Instant> = None;
         let mut forwarded_once_keys =
             std::collections::HashSet::<(String, String, String, String)>::new();
         let mut logged_video_rewrite_drop_keys =
@@ -5308,9 +5331,11 @@ async fn forward_publisher_remote_track(
         let mut track_subscribed_signaled_to_publisher = false;
         let mut last_heartbeat_log_at = std::time::Instant::now();
         let mut cached_forward_tracks_revision: Option<u64> = None;
+        let mut observed_track_settings_generation: Option<u64> = None;
         let mut cached_forward_tracks = Vec::<(
             (String, String, String, String),
             oxidesfu_rtc::LocalRtpTrack,
+            crate::media::SubscriberRtpForwarder,
         )>::new();
         let mut cached_forward_keys =
             std::collections::HashSet::<(String, String, String, String)>::new();
@@ -5357,14 +5382,18 @@ async fn forward_publisher_remote_track(
                     if is_video_track {
                         let current_revision = forward_tracks.revision();
                         if cached_forward_tracks_revision != Some(current_revision) {
-                            cached_forward_tracks = forward_tracks.list_for_track(
-                                &room_name,
-                                &publisher_identity,
-                                &track_sid,
-                            );
+                            cached_forward_tracks = forward_tracks
+                                .list_for_track(&room_name, &publisher_identity, &track_sid)
+                                .into_iter()
+                                .filter_map(|(key, track)| {
+                                    rtp_forwarding
+                                        .forwarder_for(&key)
+                                        .map(|forwarder| (key, track, forwarder))
+                                })
+                                .collect();
                             cached_forward_keys = cached_forward_tracks
                                 .iter()
-                                .map(|(key, _track)| key.clone())
+                                .map(|(key, _track, _forwarder)| key.clone())
                                 .collect();
                             cached_forward_tracks_revision = Some(current_revision);
                         }
@@ -5379,7 +5408,7 @@ async fn forward_publisher_remote_track(
                             track_settings: track_settings.revision(),
                             room_media_subscription: rooms.media_subscription_revision(),
                         };
-                        for (key, _local_forward_track) in &cached_forward_tracks {
+                        for (key, _local_forward_track, _rtp_forwarder) in &cached_forward_tracks {
                             let (key_room, key_publisher, key_track_sid, key_subscriber) = key;
                             let has_media_forwarding = media_forwarding.contains(
                                 key_room,
@@ -5517,17 +5546,63 @@ async fn forward_publisher_remote_track(
                         logged_first_rtp = true;
                     }
                     let current_revision = forward_tracks.revision();
-                    if cached_forward_tracks_revision != Some(current_revision) {
-                        cached_forward_tracks = forward_tracks.list_for_track(
-                            &room_name,
-                            &publisher_identity,
-                            &track_sid,
-                        );
+                    let forwarding_targets_changed = forwarding_target_revision_changed(
+                        cached_forward_tracks_revision,
+                        current_revision,
+                    );
+                    if forwarding_targets_changed {
+                        cached_forward_tracks = forward_tracks
+                            .list_for_track(&room_name, &publisher_identity, &track_sid)
+                            .into_iter()
+                            .filter_map(|(key, track)| {
+                                rtp_forwarding
+                                    .forwarder_for(&key)
+                                    .map(|forwarder| (key, track, forwarder))
+                            })
+                            .collect();
                         cached_forward_keys = cached_forward_tracks
                             .iter()
-                            .map(|(key, _track)| key.clone())
+                            .map(|(key, _track, _forwarder)| key.clone())
                             .collect();
                         cached_forward_tracks_revision = Some(current_revision);
+
+                        // Target membership changes are rare. Prune all per-target
+                        // state here rather than scanning string-keyed maps for every RTP packet.
+                        retain_forwarding_state_for_current_targets(
+                            &mut target_primary_ssrc_by_forward_key,
+                            &cached_forward_keys,
+                        );
+                        retain_forwarding_state_for_current_targets(
+                            &mut target_payload_type_by_forward_key,
+                            &cached_forward_keys,
+                        );
+                        retain_forwarding_state_for_current_targets(
+                            &mut subscriber_forwarding_decision_cache,
+                            &cached_forward_keys,
+                        );
+                        retain_forwarding_state_for_current_targets(
+                            &mut subscriber_video_layer_selectors,
+                            &cached_forward_keys,
+                        );
+                        retain_forwarding_state_for_current_targets(
+                            &mut subscriber_video_layer_selector_settings_revisions,
+                            &cached_forward_keys,
+                        );
+                        retain_fps_forwarding_state_for_current_targets(
+                            &mut subscriber_video_fps_forward_state,
+                            &cached_forward_keys,
+                        );
+                        retain_forwarding_state_for_current_targets(
+                            &mut keyframe_requested_forward_keys,
+                            &cached_forward_keys,
+                        );
+                        forwarded_once_keys.retain(|key| cached_forward_keys.contains(key));
+                        logged_video_rewrite_drop_keys
+                            .retain(|key| cached_forward_keys.contains(key));
+                        logged_audio_rewrite_drop_keys
+                            .retain(|key| cached_forward_keys.contains(key));
+                        video_write_error_counts.retain(|key, _| cached_forward_keys.contains(key));
+                        audio_write_error_counts.retain(|key, _| cached_forward_keys.contains(key));
                     }
                     let forward_tracks_for_track = &cached_forward_tracks;
                     let current_forward_keys = &cached_forward_keys;
@@ -5545,10 +5620,6 @@ async fn forward_publisher_remote_track(
                     }
 
                     if forward_tracks_for_track.is_empty() {
-                        keyframe_requested_forward_keys.clear();
-                        subscriber_video_fps_forward_state.clear();
-                        target_primary_ssrc_by_forward_key.clear();
-                        subscriber_forwarding_decision_cache.clear();
                         if !logged_no_forward_tracks {
                             tracing::debug!(
                                 room = %room_name,
@@ -5562,37 +5633,25 @@ async fn forward_publisher_remote_track(
                     }
                     logged_no_forward_tracks = false;
 
-                    target_primary_ssrc_by_forward_key
-                        .retain(|key, _| current_forward_keys.contains(key));
-                    target_payload_type_by_forward_key
-                        .retain(|key, _| current_forward_keys.contains(key));
-                    subscriber_forwarding_decision_cache
-                        .retain(|key, _| current_forward_keys.contains(key));
-                    subscriber_video_layer_selectors
-                        .retain(|key, _| current_forward_keys.contains(key));
-                    subscriber_video_layer_selector_settings_revisions
-                        .retain(|key, _| current_forward_keys.contains(key));
-
-                    if is_video_track {
-                        keyframe_requested_forward_keys
-                            .retain(|key, _| current_forward_keys.contains(key));
-                        retain_fps_forwarding_state_for_current_targets(
-                            &mut subscriber_video_fps_forward_state,
-                            current_forward_keys,
-                        );
-
+                    let keyframe_request_sweep_due = is_video_track
+                        && (forwarding_targets_changed
+                            || last_keyframe_request_sweep_at.is_none_or(|last_sweep_at| {
+                                rtp_event_at.duration_since(last_sweep_at)
+                                    >= std::time::Duration::from_secs(3)
+                            }));
+                    if keyframe_request_sweep_due {
+                        last_keyframe_request_sweep_at = Some(rtp_event_at);
                         for key in current_forward_keys {
-                            let now = std::time::Instant::now();
-                            let should_request = match keyframe_requested_forward_keys.get(key) {
-                                None => true,
-                                Some(last_at) => {
-                                    now.duration_since(*last_at) > std::time::Duration::from_secs(3)
-                                }
-                            };
+                            let should_request = keyframe_requested_forward_keys
+                                .get(key)
+                                .is_none_or(|last_requested_at| {
+                                    rtp_event_at.duration_since(*last_requested_at)
+                                        >= std::time::Duration::from_secs(3)
+                                });
                             if !should_request {
                                 continue;
                             }
-                            keyframe_requested_forward_keys.insert(key.clone(), now);
+                            keyframe_requested_forward_keys.insert(key.clone(), rtp_event_at);
                             tracing::debug!(
                                 room = %room_name,
                                 publisher_identity = %publisher_identity,
@@ -5619,10 +5678,13 @@ async fn forward_publisher_remote_track(
                     let mut media_forwarding_true_targets = 0usize;
                     let mut signaling_subscribed_targets = 0usize;
                     let mut room_subscribed_targets = 0usize;
+                    let current_track_settings_generation = track_settings.revision();
+                    let previous_track_settings_generation = observed_track_settings_generation;
+                    observed_track_settings_generation = Some(current_track_settings_generation);
                     let decision_revisions = ForwardingDecisionRevisions {
                         media_subscription: media_subscriptions.revision(),
                         auto_subscribe: auto_subscribe_preferences.revision(),
-                        track_settings: track_settings.revision(),
+                        track_settings: current_track_settings_generation,
                         room_media_subscription: rooms.media_subscription_revision(),
                     };
                     let packet_codec_mime = video_ssrc_codec_mime
@@ -5658,28 +5720,42 @@ async fn forward_publisher_remote_track(
                     } else {
                         None
                     };
-                    for (key, local_forward_track) in forward_tracks_for_track {
+                    for (key, local_forward_track, rtp_forwarder) in forward_tracks_for_track {
                         let (key_room, key_publisher, key_track_sid, key_subscriber) = key;
-                        let settings_revision = track_settings.revision_for_track(
-                            key_room,
-                            key_subscriber,
-                            key_track_sid,
-                        );
-                        if subscriber_video_layer_selector_settings_revisions
-                            .insert(key.clone(), settings_revision)
-                            .is_some_and(|previous_revision| previous_revision != settings_revision)
-                        {
-                            subscriber_video_layer_selectors.remove(key);
-                            subscriber_video_fps_forward_state.remove(key);
-                            tracing::debug!(
-                                room = %room_name,
-                                publisher_identity = %publisher_identity,
-                                track_sid = %track_sid,
-                                subscriber_identity = %key.3,
-                                settings_revision,
-                                "subscriber_video_layer_selector_reset_for_track_settings_change"
+                        let target_settings_revision_is_known =
+                            subscriber_video_layer_selector_settings_revisions.contains_key(key);
+                        if target_settings_revision_needs_refresh(
+                            previous_track_settings_generation,
+                            current_track_settings_generation,
+                            target_settings_revision_is_known,
+                        ) {
+                            let settings_revision = track_settings.revision_for_track(
+                                key_room,
+                                key_subscriber,
+                                key_track_sid,
                             );
+                            if subscriber_video_layer_selector_settings_revisions
+                                .insert(key.clone(), settings_revision)
+                                .is_some_and(|previous_revision| {
+                                    previous_revision != settings_revision
+                                })
+                            {
+                                subscriber_video_layer_selectors.remove(key);
+                                subscriber_video_fps_forward_state.remove(key);
+                                tracing::debug!(
+                                    room = %room_name,
+                                    publisher_identity = %publisher_identity,
+                                    track_sid = %track_sid,
+                                    subscriber_identity = %key.3,
+                                    settings_revision,
+                                    "subscriber_video_layer_selector_reset_for_track_settings_change"
+                                );
+                            }
                         }
+                        let settings_revision = subscriber_video_layer_selector_settings_revisions
+                            .get(key)
+                            .copied()
+                            .unwrap_or_default();
                         if collect_forwarding_debug_counts {
                             if media_forwarding.contains(
                                 key_room,
@@ -5816,9 +5892,8 @@ async fn forward_publisher_remote_track(
                             target_payload_type_by_forward_key.insert(key.clone(), payload_type);
                             payload_type
                         };
-                        let rewritten_packet = rtp_forwarding
-                            .rewrite_packet_for_subscriber_with_target_ssrc_and_payload_type(
-                                key,
+                        let rewritten_packet = rtp_forwarder
+                            .rewrite_packet_with_target_ssrc_and_payload_type(
                                 packet.clone(),
                                 target_ssrc,
                                 negotiated_payload_type,

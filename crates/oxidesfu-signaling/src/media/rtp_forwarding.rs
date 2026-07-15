@@ -479,6 +479,32 @@ pub(crate) fn extend_sequence_number_from_reference(
 
 type SubscriberRtpStateHandle = Arc<Mutex<SubscriberRtpState>>;
 
+/// Target-local handle for steady-state RTP rewriting.
+///
+/// The owning forwarding reader resolves this once when its target snapshot changes,
+/// while RTCP callbacks continue to reach the same state through [`RtpForwardingStore`].
+#[derive(Clone)]
+pub(crate) struct SubscriberRtpForwarder {
+    state: SubscriberRtpStateHandle,
+}
+
+impl SubscriberRtpForwarder {
+    pub(crate) fn rewrite_packet_with_target_ssrc_and_payload_type(
+        &self,
+        mut packet: rtc::rtp::Packet,
+        target_ssrc: Option<u32>,
+        negotiated_payload_type: Option<u8>,
+    ) -> Option<rtc::rtp::Packet> {
+        if let Some(payload_type) = negotiated_payload_type {
+            packet.header.payload_type = payload_type;
+        }
+        self.state
+            .lock()
+            .ok()
+            .and_then(|mut state| state.rewrite_packet(&packet, target_ssrc))
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RtpForwardingStore {
     states: Arc<Mutex<HashMap<ForwardTrackKey, SubscriberRtpStateHandle>>>,
@@ -492,6 +518,12 @@ impl RtpForwardingStore {
                 .or_insert_with(|| Arc::new(Mutex::new(SubscriberRtpState::default())))
                 .clone()
         })
+    }
+
+    /// Resolves one target's rewrite state for use in a forwarding-reader snapshot.
+    pub(crate) fn forwarder_for(&self, key: &ForwardTrackKey) -> Option<SubscriberRtpForwarder> {
+        self.get_or_insert_state(key)
+            .map(|state| SubscriberRtpForwarder { state })
     }
 
     fn get_state(&self, key: &ForwardTrackKey) -> Option<SubscriberRtpStateHandle> {
@@ -528,18 +560,16 @@ impl RtpForwardingStore {
     pub(crate) fn rewrite_packet_for_subscriber_with_target_ssrc_and_payload_type(
         &self,
         key: &ForwardTrackKey,
-        mut packet: rtc::rtp::Packet,
+        packet: rtc::rtp::Packet,
         target_ssrc: Option<u32>,
         negotiated_payload_type: Option<u8>,
     ) -> Option<rtc::rtp::Packet> {
-        if let Some(payload_type) = negotiated_payload_type {
-            packet.header.payload_type = payload_type;
-        }
-        let state = self.get_or_insert_state(key)?;
-        state
-            .lock()
-            .ok()
-            .and_then(|mut state| state.rewrite_packet(&packet, target_ssrc))
+        self.forwarder_for(key)?
+            .rewrite_packet_with_target_ssrc_and_payload_type(
+                packet,
+                target_ssrc,
+                negotiated_payload_type,
+            )
     }
 
     pub(crate) fn get_retransmission_packet(

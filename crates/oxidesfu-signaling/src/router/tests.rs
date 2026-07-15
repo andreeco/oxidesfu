@@ -5257,6 +5257,60 @@ fn retain_fps_forwarding_state_for_current_targets_prunes_stale_entries() {
 }
 
 #[test]
+fn forwarding_target_refresh_is_revision_scoped_and_prunes_stale_state() {
+    let active_key = (
+        "room".to_string(),
+        "publisher".to_string(),
+        "track".to_string(),
+        "subscriber-a".to_string(),
+    );
+    let stale_key = (
+        "room".to_string(),
+        "publisher".to_string(),
+        "track".to_string(),
+        "subscriber-b".to_string(),
+    );
+    let current_forward_keys = std::collections::HashSet::from([active_key.clone()]);
+    let mut states = std::collections::HashMap::from([(active_key.clone(), 1_u8), (stale_key, 2)]);
+
+    assert!(super::session::forwarding_target_revision_changed(None, 7));
+    assert!(super::session::forwarding_target_revision_changed(
+        Some(6),
+        7
+    ));
+    assert!(!super::session::forwarding_target_revision_changed(
+        Some(7),
+        7
+    ));
+
+    super::session::retain_forwarding_state_for_current_targets(&mut states, &current_forward_keys);
+
+    assert_eq!(states, std::collections::HashMap::from([(active_key, 1)]));
+}
+
+#[test]
+fn target_settings_revision_refreshes_only_for_new_targets_or_new_generation() {
+    assert!(super::session::target_settings_revision_needs_refresh(
+        None, 10, false
+    ));
+    assert!(super::session::target_settings_revision_needs_refresh(
+        Some(9),
+        10,
+        true
+    ));
+    assert!(super::session::target_settings_revision_needs_refresh(
+        Some(10),
+        10,
+        false
+    ));
+    assert!(!super::session::target_settings_revision_needs_refresh(
+        Some(10),
+        10,
+        true
+    ));
+}
+
+#[test]
 fn vp8_temporal_layer_id_from_payload_extracts_tid_when_present() {
     // Minimal VP8 payload descriptor with extension and T/K byte present.
     // 0x90 => X=1, S=1. 0x20 => T/K present only. 0x80 => TID=2 (10b).
