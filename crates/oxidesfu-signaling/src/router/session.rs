@@ -3275,8 +3275,7 @@ async fn remove_subscriber_media_forwarding_for_track_with_negotiation(
         }
     }
 
-    if connection_kind == MediaForwardingConnectionKind::SinglePcPublisher || !signal_renegotiation
-    {
+    if !signal_renegotiation {
         return Ok(true);
     }
 
@@ -3285,18 +3284,30 @@ async fn remove_subscriber_media_forwarding_for_track_with_negotiation(
         return Ok(true);
     };
 
-    signal_media_forwarding_negotiation_with_offer_id(
-        state,
-        &state.subscriber_offer_ids,
-        room_name,
-        subscriber_identity,
-        &subscriber_pc,
-        connection_kind,
-        track_kind,
-        &subscriber_outbound_tx,
-    )
-    .await
-    .map(|_| true)
+    if connection_kind == MediaForwardingConnectionKind::SinglePcPublisher {
+        signal_single_pc_sender_removal_negotiation(
+            state,
+            room_name,
+            subscriber_identity,
+            &subscriber_pc,
+            &subscriber_outbound_tx,
+        )
+        .await
+        .map(|_| true)
+    } else {
+        signal_media_forwarding_negotiation_with_offer_id(
+            state,
+            &state.subscriber_offer_ids,
+            room_name,
+            subscriber_identity,
+            &subscriber_pc,
+            connection_kind,
+            track_kind,
+            &subscriber_outbound_tx,
+        )
+        .await
+        .map(|_| true)
+    }
 }
 
 pub(crate) fn update_data_subscription_response(
@@ -7338,6 +7349,54 @@ async fn emit_claimed_subscriber_forwarding_offer(
     Ok(())
 }
 
+pub(crate) async fn signal_single_pc_sender_removal_negotiation(
+    state: &SignalState,
+    room_name: &str,
+    subscriber_identity: &str,
+    peer_connection: &SharedPeerConnection,
+    outbound_tx: &OutboundSignalSender,
+) -> oxidesfu_rtc::RtcResult<()> {
+    signal_server_offer_with_offer_id(
+        state,
+        &state.subscriber_offer_ids,
+        room_name,
+        subscriber_identity,
+        peer_connection,
+        rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Video,
+        outbound_tx,
+    )
+    .await
+}
+
+async fn signal_server_offer_with_offer_id(
+    state: &SignalState,
+    subscriber_offer_ids: &crate::stores::SubscriberOfferIdStore,
+    room_name: &str,
+    subscriber_identity: &str,
+    peer_connection: &SharedPeerConnection,
+    track_kind: rtc::rtp_transceiver::rtp_sender::RtpCodecKind,
+    outbound_tx: &OutboundSignalSender,
+) -> oxidesfu_rtc::RtcResult<()> {
+    if state
+        .subscriber_offer_negotiations
+        .request_offer(room_name, subscriber_identity)
+        == crate::stores::SubscriberOfferNegotiationRequest::Coalesced
+    {
+        return Ok(());
+    }
+
+    emit_claimed_subscriber_forwarding_offer(
+        state,
+        subscriber_offer_ids,
+        room_name,
+        subscriber_identity,
+        peer_connection,
+        track_kind,
+        outbound_tx,
+    )
+    .await
+}
+
 pub(crate) async fn signal_media_forwarding_negotiation_with_offer_id(
     state: &SignalState,
     subscriber_offer_ids: &crate::stores::SubscriberOfferIdStore,
@@ -7350,14 +7409,7 @@ pub(crate) async fn signal_media_forwarding_negotiation_with_offer_id(
 ) -> oxidesfu_rtc::RtcResult<()> {
     match connection_kind {
         MediaForwardingConnectionKind::DualPcSubscriber => {
-            if state
-                .subscriber_offer_negotiations
-                .request_offer(room_name, subscriber_identity)
-                == crate::stores::SubscriberOfferNegotiationRequest::Coalesced
-            {
-                return Ok(());
-            }
-            emit_claimed_subscriber_forwarding_offer(
+            signal_server_offer_with_offer_id(
                 state,
                 subscriber_offer_ids,
                 room_name,

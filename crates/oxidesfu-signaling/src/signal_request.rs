@@ -657,10 +657,27 @@ pub(crate) async fn signal_response_for_request(
                 identity,
                 crate::router::SignalConnectionTarget::Publisher,
             ) {
+                let expected_offer_id = state
+                    .subscriber_offer_ids
+                    .current_offer_id(room_name, identity);
+                if let Some(expected_offer_id) = expected_offer_id
+                    && answer.id != 0
+                    && answer.id != expected_offer_id
+                {
+                    tracing::warn!(
+                        room = room_name,
+                        identity,
+                        expected_offer_id,
+                        received_offer_id = answer.id,
+                        "ignoring_stale_or_mismatched_publisher_answer_id"
+                    );
+                    return Ok(None);
+                }
                 tracing::debug!(
                     room = room_name,
                     identity,
                     answer_id,
+                    expected_offer_id = ?expected_offer_id,
                     answer_mid_to_track_id = ?answer_mid_to_track_id,
                     "publisher_answer_set_remote_answer_start"
                 );
@@ -688,6 +705,24 @@ pub(crate) async fn signal_response_for_request(
                     answer_mid_to_track_id = ?answer_mid_to_track_id,
                     "publisher_answer_set_remote_answer_ok"
                 );
+                let completed_offer_id = expected_offer_id.unwrap_or(answer_id);
+                if state.subscriber_offer_negotiations.finish_answer(
+                    room_name,
+                    identity,
+                    completed_offer_id,
+                ) {
+                    crate::router::session::signal_single_pc_sender_removal_negotiation(
+                        state,
+                        room_name,
+                        identity,
+                        &peer_connection,
+                        outbound_tx,
+                    )
+                    .await
+                    .map_err(|err| SignalError::RequestHandling {
+                        message: err.to_string(),
+                    })?;
+                }
             } else {
                 tracing::warn!(
                     room = room_name,

@@ -8579,6 +8579,25 @@ async fn single_pc_disconnect_rejoin_flow_reactivates_new_track_via_mid_fallback
         .set_remote_offer(offer_sdp)
         .await
         .expect("remote offer should set");
+    let answer_sdp = subscriber_pc
+        .create_answer()
+        .await
+        .expect("subscriber answer should create");
+    offerer
+        .set_remote_answer(answer_sdp)
+        .await
+        .expect("offerer remote answer should set");
+    let subscriber_pc = state.peer_connections.insert(
+        "room",
+        "subscriber-c3",
+        SignalConnectionTarget::Publisher,
+        subscriber_pc,
+    );
+    let (subscriber_outbound_tx, mut subscriber_outbound_rx) =
+        tokio::sync::mpsc::unbounded_channel();
+    state
+        .signal_connections
+        .insert("room", "subscriber-c3", subscriber_outbound_tx);
 
     let old_forward_track = subscriber_pc
         .add_forwarding_track_to_mid(
@@ -8626,6 +8645,14 @@ a=sendonly\r\n"
     );
 
     cleanup_participant_runtime_state(&state, "room", "publisher-c2", true).await;
+
+    let cleanup_offer = subscriber_outbound_rx
+        .try_recv()
+        .expect("combined-PC cleanup should emit a server offer");
+    assert!(matches!(
+        cleanup_offer.message,
+        Some(proto::signal_response::Message::Offer(_))
+    ));
 
     assert!(
         state

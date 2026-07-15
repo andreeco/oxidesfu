@@ -1665,9 +1665,6 @@ async fn signal_consolidated_forwarding_cleanup_negotiation(
         else {
             continue;
         };
-        if connection_kind == MediaForwardingConnectionKind::SinglePcPublisher {
-            continue;
-        }
         let Some(subscriber_outbound_tx) = state
             .signal_connections
             .get(room_name, &subscriber_identity)
@@ -1675,17 +1672,31 @@ async fn signal_consolidated_forwarding_cleanup_negotiation(
             continue;
         };
 
-        let _ = session::signal_media_forwarding_negotiation_with_offer_id(
-            state,
-            &state.subscriber_offer_ids,
-            room_name,
-            &subscriber_identity,
-            &subscriber_pc,
-            connection_kind,
-            rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Audio,
-            &subscriber_outbound_tx,
-        )
-        .await;
+        let _ = match connection_kind {
+            MediaForwardingConnectionKind::SinglePcPublisher => {
+                session::signal_single_pc_sender_removal_negotiation(
+                    state,
+                    room_name,
+                    &subscriber_identity,
+                    &subscriber_pc,
+                    &subscriber_outbound_tx,
+                )
+                .await
+            }
+            MediaForwardingConnectionKind::DualPcSubscriber => {
+                session::signal_media_forwarding_negotiation_with_offer_id(
+                    state,
+                    &state.subscriber_offer_ids,
+                    room_name,
+                    &subscriber_identity,
+                    &subscriber_pc,
+                    connection_kind,
+                    rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Audio,
+                    &subscriber_outbound_tx,
+                )
+                .await
+            }
+        };
     }
 }
 
@@ -1723,7 +1734,7 @@ async fn remove_orphaned_forward_tracks_for_departing_publisher(
             false,
         );
 
-        let Some((subscriber_pc, connection_kind)) = state
+        let Some((subscriber_pc, _connection_kind)) = state
             .peer_connections
             .media_receiver_for_identity(room_name, &subscriber_identity)
         else {
@@ -1734,9 +1745,7 @@ async fn remove_orphaned_forward_tracks_for_departing_publisher(
             .remove_forwarding_track(&local_forward_track)
             .await;
 
-        if connection_kind != MediaForwardingConnectionKind::SinglePcPublisher {
-            subscribers_needing_renegotiation.insert(subscriber_identity);
-        }
+        subscribers_needing_renegotiation.insert(subscriber_identity);
     }
 
     if let Some(publisher_sid) = publisher_sid.filter(|sid| !sid.is_empty()) {
@@ -1745,7 +1754,7 @@ async fn remove_orphaned_forward_tracks_for_departing_publisher(
                 continue;
             }
 
-            let Some((subscriber_pc, connection_kind)) = state
+            let Some((subscriber_pc, _connection_kind)) = state
                 .peer_connections
                 .media_receiver_for_identity(room_name, &subscriber.identity)
             else {
@@ -1757,7 +1766,7 @@ async fn remove_orphaned_forward_tracks_for_departing_publisher(
                 .await
                 .unwrap_or_default();
 
-            if removed > 0 && connection_kind != MediaForwardingConnectionKind::SinglePcPublisher {
+            if removed > 0 {
                 subscribers_needing_renegotiation.insert(subscriber.identity.clone());
             }
         }
@@ -1771,10 +1780,6 @@ async fn remove_orphaned_forward_tracks_for_departing_publisher(
             continue;
         };
 
-        if connection_kind == MediaForwardingConnectionKind::SinglePcPublisher {
-            continue;
-        }
-
         let Some(subscriber_outbound_tx) = state
             .signal_connections
             .get(room_name, &subscriber_identity)
@@ -1782,21 +1787,35 @@ async fn remove_orphaned_forward_tracks_for_departing_publisher(
             continue;
         };
 
-        for track_kind in [
-            rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Audio,
-            rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Video,
-        ] {
-            let _ = session::signal_media_forwarding_negotiation_with_offer_id(
-                state,
-                &state.subscriber_offer_ids,
-                room_name,
-                &subscriber_identity,
-                &subscriber_pc,
-                connection_kind,
-                track_kind,
-                &subscriber_outbound_tx,
-            )
-            .await;
+        match connection_kind {
+            MediaForwardingConnectionKind::SinglePcPublisher => {
+                let _ = session::signal_single_pc_sender_removal_negotiation(
+                    state,
+                    room_name,
+                    &subscriber_identity,
+                    &subscriber_pc,
+                    &subscriber_outbound_tx,
+                )
+                .await;
+            }
+            MediaForwardingConnectionKind::DualPcSubscriber => {
+                for track_kind in [
+                    rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Audio,
+                    rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Video,
+                ] {
+                    let _ = session::signal_media_forwarding_negotiation_with_offer_id(
+                        state,
+                        &state.subscriber_offer_ids,
+                        room_name,
+                        &subscriber_identity,
+                        &subscriber_pc,
+                        connection_kind,
+                        track_kind,
+                        &subscriber_outbound_tx,
+                    )
+                    .await;
+                }
+            }
         }
     }
 }
