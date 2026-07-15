@@ -57,18 +57,18 @@ The repository-owned runner captures a profileable OxideSFU server and the exact
 tools/profiling/profile-load-test.sh mixed_room_high_simulcast_large
 ```
 
-The successful runs delivered all 160 subscriber tracks with zero reported packet loss. The top-level `perf` samples moved as the first forwarding fixes landed:
+The successful runs delivered all 160 subscriber tracks with effectively zero packet loss. The top-level `perf` samples moved as the first forwarding fixes landed:
 
-| Sampled symbol | Initial profile | After revision-scoped cleanup | After target-bound RTP state |
-|---|---:|---:|---:|
-| `core::hash::sip::Hasher::write` | 12.65% | 7.13% | 6.51% |
-| `__vdso_clock_gettime` | 3.20% | 3.03% | 2.74% |
-| WebRTC peer-connection `poll_write` | 2.38% | 2.41% | 2.64% |
-| forwarding reader closure | 1.11% | 2.16% | 1.70% |
-| `String::clone` | 1.57% | 1.23% | 1.21% |
-| `BuildHasher::hash_one` | — | — | 1.16% after reader-local target state |
+| Sampled symbol | Initial profile | After revision-scoped cleanup | After target-bound RTP state | Latest rerun (`8a59e987`) |
+|---|---:|---:|---:|---:|
+| `core::hash::sip::Hasher::write` | 12.65% | 7.13% | 6.51% | 0.88% |
+| `__vdso_clock_gettime` | 3.20% | 3.03% | 2.74% | 3.12% |
+| WebRTC peer-connection write path | 2.38% | 2.41% | 2.64% | 1.21% (`poll_write_pipeline`) |
+| WebRTC driver loop | — | — | — | 1.90% |
+| forwarding reader closure | 1.11% | 2.16% | 1.70% | 0.92% |
+| `BuildHasher::hash_one` | — | — | 1.16% after reader-local target state | 0.87% |
 
-The post-refactor profile delivered all 160 subscriber tracks with zero reported packet loss. Its largest samples were WebRTC peer-connection `poll_write` (3.15%) and `__vdso_clock_gettime` (3.03%); no forwarding map hash operation is a leading hotspot.
+The latest rerun (`mixed_room_high_simulcast_large-20260715T211139Z-8a59e987`) delivered `160/160` tracks with a single lost packet overall (rounded `0%`) and 27K samples with zero lost perf samples. The leading symbols remain below the forwarding policy layer (`__vdso_clock_gettime`, WebRTC driver loop, RTC poll-write pipeline, and kernel epoll wakeups), so no additional global forwarding-map rewrite is justified by this profile alone.
 
 Representative artifacts are deliberately ignored under `target/profiles/`; reproduce them rather than committing binary profiling data.
 
@@ -268,18 +268,26 @@ Use an actor-like reader command channel if it keeps ownership local and avoids 
 
 ## Post-Phase-1 profile and remaining optimization map
 
-The latest 90-second Oxide-only `mixed_room_high_simulcast_large` profile, using the current WebRTC pin, delivered all 160 subscriber tracks with zero packet loss and recorded 29K samples with none lost. Its leading flat samples are below the signaling target-selection layer:
+The latest 90-second Oxide-only `mixed_room_high_simulcast_large` profile (`mixed_room_high_simulcast_large-20260715T211139Z-8a59e987`), using the current WebRTC pin, delivered all `160/160` subscriber tracks with one lost packet overall (rounded `0%`) and recorded 27K samples with none lost. Its leading flat samples are below the signaling target-selection layer:
 
 | Sampled symbol | CPU sample |
 |---|---:|
-| `__vdso_clock_gettime` | 2.68% |
-| WebRTC peer-connection driver event loop | 2.19% |
-| RTC core `RTCPeerConnection::poll_write` | 1.76% |
-| `ep_poll_callback` | 1.49% |
-| Oxide RTP rewrite | 1.03% |
-| `BuildHasher::hash_one` | 0.96%, 0.89% |
+| `__vdso_clock_gettime` | 3.12% |
+| WebRTC peer-connection driver event loop | 1.90% |
+| `ep_poll_callback` | 1.59% |
+| RTC core `poll_write_pipeline` | 1.21% |
+| Oxide forwarding reader closure | 0.92% |
+| `BuildHasher::hash_one` | 0.87% |
 
-This profile has `exclude_callchain_user=1`; flat VDSO and shared hash samples do not identify their callers. Its lower bitrate and sample count than the preceding run also mean it must not be used alone for a CPU-capacity comparison.
+This profile has `exclude_callchain_user=1`; flat VDSO and shared hash samples do not identify their callers. It is a single run and must not be used alone for a CPU-capacity claim.
+
+### 2026-07-15: LBR attempt and non-loopback fallback
+
+The runner's LBR preflight failed on this host before server startup: its CPU PMU does not support branch-stack sampling for `cpu/cycles/PH`. The capability log is retained only in the ignored profile directory; do not report an LBR caller attribution from this machine.
+
+No `ip netns` client namespace was configured. As a fallback, the profile bound OxideSFU and addressed `lk` through the host LAN address (`192.168.178.196:7880`) in the same network namespace. The resulting 90-second run (`mixed_room_high_simulcast_large-20260715T211528Z-8a59e987`) delivered `160/160` tracks with zero loss and recorded 34K samples with none lost. Its leading samples were `__vdso_clock_gettime` (3.04%), driver event loop (2.08%), `ep_poll_callback` (1.35%), kernel queued spinlock slow path (1.31%), RTC `poll_write_pipeline` (1.13%), `ring` AES-GCM (0.98%), `BuildHasher::hash_one` (0.86%), and the forwarding reader closure (0.85%).
+
+This fallback verifies the workload through a non-loopback address but does **not** isolate client kernel wakeups from server work, because clients and server still share a host network namespace. Provision a routed namespace or run `lk` on another host before attributing the epoll/kernel entries to OxideSFU's transport design.
 
 The WebRTC fork now reuses the driver-owned core-output `Vec<TaggedBytesMut>` batch. The current OxideSFU pin is `24b69d02220ffdaf67af4550482d5986089a95aa`, whose RTC submodule is `6d436970b437bb8c7572e4ab8d970333496a1edb`. It retains ring-backed in-place AEAD AES-GCM, lossless `poll_write` backpressure ownership, cached bind-time SDES MID IDs, and a bounded 64-datagram driver-visible core write batch with a coalesced continuation wake. RTC tests cover retry identity, `A/B/C` FIFO order, bounded output ordering, downstream-stage exclusion until retry success, non-backpressure drops, and RTP/RTCP/data-channel variants; outer-WebRTC tests cover MID output/ownership and continuation coalescing.
 
@@ -290,8 +298,9 @@ The WebRTC fork now reuses the driver-owned core-output `Vec<TaggedBytesMut>` ba
 3. **Completed: active-SSRC sequence-state fast path.** `SubscriberRtpState` now keeps the active SSRC and extended-sequence reference outside `highest_incoming_ext_seq_by_ssrc`, retaining the map only for inactive sources. The common selected-layer packet avoids a hash probe; source switches persist/restore exact fallback state. TDD covers `A → B → C → A` history, wraps on both sides of a switch, late and duplicate old-source packets, and timestamp continuity.
 4. **Completed: bounded core write batches.** RTC now exposes an internal bounded `poll_write_batch` primitive with an explicit immediately-sendable-work result. The driver sends at most 64 core datagrams, releases the core mutex before async socket I/O, and schedules one continuation before returning to timer/socket/close/application-event selection. TDD covers bounded FIFO output and continuation coalescing; existing core retry and outer data-channel, reactor-drop, and renegotiation tests remain green. **Limit:** one core pipeline invocation can still fill its retained ready-output queue before the batch boundary. A stricter per-handler-hop budget needs resumable handler-stage state and remains deferred.
 5. **Completed: event-driven settings propagation.** Effective TrackSettings upserts and removals now publish bounded target-specific revisions from `media/track_settings.rs`. The forwarding reader consumes those notifications, invalidating only the matching target decision and selector/FPS state; receiver lag performs one out-of-band target resynchronization. Pending debounced settings are canceled on track/participant removal so they cannot resurrect settings after teardown. TDD covers semantic no-ops, debounced effective changes, removal, and pending-update cancellation.
-6. **Remote-client network profiling.** `ep_poll_callback` and kernel lock samples are amplified by loopback `lk` clients. Use the completed network-namespace client wrapper, or a remote client, before changing UDP, epoll, socket, or transport architecture.
-7. **Completed: MID extension lookup reuse.** Each compatible `TrackLocalStaticRTP` binding now captures its negotiated SDES MID extension ID. Packet writes reuse that bounded owner-local value while preserving independent queued packet ownership; no global pool or `unsafe` was introduced.
+6. **Next: caller-attributed profiling (LBR) and non-loopback clients.** `__vdso_clock_gettime`, `ep_poll_callback`, and kernel lock samples remain prominent. Run `--attribution-mode lbr` and a non-loopback client topology (`--client-netns` or remote host) before changing UDP/epoll/transport architecture.
+7. **Next: strict RTC-core handler budget design (if profiles still justify).** Current bounded driver/core batching limits datagrams per driver turn, but a single core pipeline invocation can still populate the retained ready-output queue. Any stricter budget must introduce resumable handler-stage state plus deterministic FIFO/fairness/backpressure tests.
+8. **Completed: MID extension lookup reuse.** Each compatible `TrackLocalStaticRTP` binding now captures its negotiated SDES MID extension ID. Packet writes reuse that bounded owner-local value while preserving independent queued packet ownership; no global pool or `unsafe` was introduced.
 
 ### Reference evidence for the remaining work
 
