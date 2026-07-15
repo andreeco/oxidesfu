@@ -13,16 +13,41 @@ type TrackSettingsKey = (String, String, String);
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TrackSettingsStore {
     settings: Arc<Mutex<HashMap<TrackSettingsKey, proto::UpdateTrackSettings>>>,
+    revisions: Arc<Mutex<HashMap<TrackSettingsKey, u64>>>,
     revision: Arc<AtomicU64>,
 }
 
 impl TrackSettingsStore {
-    fn bump_revision(&self) {
-        self.revision.fetch_add(1, Ordering::Relaxed);
+    fn bump_revision(&self) -> u64 {
+        self.revision.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    fn mark_changed(&self, key: TrackSettingsKey) {
+        let revision = self.bump_revision();
+        if let Ok(mut revisions) = self.revisions.lock() {
+            revisions.insert(key, revision);
+        }
     }
 
     pub(crate) fn revision(&self) -> u64 {
         self.revision.load(Ordering::Relaxed)
+    }
+
+    /// Returns the semantic-settings revision for one subscriber and publication.
+    pub(crate) fn revision_for_track(&self, room: &str, identity: &str, track_sid: &str) -> u64 {
+        self.revisions
+            .lock()
+            .ok()
+            .and_then(|revisions| {
+                revisions
+                    .get(&(
+                        room.to_string(),
+                        identity.to_string(),
+                        track_sid.to_string(),
+                    ))
+                    .copied()
+            })
+            .unwrap_or_default()
     }
 
     pub(crate) fn upsert_from_request(
@@ -31,29 +56,34 @@ impl TrackSettingsStore {
         identity: &str,
         request: &proto::UpdateTrackSettings,
     ) {
-        if let Ok(mut settings) = self.settings.lock() {
-            for track_sid in &request.track_sids {
-                settings.insert(
-                    (room.to_string(), identity.to_string(), track_sid.clone()),
-                    request.clone(),
-                );
+        let Ok(mut settings) = self.settings.lock() else {
+            return;
+        };
+
+        let room = room.to_string();
+        let identity = identity.to_string();
+        for track_sid in &request.track_sids {
+            let key = (room.clone(), identity.clone(), track_sid.clone());
+            let mut setting = request.clone();
+            setting.track_sids = vec![track_sid.clone()];
+            if settings.get(&key) == Some(&setting) {
+                continue;
             }
-            self.bump_revision();
+            settings.insert(key.clone(), setting);
+            self.mark_changed(key);
         }
     }
 
     pub(crate) fn remove_for_track(&self, room: &str, identity: &str, track_sid: &str) {
-        if let Ok(mut settings) = self.settings.lock() {
-            if settings
-                .remove(&(
-                    room.to_string(),
-                    identity.to_string(),
-                    track_sid.to_string(),
-                ))
-                .is_some()
-            {
-                self.bump_revision();
-            }
+        let key = (
+            room.to_string(),
+            identity.to_string(),
+            track_sid.to_string(),
+        );
+        if let Ok(mut settings) = self.settings.lock()
+            && settings.remove(&key).is_some()
+        {
+            self.mark_changed(key);
         }
     }
 
@@ -93,14 +123,17 @@ impl TrackSettingsStore {
     }
 
     pub(crate) fn remove_participant(&self, room: &str, identity: &str) {
-        if let Ok(mut settings) = self.settings.lock() {
-            let size_before = settings.len();
-            settings.retain(|(key_room, key_identity, _), _| {
-                key_room != room || key_identity != identity
-            });
-            if settings.len() != size_before {
-                self.bump_revision();
-            }
+        let Ok(mut settings) = self.settings.lock() else {
+            return;
+        };
+        let removed = settings
+            .keys()
+            .filter(|(key_room, key_identity, _)| key_room == room && key_identity == identity)
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in removed {
+            settings.remove(&key);
+            self.mark_changed(key);
         }
     }
 
@@ -442,23 +475,50 @@ mod tests {
     }
 
     #[test]
-    fn track_settings_store_revision_advances_on_mutation() {
+    fn track_settings_store_revisions_advance_only_for_semantic_target_changes() {
         let store = TrackSettingsStore::default();
         let initial = store.revision();
+        let initial_a = store.revision_for_track("room", "alice", "TR_a");
+        let initial_b = store.revision_for_track("room", "bob", "TR_b");
+        let setting = proto::UpdateTrackSettings {
+            track_sids: vec!["TR_a".to_string()],
+            quality: proto::VideoQuality::Low as i32,
+            ..Default::default()
+        };
+
+        store.upsert_from_request("room", "alice", &setting);
+        let after_upsert = store.revision();
+        let after_upsert_a = store.revision_for_track("room", "alice", "TR_a");
+        assert!(after_upsert > initial);
+        assert!(after_upsert_a > initial_a);
+        assert_eq!(store.revision_for_track("room", "bob", "TR_b"), initial_b);
+
+        store.upsert_from_request("room", "alice", &setting);
+        assert_eq!(store.revision(), after_upsert);
+        assert_eq!(
+            store.revision_for_track("room", "alice", "TR_a"),
+            after_upsert_a,
+            "an identical setting must not restart this target's layer selection"
+        );
 
         store.upsert_from_request(
             "room",
-            "alice",
+            "bob",
             &proto::UpdateTrackSettings {
-                track_sids: vec!["TR_a".to_string()],
+                track_sids: vec!["TR_b".to_string()],
+                quality: proto::VideoQuality::High as i32,
                 ..Default::default()
             },
         );
-        let after_upsert = store.revision();
-        assert!(after_upsert > initial);
+        assert_eq!(
+            store.revision_for_track("room", "alice", "TR_a"),
+            after_upsert_a,
+            "an unrelated subscriber/track must not restart this target's layer selection"
+        );
 
         store.remove_for_track("room", "alice", "TR_a");
         assert!(store.revision() > after_upsert);
+        assert!(store.revision_for_track("room", "alice", "TR_a") > after_upsert_a);
     }
 
     #[test]

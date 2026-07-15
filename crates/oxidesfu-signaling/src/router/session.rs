@@ -1642,6 +1642,14 @@ pub(crate) fn aggregate_requested_quality_for_track(
             continue;
         }
 
+        let settings =
+            state
+                .track_settings
+                .get_for_track(room_name, &subscriber_identity, track_sid);
+        if settings.is_some_and(|settings| settings.disabled) {
+            continue;
+        }
+
         let requested = requested_video_quality_for_track(
             &state.track_settings,
             room_name,
@@ -5191,7 +5199,8 @@ async fn forward_publisher_remote_track(
             (String, String, String, String),
             SubscriberVideoLayerSelector,
         >::new();
-        let mut video_layer_selector_track_settings_revision = track_settings.revision();
+        let mut subscriber_video_layer_selector_settings_revisions =
+            std::collections::HashMap::<(String, String, String, String), u64>::new();
         let mut video_ssrc_rids = std::collections::HashMap::<u32, Option<String>>::new();
         let mut video_ssrc_codec_mime = std::collections::HashMap::<u32, Option<String>>::new();
         let mut video_ssrc_is_repair = std::collections::HashMap::<u32, bool>::new();
@@ -5474,6 +5483,8 @@ async fn forward_publisher_remote_track(
                         .retain(|key, _| current_forward_keys.contains(key));
                     subscriber_video_layer_selectors
                         .retain(|key, _| current_forward_keys.contains(key));
+                    subscriber_video_layer_selector_settings_revisions
+                        .retain(|key, _| current_forward_keys.contains(key));
 
                     if is_video_track {
                         keyframe_requested_forward_keys
@@ -5512,12 +5523,6 @@ async fn forward_publisher_remote_track(
                                 )])
                                 .await;
                         }
-                    }
-
-                    let track_settings_revision = track_settings.revision();
-                    if video_layer_selector_track_settings_revision != track_settings_revision {
-                        subscriber_video_layer_selectors.clear();
-                        video_layer_selector_track_settings_revision = track_settings_revision;
                     }
 
                     let total_forward_targets = forward_tracks_for_track.len();
@@ -5568,6 +5573,26 @@ async fn forward_publisher_remote_track(
                     };
                     for (key, local_forward_track) in forward_tracks_for_track {
                         let (key_room, key_publisher, key_track_sid, key_subscriber) = key;
+                        let settings_revision = track_settings.revision_for_track(
+                            key_room,
+                            key_subscriber,
+                            key_track_sid,
+                        );
+                        if subscriber_video_layer_selector_settings_revisions
+                            .insert(key.clone(), settings_revision)
+                            .is_some_and(|previous_revision| previous_revision != settings_revision)
+                        {
+                            subscriber_video_layer_selectors.remove(key);
+                            subscriber_video_fps_forward_state.remove(key);
+                            tracing::debug!(
+                                room = %room_name,
+                                publisher_identity = %publisher_identity,
+                                track_sid = %track_sid,
+                                subscriber_identity = %key.3,
+                                settings_revision,
+                                "subscriber_video_layer_selector_reset_for_track_settings_change"
+                            );
+                        }
                         if collect_forwarding_debug_counts {
                             if media_forwarding.contains(
                                 key_room,

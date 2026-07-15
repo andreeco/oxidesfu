@@ -4380,6 +4380,152 @@ async fn track_setting_request_updates_dynacast_control_plane_state() {
 
 #[tokio::test]
 #[allow(deprecated)]
+async fn track_setting_disable_then_enable_restores_forwarding_and_publisher_layer_demand() {
+    let state = state();
+    let room = "track-setting-enable-room";
+    let publisher = "publisher";
+    let subscriber = "subscriber";
+    let track_sid = "TR_adaptive_video";
+
+    join_participant_for_data_track_test(&state, room, publisher);
+    join_participant_for_data_track_test(&state, room, subscriber);
+    let track = proto::TrackInfo {
+        sid: track_sid.to_string(),
+        r#type: proto::TrackType::Video as i32,
+        mime_type: "video/av1".to_string(),
+        simulcast: true,
+        layers: vec![
+            proto::VideoLayer {
+                quality: proto::VideoQuality::Low as i32,
+                width: 384,
+                height: 216,
+                ..Default::default()
+            },
+            proto::VideoLayer {
+                quality: proto::VideoQuality::Medium as i32,
+                width: 960,
+                height: 540,
+                ..Default::default()
+            },
+            proto::VideoLayer {
+                quality: proto::VideoQuality::High as i32,
+                width: 1280,
+                height: 720,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    state
+        .rooms
+        .add_participant_track(room, publisher, track.clone())
+        .expect("publisher video track should be added");
+    state
+        .media_subscriptions
+        .set_subscribed(room, publisher, track_sid, subscriber, true);
+    state
+        .rooms
+        .set_media_track_subscribed(room, publisher, track_sid, subscriber, true)
+        .expect("room subscription should be set");
+
+    let (publisher_outbound_tx, mut publisher_outbound_rx) = tokio::sync::mpsc::unbounded_channel();
+    state
+        .signal_connections
+        .insert(room, publisher, publisher_outbound_tx);
+    let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    for (disabled, width, height) in [(true, 948, 121), (false, 948, 940)] {
+        signal_response_for_request(
+            proto::SignalRequest {
+                message: Some(proto::signal_request::Message::TrackSetting(
+                    proto::UpdateTrackSettings {
+                        track_sids: vec![track_sid.to_string()],
+                        disabled,
+                        quality: proto::VideoQuality::High as i32,
+                        width,
+                        height,
+                        ..Default::default()
+                    },
+                )),
+            },
+            &state,
+            room,
+            subscriber,
+            &outbound_tx,
+        )
+        .await
+        .expect("track setting should process");
+
+        let response = publisher_outbound_rx
+            .recv()
+            .await
+            .expect("publisher should receive a subscribed-quality update");
+        let Some(proto::signal_response::Message::SubscribedQualityUpdate(update)) =
+            response.message
+        else {
+            panic!("expected SubscribedQualityUpdate");
+        };
+        assert_eq!(update.track_sid, track_sid);
+        if disabled {
+            assert!(
+                update
+                    .subscribed_qualities
+                    .iter()
+                    .all(|quality| !quality.enabled),
+                "disabling must remove publisher layer demand"
+            );
+            assert!(
+                !session::should_forward_media_for_subscriber_with_track_settings(
+                    &state.media_subscriptions,
+                    &state.auto_subscribe_preferences,
+                    &state.track_settings,
+                    &state.rooms,
+                    room,
+                    publisher,
+                    track_sid,
+                    subscriber,
+                ),
+                "disabled settings must stop this subscriber's forwarding"
+            );
+        } else {
+            assert!(
+                update
+                    .subscribed_qualities
+                    .iter()
+                    .all(|quality| quality.enabled),
+                "the final enabled setting must restore publisher layer demand"
+            );
+            assert!(
+                session::should_forward_media_for_subscriber_with_track_settings(
+                    &state.media_subscriptions,
+                    &state.auto_subscribe_preferences,
+                    &state.track_settings,
+                    &state.rooms,
+                    room,
+                    publisher,
+                    track_sid,
+                    subscriber,
+                ),
+                "the final enabled setting must restore forwarding"
+            );
+        }
+    }
+
+    assert_eq!(
+        session::requested_video_quality_for_track(
+            &state.track_settings,
+            room,
+            subscriber,
+            track_sid,
+            Some(&track),
+        ),
+        Some(proto::VideoQuality::High),
+        "the final dimensions, not the transient disabled dimensions, determine the active layer"
+    );
+}
+
+#[tokio::test]
+#[allow(deprecated)]
 async fn track_setting_request_uses_aggregate_max_quality_across_subscribers() {
     let state = state();
     let room = "track-setting-aggregate-room";
