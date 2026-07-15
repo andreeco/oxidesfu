@@ -315,6 +315,10 @@ At OxideSFU `1bad531e`, the median `mixed_room_high_simulcast_large` result was 
 
 The final Oxide-only video profile delivered `54/54` tracks with zero loss. Its top user-space costs remain AEAD GCM authentication (`Polyval::mul` 3.43%), RTC `poll_write` (3.32%), and the WebRTC driver loop (2.02%). The profile also attributes substantial execution to local loopback UDP/kernel networking; it is not evidence that application-level forwarding alone can close the remaining Go CPU delta.
 
+Workspace validation after the fork pin exposed and repaired three lost rebase compatibility contracts: default AV1 is again payload type `45` with omitted fmtp, generated candidates again carry bundle `sdpMid: "0"`, and the associated Oxide AV1 SDP/RTP and ICE tests pass in isolation. The repaired outer fork is `884354a7e81d6ae308d143b0ab8063e082fdb729` (RTC `89a132c`).
+
+`cargo test --workspace` still has unrelated combined-run failures: the two Rust SDK video FPS cadence contracts are sensitive to suite load/timing (both pass when targeted), and upstream `TestSingleNodeUpdateSubscriptionPermissions` times out waiting for subscriber data-track bytes. Do not weaken these contracts to make the suite green; reproduce them on an idle host and repair their scheduling/data-track behavior in a separate compatibility slice.
+
 ### Phase 5 — WebRTC and transport investigation
 
 **Objective:** separate OxideSFU-specific overhead from `webrtc-rs` behavior.
