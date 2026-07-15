@@ -68,9 +68,16 @@ turn-server = { git = "https://github.com/andreeco/turn-rs.git", rev = "79d1bc2a
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 # Pinned from andreeco/webrtc's oxidesfu/webrtc-compat branch for LiveKit compatibility.
-webrtc = { git = "https://github.com/andreeco/webrtc.git", rev = "89d6a42de5f9633109254ca8db01d860be2b4b16", default-features = false, features = ["runtime-tokio"] }
-rtc = { git = "https://github.com/andreeco/webrtc.git", rev = "89d6a42de5f9633109254ca8db01d860be2b4b16" }
-rtc-stun = { git = "https://github.com/andreeco/webrtc.git", rev = "89d6a42de5f9633109254ca8db01d860be2b4b16" }
+#
+# Update order matters: first commit and push any RTC-core work to
+# andreeco/rtc:oxidesfu/rtc-compat, then update the `rtc` submodule in
+# andreeco/webrtc, commit and push it to andreeco/webrtc:oxidesfu/webrtc-compat.
+# Pin all three packages below to that published outer-WebRTC commit and refresh
+# Cargo.lock; never use a local path override. Validate the RTC suite, focused
+# Oxide media contracts, and record the exact outer and nested RTC revisions.
+webrtc = { git = "https://github.com/andreeco/webrtc.git", rev = "e8f5b72cf8e0d05ebf02d0f8709e1c2201887679", default-features = false, features = ["runtime-tokio"] }
+rtc = { git = "https://github.com/andreeco/webrtc.git", rev = "e8f5b72cf8e0d05ebf02d0f8709e1c2201887679" }
+rtc-stun = { git = "https://github.com/andreeco/webrtc.git", rev = "e8f5b72cf8e0d05ebf02d0f8709e1c2201887679" }
 
 # Optimized profiling builds retain symbols without changing normal release artifacts.
 [profile.profiling]

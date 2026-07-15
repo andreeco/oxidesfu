@@ -279,15 +279,14 @@ The latest Oxide-only `mixed_room_high_simulcast_large` profile used WebRTC fork
 | `SipHash::write` | 1.18% |
 | Oxide publisher forwarding reader | 1.00% |
 
-The WebRTC fork now reuses the driver-owned core-output `Vec<TaggedBytesMut>` batch. The current OxideSFU pin is `ef1e77dbb5e59942fdc3bef1ab5114618f9ac82e`, which also carries RTC commit `fb25d55238c8a534c3b69a5b8842cbbbe0ff7331`: already-marshaled RTP is encrypted in its existing `BytesMut` for AEAD AES-GCM instead of being copied to a second full-packet buffer. The new SRTP regression proves allocation identity, ciphertext equivalence, and successful decryption.
+The WebRTC fork now reuses the driver-owned core-output `Vec<TaggedBytesMut>` batch. The current OxideSFU pin is `e8f5b72cf8e0d05ebf02d0f8709e1c2201887679`, whose RTC submodule is `129c78f84da5c9ef15664f26b84356b093b94c70`. It retains the ring-backed, in-place AEAD AES-GCM implementation and changes `poll_write` backpressure ownership: a handler returns the original unconsumed message on `ErrBufferFull`, so the core defers it and its FIFO tail without cloning each message speculatively. RTC tests cover retry identity, `A/B/C` FIFO order, downstream-stage exclusion until retry success, non-backpressure drops, and RTP/RTCP/data-channel variants.
 
 ### Remaining opportunities, in priority order
 
-1. **RTC `poll_write` retry ownership design.** The profile still samples `RTCMessageInternal::clone`; it is the generic retry copy made before every handler call. No current handler returns `ErrBufferFull`, but removing the copy without redesigning handler ownership would drop a future backpressured packet. Replace it only with a design that returns the unconsumed message on backpressure, plus ordering/backpressure tests.
-2. **Bound writer / driver-hop experiment.** Pion binds an RTP writer to each sender and writes directly through its interceptor chain. Rust currently uses a track-to-driver event hop, followed by a core mutex and later flush. Removing that hop is high-risk ownership work and must be a separate WebRTC-fork design with ordering, backpressure, renegotiation, and disconnect tests.
-3. **Timer attribution.** Attribute `clock_gettime` by caller before changing timers. It may be Tokio, ICE/DTLS, RTCP/SRTP, or forwarding diagnostics. The per-target PLI sweep has already been removed.
-4. **Event-driven settings propagation.** LiveKit applies debounced settings to an individual `SubscribedTrack`, not in its packet loop. OxideSFU still reads the global settings generation per packet; replace it with a reader-target notification only if a focused profile makes it material.
-5. **MID extension and packet-header reuse.** The current cached-MID fast path avoids generic extension marshalling. Profile its remaining extension storage and packet/header clones before considering bounded, owner-local reuse. Do not introduce an unbounded global pool or `unsafe`.
+1. **Bound writer / driver-hop experiment.** Pion binds an RTP writer to each sender and writes directly through its interceptor chain. Rust currently uses a track-to-driver event hop, followed by a core mutex and later flush. Removing that hop is high-risk ownership work and must be a separate WebRTC-fork design with ordering, backpressure, renegotiation, and disconnect tests.
+2. **Timer attribution.** Attribute `clock_gettime` by caller before changing timers. It may be Tokio, ICE/DTLS, RTCP/SRTP, or forwarding diagnostics. The per-target PLI sweep has already been removed.
+3. **Event-driven settings propagation.** LiveKit applies debounced settings to an individual `SubscribedTrack`, not in its packet loop. OxideSFU still reads the global settings generation per packet; replace it with a reader-target notification only if a focused profile makes it material.
+4. **MID extension and packet-header reuse.** The current cached-MID fast path avoids generic extension marshalling. Profile its remaining extension storage and packet/header clones before considering bounded, owner-local reuse. Do not introduce an unbounded global pool or `unsafe`.
 
 ### Reference evidence for the remaining work
 
