@@ -14,7 +14,7 @@ npm run install:browsers
 
 ## Required harness contract
 
-The page served by `OXIDESFU_BROWSER_HARNESS_URL` must connect fresh publisher/subscriber clients to a local OxideSFU instance and expose:
+The bundled Vite page connects fresh publisher/subscriber clients to a local OxideSFU instance. It exposes:
 
 ```ts
 window.oxidesfuReceiverSample(): Promise<{
@@ -45,9 +45,15 @@ visible=false -> visible=true -> final LOW dimensions
 
 ## Run
 
+Start OxideSFU separately, then provide its URL and fresh local API credentials only as process environment variables:
+
 ```bash
-OXIDESFU_BROWSER_HARNESS_URL=http://127.0.0.1:4173 \
-  npm run test:firefox
+OXIDESFU_URL=http://127.0.0.1:7880 \
+OXIDESFU_API_KEY=devkey \
+OXIDESFU_API_SECRET=secret \
+npm run test:firefox
 ```
+
+The test mints short-lived tokens in memory; it never writes them to artifacts.
 
 On failure, Playwright retains trace, screenshot, and video artifacts. Never place JWTs, API secrets, or full Meet URLs in test artifacts.
