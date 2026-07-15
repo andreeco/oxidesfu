@@ -6,6 +6,7 @@ mod config;
 mod health;
 mod logging;
 mod metrics;
+mod profiling;
 mod readiness;
 mod relay_worker;
 mod shutdown;
@@ -16,4 +17,5 @@ mod webhook;
 mod whip_notify;
 
 pub use app::*;
+pub use profiling::init_tracing;
 pub use webhook::*;

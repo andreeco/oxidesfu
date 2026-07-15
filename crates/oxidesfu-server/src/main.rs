@@ -4,12 +4,7 @@ use oxidesfu_core::{RoomNodeDirectoryBackend, ServerConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| oxidesfu_server::DEFAULT_TRACING_ENV_FILTER.into()),
-        )
-        .init();
+    oxidesfu_server::init_tracing()?;
 
     let config = ServerConfig::from_env_args_or_development(std::env::args().skip(1))?;
     oxidesfu_server::validate_turn_runtime_from_config(&config).await?;

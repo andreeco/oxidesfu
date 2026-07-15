@@ -2,6 +2,7 @@ FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Native profiling tools require development-container capabilities and host sysctl setup.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     clang \
@@ -23,6 +24,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     iproute2 \
     net-tools \
     dnsutils \
+    linux-tools-common \
+    linux-tools-generic \
+    bpftrace \
+    heaptrack \
     portaudio19-dev \
     libasound2-dev \
     libpulse-dev \

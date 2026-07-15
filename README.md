@@ -20,7 +20,7 @@ OXIDESFU_ENABLE_BENCHMARKS=1 OXIDESFU_BENCHMARK_MODE=full OXIDESFU_BENCHMARK_RUN
   cargo test -p oxidesfu-test benchmark_ -- --nocapture
 ```
 
-Results are written to `target/benchmarks/`. See the [benchmark guide](crates/oxidesfu-test/src/benchmark/README.md) for prerequisites and regression controls.
+Results are written to `target/benchmarks/`. See the [benchmark guide](crates/oxidesfu-test/src/benchmark/README.md) for prerequisites and regression controls. For CPU, task, lock, and allocation tracing under the same real client load, see the [profiling guide](docs/profiling.md).
 
 ## Conformance status
 
