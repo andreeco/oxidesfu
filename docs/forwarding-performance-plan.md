@@ -106,17 +106,17 @@ The Go write architecture differs—`DownTrack.WriteRTP` uses the default pass-t
 
 ### 2026-07-16: selector implementation status and remaining compatibility work
 
-The initial production slice now replaces first-eligible-SSRC latching with a reader-local `SubscriberVideoLayerSelector` (`crates/oxidesfu-signaling/src/media/video_ingress.rs`). It tracks policy, current source, observed sources, acquisition/fallback state, and a bounded target-specific PLI budget. `router/session.rs` invokes it before RTP rewriting, keeps RTP source-switch continuity in the existing `SubscriberRtpForwarder`, uses a dedicated 250 ms selector timer, and retains the independent three-second diagnostics heartbeat. Decodable switch boundaries are implemented for VP8, VP9, H264, and AV1 RTP formats. The native Rust SDK high → low → high contract now asserts decoded-frame dimensions, not just delivery.
+The production selector now replaces first-eligible-SSRC latching with a reader-local `SubscriberVideoLayerSelector` (`crates/oxidesfu-signaling/src/media/video_ingress.rs`). It tracks spatial maximum/desired/current source, observed sources, acquisition/fallback state, and a bounded target-specific PLI budget. `router/session.rs` invokes it before RTP rewriting, keeps RTP source-switch continuity in the existing `SubscriberRtpForwarder`, uses a dedicated 250 ms selector timer, and retains the independent three-second diagnostics heartbeat. A target-local `SubscriberVideoTemporalController` now derives temporal maximum/desired/current state from requested FPS plus receiver-observed temporal cadence; metadata-poor sources retain deterministic timestamp gating. Decodable spatial source-switch boundaries are implemented for VP8, VP9, H264, and AV1 RTP formats. The native Rust SDK high → low → high contract asserts decoded-frame dimensions, not just delivery.
 
 This is an important compatibility slice, **not the completed simulcast-layer-selection program**. The remaining work is intentionally explicit:
 
 | Status | Missing behavior / evidence | Required implementation and test |
 |---|---|---|
 | Partial | Allocator-driven policy | `TrackAllocationStore` now supplies a revisioned, target-scoped desired quality to forwarding readers; it is merged with and clamped by the `UpdateTrackSettings` maximum before keyframe-gated selection. A real bandwidth/layout allocator producer and end-to-end allocation transitions remain. |
-| Pending | Temporal target state | Replace the separate admission-style FPS filter with target/current/max temporal-layer state where codec metadata supports it. Preserve the current FPS fallback for metadata-poor codecs. |
-| Pending | Dependency-descriptor switching | Use dependency-descriptor decode-target indications to accept a decodable switching point when it is valid without a codec keyframe. Add VP9/AV1 scalable-stream contract packets derived from the local WebRTC parser. |
+| Partial | Temporal target state | `SubscriberVideoTemporalController` now owns FPS-derived maximum/desired/current temporal state and timestamp fallback per target. Allocator output still cannot set an independent desired temporal target; add allocation-driven temporal transitions. |
+| Pending | Dependency-descriptor switching | The pinned RTC parser validates active decode-target/DTI eligibility but exports only spatial/temporal IDs. Extend the Git-pinned RTC/WebRTC fork to expose verified descriptor frame-boundary/switch-point metadata, pin the published revision, then add VP9/AV1 scalable-stream contract packets. |
 | Partial | Availability and fallback liveness | The reader-local 250 ms timer now expires sources after two seconds and reacquires a live fallback once; the selector regression proves no retry storm/oscillation. Availability is still recently observed RTP rather than descriptor-verified decoder usability. |
-| Partial | Reader-local observability | The three-second target heartbeat now exports maximum/desired/current spatial layer, RID/SSRC, transitions, categorized drops, selector PLIs, rewrite drops, successful RTP packet count/payload bytes, and write errors without hot-path locks, allocation, formatting, or clock reads. Temporal state, PLI suppression/feedback counters, wire-byte rate windows, and a machine-readable profiler snapshot remain. |
+| Partial | Reader-local observability | The three-second target heartbeat now exports maximum/desired/current spatial and temporal layers, RID/SSRC, transitions, categorized spatial/temporal drops, selector PLIs, rewrite drops, successful RTP packet count/payload bytes, and write errors without hot-path locks, allocation, formatting, or clock reads. PLI suppression/feedback counters, wire-byte rate windows, and a machine-readable profiler snapshot remain. |
 | Complete | Native target isolation | `rust_sdk_room_simulcast_video_quality_isolated_per_subscriber_contract` proves simultaneous low/high decoded dimensions and that upgrading one target does not lower the other. |
 | Pending | Differential evidence | Extend profiling to retain machine-readable post-warm-up selection reports. The report must define bytes/sec as successfully written rewritten RTP bytes over the reporting window, and distinguish selector PLIs from downstream feedback. A Go-comparable result requires client-observed reporting or separately scoped Go instrumentation; Oxide-only internals cannot reveal Go's selected layer. |
 | Pending | Broader validation | Run focused source-switch/RTP-continuity integration coverage, then the workspace suite and clippy. Existing workspace flakes must be reported separately rather than hidden by this feature work. |
@@ -182,9 +182,9 @@ Relevant implementation files:
 - `crates/oxidesfu-signaling/src/media/track_settings.rs` — canonical settings and debounce state.
 - `crates/oxidesfu-signaling/src/media/video_ingress.rs` — per-subscriber simulcast SSRC selection.
 
-The reader caches active targets and their `SubscriberRtpForwarder` handles on `ForwardTrackStore` revision changes. `ForwardTarget` now owns the forwarding decision, selector, settings revision, FPS state, target SSRC/payload-type cache, keyframe timestamp, first-forward/drop flags, and write-error counts. A revision refresh preserves state for still-active targets and drops removed targets with the old vector entry.
+The reader caches active targets and their `SubscriberRtpForwarder` handles on `ForwardTrackStore` revision changes. `ForwardTarget` now owns the forwarding decision, spatial selector, temporal controller, settings/allocation revisions, target SSRC/payload-type cache, first-forward/drop flags, and write-error counts. A revision refresh preserves state for still-active targets and drops removed targets with the old vector entry.
 
-The remaining packet-loop store query is the global track-settings generation check. It is not a dominant profile sample after Phase 1, but Phase 2 remains the path to eliminate it if a future benchmark or profile proves it worthwhile.
+Effective `TrackSettingsStore` and `TrackAllocationStore` changes are delivered through bounded target-specific revision events; the normal RTP loop does not poll either store. A receiver-lag resynchronization scan is exceptional control-plane recovery, not packet-loop work.
 
 ## Target architecture
 
@@ -207,8 +207,8 @@ struct ForwardTarget {
 
     // Per-target media state.
     layer_selector: SubscriberVideoLayerSelector,
-    fps_state: FpsForwardingState,
-    last_keyframe_request_at: Option<Instant>,
+    temporal_controller: SubscriberVideoTemporalController,
+    video_counters: VideoForwardingCounters,
 
     // Bounded diagnostics / lifecycle state.
     forwarded_once: bool,
@@ -225,7 +225,7 @@ flowchart TD
     B --> C[Publish reader-local target snapshot]
     D[Incoming RTP packet] --> E[Parse packet metadata once]
     E --> F[Iterate mutable ForwardTarget vector]
-    F --> G[Use cached decision, layer selector, FPS, RTP state]
+    F --> G[Use cached decision, spatial selector, temporal controller, RTP state]
     G --> H[Rewrite and write RTP]
     I[Target layer change / recovery event] --> J[Target-local keyframe timer or actor]
 ```
@@ -281,6 +281,8 @@ Do not begin a phase without a current successful media delivery contract. A pro
 
 ### Phase 2 — Event-driven settings propagation
 
+**Status: complete.** Effective settings and allocation changes notify only the matching reader target; bounded receiver lag triggers control-plane resynchronization.
+
 **Objective:** make settings application update only the affected `ForwardTarget`.
 
 1. Keep `TrackSettingsStore` as canonical/debounce storage.
@@ -294,6 +296,8 @@ Use an actor-like reader command channel if it keeps ownership local and avoids 
 **Acceptance:** a normal RTP packet performs no `TrackSettingsStore` lookup or mutex acquisition.
 
 ### Phase 3 — Target-local keyframe acquisition actor
+
+**Status: complete for spatial acquisition.** The reader's 250 ms timer drives bounded target-local selector PLIs; downstream PLI/FIR relay remains separate. RTT-aware retry policy and descriptor-aware scalable switching remain deferred.
 
 **Objective:** mirror LiveKit's event/timer model without copying Go structure.
 
@@ -344,7 +348,7 @@ The WebRTC fork now reuses the driver-owned core-output `Vec<TaggedBytesMut>` ba
 
 ### Completed and remaining opportunities, in priority order
 
-1. **Next: normalize simulcast media before CPU attribution.** The paired 20-second Go/Oxide matrix has complete tracks and zero loss but unequal video bitrates that vary by subscriber count. Add a deterministic black-box contract that applies identical subscriber TrackSettings and records post-warm-up per-target selected layer, requested quality/FPS, keyframe timing, and delivered bitrate. Map Go `pkg/sfu/downtrack.go` / `pkg/rtc/subscribedtrack.go` selection behavior against Oxide `ForwardingDecision` and `SubscriberVideoLayerSelector`. Do not change driver, UDP, or hashing code until this is resolved or explicitly documented as an intentional wire-compatible delta.
+1. **Next: collect normalized simulcast media evidence before CPU attribution.** Spatial target selection, bounded acquisition/fallback, and FPS-derived temporal selection now have native SDK contracts, but the paired Go/Oxide profiler still lacks per-track post-warm-up selection/dimension/byte-rate evidence. Add machine-readable reporting plus a client-observed Go-comparable probe. Do not change driver, UDP, or hashing code until selected media work is comparable or the difference is explicitly documented as a wire-compatible delta.
 2. **Completed: paired scale profiling tooling.** `tools/profiling/profile-paired-scale-sweep.sh` runs Go LiveKit and OxideSFU separately over `4V/4A/20S`, `4V/0A/20S`, `0V/4A/20S`, `4V/4A/10S`, and `4V/4A/15S`, retaining independent `perf.data`, flamegraphs, logs, metadata, and alternating execution order. The 5- and 20-second runs validate lifecycle and expose the bitrate comparability gate; only normalized-media points may be used for CPU conclusions.
 3. **Completed: fixed-size RTP retransmission cache.** Replace the fixed-256 `HashMap<u16, Packet>` plus eviction `VecDeque<u16>` with a 256-slot ring indexed by outgoing sequence number. Each slot stores its sequence number and rejects a stale colliding NACK after `u16` wrap. TDD covers retained/newest/evicted lookup, collision rejection across wrap, and the existing subscriber-owned SSRC/payload-type cache entries. Do not weaken the separate `(incoming_ssrc, incoming_extended_sequence)` duplicate window or replace its SipHash threat model without a security decision.
 4. **Completed: attribution-quality profiling tooling.** `tools/profiling/profile-load-test.sh` supports DWARF, opt-in LBR preflight, and an existing client-network-namespace wrapper. This AMD host cannot collect LBR call graphs despite raw branch-stack support; provision an LBR-capable host if VDSO caller attribution becomes necessary.
@@ -419,7 +423,7 @@ Reference map: RTC `c90236e986dad80505eb2bc3f15f2cdffa4070cc` supplied the prior
 Keep tests next to the targeted ownership boundary:
 
 - target rebuild and state retention;
-- per-target quality/FPS reset isolation;
+- per-target spatial/temporal policy reset isolation;
 - target removal cleanup;
 - keyframe event coalescing and retry timing;
 - RTP sequence/timestamp continuity through target rebuild;
@@ -480,12 +484,14 @@ This work is complete only when all conditions are true:
 
 1. The steady RTP path owns compact per-target runtime state and does not use compound string-key map lookups for normal forwarding policy/state.
 2. Settings and keyframe behavior are event-driven or bounded timer-driven, not packet-polling driven.
-3. Rust SDK simulcast quality-switch delivery passes.
+3. Rust SDK spatial-quality, quality-switch, and per-subscriber FPS contracts pass.
 4. Browser adaptive quality churn passes when the browser environment is available.
 5. `cargo test -p oxidesfu-signaling` passes.
-6. A five-run large simulcast comparison is within the configured CPU regression gate, or an explicit measured compatibility/performance delta is documented and accepted.
-7. A before/after flamegraph and benchmark artifact demonstrate the dominant target hotspot was removed rather than merely displaced.
-8. Any `webrtc-rs` dependency change is pinned, tested in its fork, and recorded in the related commit.
+6. Temporal allocator intent and descriptor-aware VP9/AV1 switching are implemented or explicitly documented as unsupported compatibility gaps.
+7. A Go/Oxide per-track post-warm-up report establishes comparable selected media before CPU conclusions.
+8. A five-run large simulcast comparison is within the configured CPU regression gate, or an explicit measured compatibility/performance delta is documented and accepted.
+9. A before/after flamegraph and benchmark artifact demonstrate the dominant target hotspot was removed rather than merely displaced.
+10. Any `webrtc-rs` dependency change is pinned, tested in its fork, and recorded in the related commit.
 
 ## Non-goals
 
