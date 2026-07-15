@@ -1128,6 +1128,8 @@ struct VideoForwardingCounters {
     drop_non_selected_ssrc: u64,
     drop_above_maximum: u64,
     drop_unknown_layer: u64,
+    drop_temporal_above_maximum: u64,
+    drop_temporal_timestamp_cap: u64,
     selector_pli_requests: u64,
     rewrite_drops: u64,
     successful_rtp_packets: u64,
@@ -1147,8 +1149,8 @@ struct ForwardTarget {
     settings_revision: Option<u64>,
     allocation_revision: Option<u64>,
     video_layer_selector: SubscriberVideoLayerSelector,
+    video_temporal_controller: SubscriberVideoTemporalController,
     video_counters: VideoForwardingCounters,
-    fps_state: FpsForwardingState,
     target_primary_ssrc: Option<Option<u32>>,
     target_payload_type: Option<Option<u8>>,
 
@@ -1173,8 +1175,8 @@ impl ForwardTarget {
             settings_revision: None,
             allocation_revision: None,
             video_layer_selector: SubscriberVideoLayerSelector::default(),
+            video_temporal_controller: SubscriberVideoTemporalController::default(),
             video_counters: VideoForwardingCounters::default(),
-            fps_state: FpsForwardingState::default(),
             target_primary_ssrc: None,
             target_payload_type: None,
 
@@ -1358,7 +1360,7 @@ fn apply_target_settings_revision(target: &mut ForwardTarget, settings_revision:
     target.settings_revision = Some(settings_revision);
     if changed {
         target.decision = None;
-        target.fps_state = FpsForwardingState::default();
+        target.video_temporal_controller = SubscriberVideoTemporalController::default();
     }
     changed
 }
@@ -1727,6 +1729,139 @@ impl FpsForwardingState {
     }
 }
 
+/// A temporal scalability layer, ordered from base to highest enhancement layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum TemporalLayer {
+    T0 = 0,
+    T1 = 1,
+    T2 = 2,
+}
+
+impl TemporalLayer {
+    const fn from_id(id: u8) -> Option<Self> {
+        match id {
+            0 => Some(Self::T0),
+            1 => Some(Self::T1),
+            2 => Some(Self::T2),
+            _ => None,
+        }
+    }
+}
+
+/// The temporal policy derived from a subscriber FPS limit and observed source cadence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TemporalLayerPolicy {
+    pub(crate) max: TemporalLayer,
+    pub(crate) desired: TemporalLayer,
+}
+
+/// The target-local outcome for a single video packet's temporal decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TemporalIngressDecision {
+    Forward,
+    DropAboveMaximum,
+    DropTimestampCap,
+}
+
+/// Target-local temporal selection state.
+///
+/// Temporal metadata identifies enhancement packets that cannot be forwarded above the target.
+/// When either the source cadence or packet temporal ID is unavailable, the controller retains the
+/// deterministic RTP-timestamp gate used before temporal metadata was available.
+#[derive(Debug, Default)]
+pub(crate) struct SubscriberVideoTemporalController {
+    policy: Option<TemporalLayerPolicy>,
+    current: Option<TemporalLayer>,
+    timestamp_fallback: FpsForwardingState,
+    timestamp_cap_required: bool,
+}
+
+impl SubscriberVideoTemporalController {
+    pub(crate) const fn policy(&self) -> Option<TemporalLayerPolicy> {
+        self.policy
+    }
+
+    pub(crate) const fn current(&self) -> Option<TemporalLayer> {
+        self.current
+    }
+
+    /// Updates target policy without resetting timestamp continuity. `None` explicitly selects
+    /// the metadata-poor timestamp fallback path rather than guessing a temporal layer.
+    pub(crate) fn set_requested_fps(
+        &mut self,
+        requested_fps: u32,
+        receiver_temporal_layer_fps: Option<[Option<f32>; 3]>,
+    ) {
+        let Some(receiver_temporal_layer_fps) = receiver_temporal_layer_fps else {
+            self.policy = None;
+            self.current = None;
+            self.timestamp_cap_required = false;
+            return;
+        };
+        let Some(max) = max_temporal_layer_for_requested_fps_from_receiver(
+            requested_fps,
+            &receiver_temporal_layer_fps,
+        )
+        .and_then(TemporalLayer::from_id) else {
+            self.policy = None;
+            self.current = None;
+            self.timestamp_cap_required = false;
+            return;
+        };
+
+        let policy = TemporalLayerPolicy { max, desired: max };
+        if self.policy != Some(policy) {
+            self.policy = Some(policy);
+            self.current = self.current.map(|current| current.min(max));
+        }
+        self.timestamp_cap_required = should_apply_timestamp_fps_cap_for_selected_temporal_layer(
+            requested_fps,
+            &receiver_temporal_layer_fps,
+            max as u8,
+        );
+    }
+
+    pub(crate) fn observe_packet(
+        &mut self,
+        packet_timestamp: u32,
+        requested_fps: u32,
+        temporal_id: Option<u8>,
+    ) -> TemporalIngressDecision {
+        if requested_fps == 0 {
+            return TemporalIngressDecision::Forward;
+        }
+
+        if let (Some(policy), Some(temporal)) =
+            (self.policy, temporal_id.and_then(TemporalLayer::from_id))
+        {
+            if temporal > policy.max {
+                return TemporalIngressDecision::DropAboveMaximum;
+            }
+            if self.timestamp_cap_required
+                && !self
+                    .timestamp_fallback
+                    .should_forward_packet(packet_timestamp, requested_fps)
+            {
+                return TemporalIngressDecision::DropTimestampCap;
+            }
+            self.current = Some(
+                self.current
+                    .map_or(temporal, |current| current.max(temporal)),
+            );
+            return TemporalIngressDecision::Forward;
+        }
+
+        if self
+            .timestamp_fallback
+            .should_forward_packet(packet_timestamp, requested_fps)
+        {
+            TemporalIngressDecision::Forward
+        } else {
+            TemporalIngressDecision::DropTimestampCap
+        }
+    }
+}
+
 const LAYER_SELECTION_TOLERANCE: f32 = 0.9;
 
 fn should_apply_timestamp_fps_cap_for_selected_temporal_layer(
@@ -1935,6 +2070,19 @@ pub(crate) fn should_forward_video_packet_for_requested_fps(
     )
 }
 
+pub(crate) fn temporal_layer_id_from_packet(
+    codec_hint: VideoTemporalCodecHint,
+    payload: &[u8],
+    packet_temporal_layer_hint: Option<u8>,
+) -> Option<u8> {
+    packet_temporal_layer_hint.or_else(|| match codec_hint {
+        VideoTemporalCodecHint::Vp8 => vp8_temporal_layer_id_from_payload(payload),
+        VideoTemporalCodecHint::Vp9 => vp9_temporal_layer_id_from_payload(payload),
+        VideoTemporalCodecHint::H265 => h265_temporal_layer_id_from_payload(payload),
+        VideoTemporalCodecHint::Unknown => None,
+    })
+}
+
 pub(crate) fn should_forward_video_packet_for_requested_fps_with_codec_hint(
     requested_fps: u32,
     codec_hint: VideoTemporalCodecHint,
@@ -1948,16 +2096,8 @@ pub(crate) fn should_forward_video_packet_for_requested_fps_with_codec_hint(
         return true;
     }
 
-    let temporal_id = if let Some(hint) = packet_temporal_layer_hint {
-        Some(hint)
-    } else {
-        match codec_hint {
-            VideoTemporalCodecHint::Vp8 => vp8_temporal_layer_id_from_payload(payload),
-            VideoTemporalCodecHint::Vp9 => vp9_temporal_layer_id_from_payload(payload),
-            VideoTemporalCodecHint::H265 => h265_temporal_layer_id_from_payload(payload),
-            VideoTemporalCodecHint::Unknown => None,
-        }
-    };
+    let temporal_id =
+        temporal_layer_id_from_packet(codec_hint, payload, packet_temporal_layer_hint);
 
     if let Some(temporal_id) = temporal_id
         && let Some(receiver_temporal_layer_fps) = receiver_temporal_layer_fps.as_ref()
@@ -6290,6 +6430,11 @@ async fn forward_publisher_remote_track(
                     } else {
                         None
                     };
+                    let packet_temporal_layer = temporal_layer_id_from_packet(
+                        packet_temporal_codec_hint,
+                        &packet.payload,
+                        packet_temporal_layer_hint,
+                    );
                     for target in &mut cached_forward_targets {
                         let settings_revision = target.settings_revision.unwrap_or_default();
                         let decision_revisions = ForwardingDecisionRevisions {
@@ -6412,19 +6557,26 @@ async fn forward_publisher_remote_track(
 
                         if track_supports_quality_control {
                             if let Some(requested_fps) = decision.requested_fps {
-                                let should_forward_for_fps =
-                                    should_forward_video_packet_for_requested_fps_with_codec_hint(
-                                        requested_fps,
-                                        packet_temporal_codec_hint,
-                                        packet_receiver_temporal_layer_fps,
-                                        packet.header.timestamp,
-                                        &packet.payload,
-                                        packet_temporal_layer_hint,
-                                        &mut target.fps_state,
-                                    );
-                                if !should_forward_for_fps {
-                                    filtered_out_targets += 1;
-                                    continue;
+                                target.video_temporal_controller.set_requested_fps(
+                                    requested_fps,
+                                    packet_receiver_temporal_layer_fps,
+                                );
+                                match target.video_temporal_controller.observe_packet(
+                                    packet.header.timestamp,
+                                    requested_fps,
+                                    packet_temporal_layer,
+                                ) {
+                                    TemporalIngressDecision::Forward => {}
+                                    TemporalIngressDecision::DropAboveMaximum => {
+                                        target.video_counters.drop_temporal_above_maximum += 1;
+                                        filtered_out_targets += 1;
+                                        continue;
+                                    }
+                                    TemporalIngressDecision::DropTimestampCap => {
+                                        target.video_counters.drop_temporal_timestamp_cap += 1;
+                                        filtered_out_targets += 1;
+                                        continue;
+                                    }
                                 }
                             }
                         }
@@ -6610,6 +6762,9 @@ async fn forward_publisher_remote_track(
                                 maximum_spatial = ?layer_policy.max,
                                 desired_spatial = ?layer_policy.desired,
                                 current_spatial = ?target.video_layer_selector.current_spatial(),
+                                maximum_temporal = ?target.video_temporal_controller.policy().map(|policy| policy.max),
+                                desired_temporal = ?target.video_temporal_controller.policy().map(|policy| policy.desired),
+                                current_temporal = ?target.video_temporal_controller.current(),
                                 selected_incoming_ssrc = ?selected_incoming_ssrc,
                                 selected_rid = ?selected_rid,
                                 layer_switches = target.video_counters.layer_switches,
@@ -6617,6 +6772,8 @@ async fn forward_publisher_remote_track(
                                 drop_non_selected_ssrc = target.video_counters.drop_non_selected_ssrc,
                                 drop_above_maximum = target.video_counters.drop_above_maximum,
                                 drop_unknown_layer = target.video_counters.drop_unknown_layer,
+                                drop_temporal_above_maximum = target.video_counters.drop_temporal_above_maximum,
+                                drop_temporal_timestamp_cap = target.video_counters.drop_temporal_timestamp_cap,
                                 selector_pli_requests = target.video_counters.selector_pli_requests,
                                 rewrite_drops = target.video_counters.rewrite_drops,
                                 successful_rtp_packets = target.video_counters.successful_rtp_packets,
@@ -7605,7 +7762,8 @@ mod tests {
     use prost::Message;
 
     use super::{
-        ForwardingDecisionRevisions, FpsForwardingState, add_track_response,
+        ForwardingDecisionRevisions, FpsForwardingState, SubscriberVideoTemporalController,
+        TemporalIngressDecision, TemporalLayer, add_track_response,
         apply_publisher_codec_preferences_to_answer, av1_is_keyframe_start,
         cached_forwarding_decision_for_subscriber,
         clear_publisher_subscription_active_if_no_remaining_tracks, data_channel_kind_for_label,
@@ -10908,6 +11066,92 @@ mod tests {
             "a nominal 33 ms frame interval must not be dropped for a 30 FPS request"
         );
         assert!(state.should_forward_packet(5_940, 30));
+    }
+
+    #[test]
+    fn temporal_controller_clamps_requested_fps_to_available_maximum_layer() {
+        let mut controller = SubscriberVideoTemporalController::default();
+        controller.set_requested_fps(8, Some([Some(8.0), Some(16.0), Some(30.0)]));
+
+        assert_eq!(
+            controller
+                .policy()
+                .map(|policy| (policy.max, policy.desired)),
+            Some((TemporalLayer::T0, TemporalLayer::T0)),
+            "an 8 FPS request must select the base temporal layer"
+        );
+        assert_eq!(
+            controller.observe_packet(3_000, 8, Some(2)),
+            TemporalIngressDecision::DropAboveMaximum
+        );
+        assert_eq!(
+            controller.observe_packet(3_000, 8, Some(0)),
+            TemporalIngressDecision::Forward
+        );
+        assert_eq!(controller.current(), Some(TemporalLayer::T0));
+    }
+
+    #[test]
+    fn temporal_controller_downgrade_clamps_current_without_resetting_target_state() {
+        let mut controller = SubscriberVideoTemporalController::default();
+        let layers = Some([Some(8.0), Some(16.0), Some(30.0)]);
+        controller.set_requested_fps(30, layers);
+        assert_eq!(
+            controller.observe_packet(3_000, 30, Some(2)),
+            TemporalIngressDecision::Forward
+        );
+        assert_eq!(controller.current(), Some(TemporalLayer::T2));
+
+        controller.set_requested_fps(8, layers);
+        assert_eq!(controller.current(), Some(TemporalLayer::T0));
+        assert_eq!(
+            controller.observe_packet(6_000, 8, Some(2)),
+            TemporalIngressDecision::DropAboveMaximum
+        );
+        assert_eq!(
+            controller.observe_packet(6_000, 8, Some(0)),
+            TemporalIngressDecision::Forward
+        );
+    }
+
+    #[test]
+    fn temporal_controllers_are_isolated_for_identical_packets() {
+        let mut low = SubscriberVideoTemporalController::default();
+        let mut high = SubscriberVideoTemporalController::default();
+        let layers = Some([Some(8.0), Some(16.0), Some(30.0)]);
+        low.set_requested_fps(8, layers);
+        high.set_requested_fps(30, layers);
+
+        assert_eq!(
+            low.observe_packet(3_000, 8, Some(2)),
+            TemporalIngressDecision::DropAboveMaximum
+        );
+        assert_eq!(
+            high.observe_packet(3_000, 30, Some(2)),
+            TemporalIngressDecision::Forward
+        );
+        assert_eq!(low.current(), None);
+        assert_eq!(high.current(), Some(TemporalLayer::T2));
+    }
+
+    #[test]
+    fn temporal_controller_uses_timestamp_gate_only_when_metadata_is_unavailable() {
+        let mut controller = SubscriberVideoTemporalController::default();
+        controller.set_requested_fps(15, None);
+        assert_eq!(controller.policy(), None);
+        assert_eq!(
+            controller.observe_packet(0, 15, None),
+            TemporalIngressDecision::Forward
+        );
+        assert_eq!(
+            controller.observe_packet(3_000, 15, None),
+            TemporalIngressDecision::DropTimestampCap,
+            "metadata-poor packets retain deterministic timestamp gating"
+        );
+        assert_eq!(
+            controller.observe_packet(6_000, 15, None),
+            TemporalIngressDecision::Forward
+        );
     }
 
     #[test]

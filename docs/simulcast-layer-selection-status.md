@@ -50,6 +50,7 @@ The selector is synchronous, owns no locks, performs no async I/O, and does not 
 - runs selector retry scheduling on a dedicated 250 ms timer;
 - preserves the independent three-second forwarding diagnostics heartbeat;
 - routes selector-generated PLI requests separately from downstream subscriber PLI/FIR feedback;
+- applies a target-local temporal controller after spatial admission: known VP8/VP9/H265 temporal IDs are capped by an explicit maximum/desired/current temporal policy, while metadata-poor codecs retain deterministic timestamp gating;
 - passes selected source packets to the existing `SubscriberRtpForwarder`, preserving its existing outgoing SSRC, sequence-number, timestamp, retransmission, and source-history behavior.
 
 ### Decodable source-switch boundaries
@@ -95,15 +96,25 @@ Remaining work:
 - implement the bandwidth/layout allocator producer that writes `TrackAllocationStore` from actual receiver transport estimates and layout policy;
 - add end-to-end allocation-driven downgrade/upgrade coverage once that producer exists.
 
-### 2. Temporal selection is still FPS filtering, not target state
+### 2. Temporal target state is implemented; allocator temporal intent remains
 
-`FpsForwardingState` remains a separate filter. There is no `max_temporal`, `desired_temporal`, and `current_temporal` state machine tied to layer availability and codec metadata.
+`SubscriberVideoTemporalController` is reader-local state in each `ForwardTarget`. For a requested FPS and receiver-observed temporal cadence it derives an explicit `TemporalLayerPolicy` with `max` and `desired`, admits only temporal IDs at or below that maximum, and records the highest currently forwarded temporal layer. A policy reduction clamps the current state without resetting spatial source selection or RTP rewrite history.
 
-Required work:
+When source temporal metadata or cadence estimates are unavailable, the controller explicitly selects the existing timestamp gate. It does not guess that an unknown packet is a desired temporal enhancement layer. The timestamp gate is still used for an observed layer whose advertised cadence materially exceeds the requested FPS.
 
-- add temporal target/current/max state where codecs expose layer metadata;
-- retain a deterministic FPS fallback when metadata is absent;
-- verify temporal changes do not disturb the spatial source or outgoing RTP continuity.
+Covered deterministic tests:
+
+- request-to-available-layer maximum clamping;
+- high-temporal to low-temporal policy reduction;
+- independent temporal decisions for two targets receiving identical packets;
+- metadata-poor timestamp-gate fallback.
+
+The native Rust SDK FPS-isolation contract also passes with the controller in the production reader.
+
+Remaining work:
+
+- extend allocator output so it can set an independent desired temporal target, rather than deriving `desired = max` only from `UpdateTrackSettings.fps`;
+- add end-to-end allocation-driven temporal downgrade/upgrade coverage once that producer exists.
 
 ### 3. Dependency-descriptor decode targets are not used for switching
 
@@ -126,11 +137,10 @@ Remaining limitation:
 
 ### 5. Production observability is partially complete
 
-The existing three-second target heartbeat now reports reader-local maximum/desired/current spatial layers, selected RID/SSRC, layer transitions, categorized selector drops, selector PLI requests, rewrite drops, successful RTP packet count, successful rewritten payload bytes, and write errors. Counters update without locks, allocation, formatting, or clock reads in the RTP path.
+The existing three-second target heartbeat now reports reader-local maximum/desired/current spatial layers, maximum/desired/current temporal layers, selected RID/SSRC, layer transitions, categorized spatial and temporal drops, selector PLI requests, rewrite drops, successful RTP packet count, successful rewritten payload bytes, and write errors. Counters update without locks, allocation, formatting, or clock reads in the RTP path.
 
 Still required:
 
-- temporal requested/maximum/desired/current state once temporal selection exists;
 - selector PLI suppression reasons and receiver-feedback PLI/FIR counters as separate fields;
 - full RTP wire-byte accounting and a reporting-window bytes/sec export rather than cumulative payload bytes in debug heartbeat;
 - acquisition/fallback state and waiting duration in a machine-readable profiler snapshot.
@@ -166,15 +176,16 @@ cargo test -p oxidesfu-test \
   -- --nocapture
 ```
 
-The focused signaling suite passed with `501 passed, 3 ignored` when last run. The focused native SDK quality-transition, concurrent spatial-isolation, and concurrent FPS-isolation contracts passed serially. Full workspace testing and clippy remain required after the remaining work above is implemented; known unrelated workspace flakes must be reported separately.
+The focused signaling suite passed with `508 passed, 3 ignored` after the temporal-controller slice. The focused native SDK quality-transition, concurrent spatial-isolation, and concurrent FPS-isolation contracts passed serially. Full workspace testing and clippy remain required after the remaining work above is implemented; known unrelated workspace flakes must be reported separately.
 
 ## Completion criteria
 
 This work should be called complete only when:
 
 1. allocation can set desired and maximum spatial/temporal targets independently;
-2. source switching is decodable for all supported scalable/simulcast codec paths, including dependency descriptors where applicable;
-3. source availability, fallback, and retry behavior are bounded and observable;
-4. concurrent real subscribers prove independent low/high decoded dimensions and isolated updates;
-5. paired Go/Oxide runs capture comparable post-warm-up per-track delivery evidence; and
-6. focused tests, workspace tests, and clippy have documented outcomes.
+2. temporal allocator transitions have end-to-end delivery coverage in addition to the current FPS-derived controller tests;
+3. source switching is decodable for all supported scalable/simulcast codec paths, including dependency descriptors where applicable;
+4. source availability, fallback, and retry behavior are bounded and observable;
+5. concurrent real subscribers prove independent low/high decoded dimensions and isolated updates;
+6. paired Go/Oxide runs capture comparable post-warm-up per-track delivery evidence; and
+7. focused tests, workspace tests, and clippy have documented outcomes.
