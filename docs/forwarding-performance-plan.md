@@ -264,6 +264,43 @@ Use an actor-like reader command channel if it keeps ownership local and avoids 
 
 **Acceptance:** a before/after Heaptrack comparison shows a reduction in a measured allocation hotspot, with no new memory retention regression.
 
+## Post-Phase-1 profile and remaining optimization map
+
+The latest Oxide-only `mixed_room_high_simulcast_large` profile used WebRTC fork `4913263432b9f6ba38a1b06ff1fc3672cfba40fc`, delivered all 160 subscriber tracks, and reported zero packet loss. Its leading samples are now below the signaling target-selection layer:
+
+| Sampled symbol | CPU sample |
+|---|---:|
+| RTC core `RTCPeerConnection::poll_write` | 3.32% |
+| `__vdso_clock_gettime` | 3.02% |
+| WebRTC peer-connection driver event loop | 1.88% |
+| `BuildHasher::hash_one` | 1.34% |
+| `SipHash::write` | 1.18% |
+| Oxide publisher forwarding reader | 1.00% |
+
+The WebRTC fork now reuses the driver-owned core-output `Vec<TaggedBytesMut>` batch. The current OxideSFU pin is `aa29e5b96332e0086952405d1334f990de1109f4`, which carries that work together with the compatible RTC-core queue-reuse and MID fixes. This removes one confirmed recurring allocation, but the profile does not yet prove a large CPU shift. Do not run another Go-versus-Rust comparison until an RTC-core profile or allocation result motivates and validates the next change.
+
+### Remaining opportunities, in priority order
+
+1. **RTC `poll_write` allocation/copy audit.** Heap-profile RTP marshal, SRTP encryption, temporary handler queues, retry-message clones, and header-extension manipulation. Reuse storage or bypass an unconditional clone only when the allocation profile proves it is material and retry semantics remain tested.
+2. **Bound writer / driver-hop experiment.** Pion binds an RTP writer to each sender and writes directly through its interceptor chain. Rust currently uses a track-to-driver event hop, followed by a core mutex and later flush. Removing that hop is high-risk ownership work and must be a separate WebRTC-fork design with ordering, backpressure, renegotiation, and disconnect tests.
+3. **Timer attribution.** Attribute `clock_gettime` by caller before changing timers. It may be Tokio, ICE/DTLS, RTCP/SRTP, or forwarding diagnostics. The per-target PLI sweep has already been removed.
+4. **Event-driven settings propagation.** LiveKit applies debounced settings to an individual `SubscribedTrack`, not in its packet loop. OxideSFU still reads the global settings generation per packet; replace it with a reader-target notification only if a focused profile makes it material.
+5. **MID extension and packet-header reuse.** The current cached-MID fast path avoids generic extension marshalling. Profile its remaining extension storage and packet/header clones before considering bounded, owner-local reuse. Do not introduce an unbounded global pool or `unsafe`.
+
+### Reference evidence for the remaining work
+
+- LiveKit `ae09b7d0ad94d764f0c97d183efd36476163e819`:
+  - `pkg/rtc/subscribedtrack.go` applies settings to its `DownTrack` outside packet delivery.
+  - `pkg/sfu/downtrack.go` owns target-local forwarding and recovery state.
+- Pion `6fbce156e0de9764f1ce46ac581c0469ec1d7a04`:
+  - `track_local_static.go` uses a pooled shallow RTP packet and target-bound writers.
+  - `rtpsender.go` binds the interceptor/SRTP writer once.
+  - `interceptor.go` dispatches through the bound writer without a peer-connection driver event queue.
+- OxideSFU WebRTC fork `aa29e5b96332e0086952405d1334f990de1109f4` (the preceding profile used `4913263432b9f6ba38a1b06ff1fc3672cfba40fc`):
+  - `src/media_stream/track_local/static_rtp.rs` has cached-MID injection and a driver event enqueue.
+  - `src/peer_connection/driver.rs` owns event delivery, core locking, batch draining, and socket writes.
+  - `rtc/rtc/src/peer_connection/handler/mod.rs` owns core `poll_write` retry and temporary queues.
+
 ### Phase 5 — WebRTC and transport investigation
 
 **Objective:** separate OxideSFU-specific overhead from `webrtc-rs` behavior.
