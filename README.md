@@ -11,6 +11,10 @@ This project hopefully helps develop and debug WebRTC implementations in Rust. I
 
 **Don't expect that I will further develop this project.** Ideally, LiveKit developers or someone else from the Rust community who sees value in the code picks up this project and finishes it well. This publishing may be a handsoff to someone else.
 
+## Licensing status
+
+OxideSFU is currently published under the [Apache License, Version 2.0](LICENSE-APACHE). The maintainer may consider publishing future versions under the MIT License if that is legally permissible for the complete codebase, its provenance, and all contributors. This is only a statement of intent, not a license change: until an explicit future release says otherwise, the Apache-2.0 license remains controlling.
+
 ## Benchmarks
 
 Run the full comparison against upstream Go LiveKit from the repository root. Five runs per scenario are recommended for stable results:
