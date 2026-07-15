@@ -94,6 +94,18 @@ The 20-second baseline has 7K Go and 9K OxideSFU samples with no loss. Go expose
 
 The next live investigation must report post-warm-up per-track bitrate and simulcast layer distributions for Go and OxideSFU. If the divergence remains, investigate simulcast quality/layer convergence before changing shared driver or transport code. Only after normalizing delivered media should the full one-factor matrix be used for performance attribution.
 
+### 2026-07-15: source-level simulcast selection comparison
+
+Reference revisions inspected: Go LiveKit `ae09b7d0ad94d764f0c97d183efd36476163e819`, WebRTC fork `24b69d02220ffdaf67af4550482d5986089a95aa`, nested RTC `6d436970b437bb8c7572e4ab8d970333496a1edb`, and OxideSFU `8a674646e7312110a664d76020bef810b483a91b`.
+
+The strongest evidence-backed explanation for the paired video-bitrate divergence is **pre-write simulcast layer selection**, not a generic RTP write cost. Oxide maps a requested maximum quality to a boolean packet eligibility test in `router/session.rs` (`should_forward_video_packet_for_requested_quality`): a high request admits low, medium, and high. Its production `SubscriberVideoLayerSelector` in `media/video_ingress.rs` then selects the **first eligible SSRC** and drops every later SSRC until reset. It has no desired/current/max layer state, keyframe-only transition, acquisition grace, upgrade path, or target-layer retry. Thus a low-layer packet arriving first can indefinitely lock a high-request subscriber to low; the common audio rewrite/write path remains consistent with the matched audio-only bitrate.
+
+LiveKit takes the requested dimensions/quality/FPS in `pkg/rtc/subscribedtrack.go`, maps them to max spatial/temporal layers, and applies them to a `DownTrack`. Its `pkg/sfu/forwarder.go` plus `pkg/sfu/videolayerselector/simulcast.go` retain target/current/max/available-layer state, switch at decodable keyframes, wait for the desired layer during initial acquisition, retry PLI while unlocked, and fall back only after the bounded grace interval. The upstream simulcast selector regression explicitly requires a target-high subscriber not to select a lower keyframe that arrives first.
+
+The Go write architecture differs—`DownTrack.WriteRTP` uses the default pass-through pacer into Pion, while Oxide enqueues selected RTP into a bounded WebRTC driver channel—but it cannot choose the selected source layer because selection precedes the write. It remains a secondary capacity hypothesis only: prove equal selected pre-write bytes and measure driver-channel waits/queue depth before redesigning the write pipeline.
+
+**Required next TDD slice:** replace the first-eligible selector contract with target-aware keyframe-gated selection. Tests must first prove (1) a high target does not latch a low layer that arrives first, (2) desired-layer absence performs one bounded fallback after an injectable acquisition grace, (3) high → low → high transitions converge independently per subscriber, (4) PLI retries stop once locked, and (5) a real native-SDK high/low subscriber probe observes different post-warm-up decoded dimensions and restores high dimensions after a transition. Preserve existing downstream PLI/FIR throttling tests; they cover a separate feedback path.
+
 ### Findings
 
 The original forwarding reader held several parallel maps indexed by:
