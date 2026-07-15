@@ -329,6 +329,14 @@ A focused unit test proves one timer tick is consumed exactly once. `cargo test 
 
 Reference map: LiveKit `ae09b7d0ad94d764f0c97d183efd36476163e819` `pkg/rtc/subscribedtrack.go` and `pkg/sfu/downtrack.go` retain target-local settings/recovery behavior; WebRTC fork `884354a7e81d6ae308d143b0ab8063e082fdb729` `src/media_stream/track_local/static_rtp.rs` and `src/peer_connection/driver.rs`, plus RTC `89a132cd952d3de3b148ce3c33ae10f53eeaf8c6` `rtc/src/peer_connection/handler/mod.rs`, show the remaining queue/retry ownership boundary. Do not remove the `RTCMessageInternal::clone` retry copy or bypass the driver event hop without separate ordering, backpressure, renegotiation, and disconnect tests.
 
+### 2026-07-15: ring-backed AEAD AES-GCM
+
+Advance the pinned WebRTC fork to `89d6a42de5f9633109254ca8db01d860be2b4b16`, carrying RTC `6f4d1a2c14f8e8907c9ebd381d02a8ec9fb8aafd`. The nested RTC change replaces the AEAD AES-128/256-GCM SRTP/SRTCP backend with `ring::aead`, preserving the existing in-place `BytesMut` RTP encryption, RFC 7714 key derivation/nonces/AAD/tag ordering, and AES-CM/HMAC-SHA1 profiles. It also rejects malformed short SRTCP envelopes before index/tag accesses.
+
+The fork adds AES-128/256 RTP and SRTCP round-trip coverage, preserves the in-place allocation-identity contract, and passes 31 `rtc-srtp` tests plus 168 RTC library tests. Oxide validation against the published Git revision passed `cargo check -p oxidesfu-server`, `cargo test -p oxidesfu-signaling` (488 passed, 3 ignored), and the Rust SDK simulcast quality-switch contract. A 90-second `mixed_room_high_simulcast_large` profile delivered `160/160` tracks with zero loss and captured 33K samples with none lost. RustCrypto `Polyval::mul` is absent from the leading samples; `ring_core_0_17_14__aes_gcm_enc_update_vaes_avx2` is 0.92% self. This single run confirms behavior and attribution but is not a capacity claim; retain the five-round comparison requirement.
+
+Reference map: RTC `c90236e986dad80505eb2bc3f15f2cdffa4070cc` supplied the prior ring design; current fork files are `rtc-srtp/src/cipher/cipher_aead_aes_gcm.rs`, `context/{srtp,srtcp}.rs`, and their tests. Pion `6fbce156e0de9764f1ce46ac581c0469ec1d7a04` preserves AEAD GCM as a standard SRTP profile; do not reorder negotiated profiles for performance.
+
 ### Phase 5 — WebRTC and transport investigation
 
 **Objective:** separate OxideSFU-specific overhead from `webrtc-rs` behavior.
