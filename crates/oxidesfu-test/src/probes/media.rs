@@ -721,6 +721,20 @@ async fn rust_sdk_room_simulcast_video_quality_switch_preserves_video_delivery_c
         recovered_high_pixels > 0,
         "high-quality switch should keep delivering decodable video frames"
     );
+
+    // Mirror adaptive-stream layout churn: only the final requested layer may
+    // become effective, and it must continue delivering decodable frames.
+    remote_publication.set_video_quality(livekit::track::VideoQuality::Low);
+    remote_publication.set_video_quality(livekit::track::VideoQuality::High);
+    remote_publication.set_video_quality(livekit::track::VideoQuality::Low);
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let final_low_pixels =
+        collect_video_frame_pixels(&mut video_stream, 20, Duration::from_secs(3)).await;
+    assert!(
+        final_low_pixels.iter().all(|pixels| *pixels > 0),
+        "rapid quality churn must converge to a final low-quality stream that keeps decoding"
+    );
+
     let _ = stop_tx.send(());
     let _ = frame_pump.await;
 
