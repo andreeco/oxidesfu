@@ -172,6 +172,22 @@ mkdir -p "${artifact_dir}"
 
 go_binary="${artifact_dir}/livekit-server"
 oxide_binary="${WORKSPACE_ROOT}/target/profiling/oxidesfu-server"
+active_server_pid=""
+active_perf_pid=""
+
+cleanup() {
+    local status=$?
+    if [[ -n "${active_perf_pid}" ]] && kill -0 "${active_perf_pid}" 2>/dev/null; then
+        kill -INT "${active_perf_pid}" 2>/dev/null || true
+        wait "${active_perf_pid}" 2>/dev/null || true
+    fi
+    if [[ -n "${active_server_pid}" ]] && kill -0 "${active_server_pid}" 2>/dev/null; then
+        kill -TERM "${active_server_pid}" 2>/dev/null || true
+        wait "${active_server_pid}" 2>/dev/null || true
+    fi
+    exit "${status}"
+}
+trap cleanup EXIT INT TERM
 
 reserve_port() {
     python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
@@ -238,10 +254,12 @@ run_profile() {
             --api-key "${API_KEY}" --api-secret "${API_SECRET}" >"${point_dir}/server.log" 2>&1 &
     fi
     server_pid=$!
+    active_server_pid="${server_pid}"
 
     if ! wait_ready "${base_url}" "${server_pid}"; then
         kill -TERM "${server_pid}" 2>/dev/null || true
         wait "${server_pid}" 2>/dev/null || true
+        active_server_pid=""
         echo "${implementation} did not become ready; see ${point_dir}/server.log" >&2
         return 1
     fi
@@ -250,6 +268,7 @@ run_profile() {
     perf record --pid "${server_pid}" --call-graph "${perf_call_graph}" --freq 999 \
         --output "${point_dir}/perf.data" >"${point_dir}/perf.log" 2>&1 &
     perf_pid=$!
+    active_perf_pid="${perf_pid}"
     sleep 1
 
     local load_command
@@ -258,20 +277,24 @@ run_profile() {
     if ! eval "${load_command}" >"${point_dir}/load-test.log" 2>&1; then
         kill -INT "${perf_pid}" 2>/dev/null || true
         wait "${perf_pid}" 2>/dev/null || true
+        active_perf_pid=""
         kill -TERM "${server_pid}" 2>/dev/null || true
         wait "${server_pid}" 2>/dev/null || true
+        active_server_pid=""
         echo "${implementation} load test failed; see ${point_dir}/load-test.log" >&2
         return 1
     fi
 
     kill -INT "${perf_pid}" 2>/dev/null || true
     wait "${perf_pid}" 2>/dev/null || true
+    active_perf_pid=""
     inferno-collapse-perf < <(perf script -i "${point_dir}/perf.data") | \
         inferno-flamegraph >"${point_dir}/flamegraph.svg"
     perf report --stdio --no-children -i "${point_dir}/perf.data" \
         --sort overhead,symbol --percent-limit 0.8 >"${point_dir}/perf-report.txt" 2>&1 || true
     kill -TERM "${server_pid}" 2>/dev/null || true
     wait "${server_pid}" 2>/dev/null || true
+    active_server_pid=""
 }
 
 if [[ "${attribution_mode}" == "lbr" ]]; then
