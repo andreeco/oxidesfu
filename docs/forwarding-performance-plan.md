@@ -268,26 +268,30 @@ Use an actor-like reader command channel if it keeps ownership local and avoids 
 
 ## Post-Phase-1 profile and remaining optimization map
 
-The latest Oxide-only `mixed_room_high_simulcast_large` profile used WebRTC fork `4913263432b9f6ba38a1b06ff1fc3672cfba40fc`, delivered all 160 subscriber tracks, and reported zero packet loss. Its leading samples are now below the signaling target-selection layer:
+The latest 90-second Oxide-only `mixed_room_high_simulcast_large` profile, using the current WebRTC pin, delivered all 160 subscriber tracks with zero packet loss and recorded 29K samples with none lost. Its leading flat samples are below the signaling target-selection layer:
 
 | Sampled symbol | CPU sample |
 |---|---:|
-| RTC core `RTCPeerConnection::poll_write` | 3.32% |
-| `__vdso_clock_gettime` | 3.02% |
-| WebRTC peer-connection driver event loop | 1.88% |
-| `BuildHasher::hash_one` | 1.34% |
-| `SipHash::write` | 1.18% |
-| Oxide publisher forwarding reader | 1.00% |
+| `__vdso_clock_gettime` | 2.68% |
+| WebRTC peer-connection driver event loop | 2.19% |
+| RTC core `RTCPeerConnection::poll_write` | 1.76% |
+| `ep_poll_callback` | 1.49% |
+| Oxide RTP rewrite | 1.03% |
+| `BuildHasher::hash_one` | 0.96%, 0.89% |
 
-The WebRTC fork now reuses the driver-owned core-output `Vec<TaggedBytesMut>` batch. The current OxideSFU pin is `e8f5b72cf8e0d05ebf02d0f8709e1c2201887679`, whose RTC submodule is `129c78f84da5c9ef15664f26b84356b093b94c70`. It retains the ring-backed, in-place AEAD AES-GCM implementation and changes `poll_write` backpressure ownership: a handler returns the original unconsumed message on `ErrBufferFull`, so the core defers it and its FIFO tail without cloning each message speculatively. RTC tests cover retry identity, `A/B/C` FIFO order, downstream-stage exclusion until retry success, non-backpressure drops, and RTP/RTCP/data-channel variants.
+This profile has `exclude_callchain_user=1`; flat VDSO and shared hash samples do not identify their callers. Its lower bitrate and sample count than the preceding run also mean it must not be used alone for a CPU-capacity comparison.
+
+The WebRTC fork now reuses the driver-owned core-output `Vec<TaggedBytesMut>` batch. The current OxideSFU pin is `84af4f6236f855add36781dce285305034e1a48a`, whose RTC submodule remains `129c78f84da5c9ef15664f26b84356b093b94c70`. It retains the ring-backed, in-place AEAD AES-GCM implementation, lossless `poll_write` backpressure ownership, and caches the negotiated SDES MID extension ID per bound local RTP track. RTC tests cover retry identity, `A/B/C` FIFO order, downstream-stage exclusion until retry success, non-backpressure drops, and RTP/RTCP/data-channel variants; outer-WebRTC tests cover exact MID RTP output and independent target ownership.
 
 ### Completed and remaining opportunities, in priority order
 
 1. **Completed: fixed-size RTP retransmission cache.** Replace the fixed-256 `HashMap<u16, Packet>` plus eviction `VecDeque<u16>` with a 256-slot ring indexed by outgoing sequence number. Each slot stores its sequence number and rejects a stale colliding NACK after `u16` wrap. TDD covers retained/newest/evicted lookup, collision rejection across wrap, and the existing subscriber-owned SSRC/payload-type cache entries. The post-change 90-second workload delivered 160/160 tracks with zero loss and recorded 29K samples with none lost. Its aggregate `BuildHasher::hash_one` entries (0.96% and 0.89%) are effectively unchanged from the preceding 44K-sample run (0.96% and 0.88%); different workload bitrate and sample count make this one rerun insufficient for a CPU claim, but the per-packet cache no longer performs map hashing, map removal, or deque maintenance. Do not weaken the separate `(incoming_ssrc, incoming_extended_sequence)` duplicate window or replace its SipHash threat model without a security decision.
-2. **Bound writer / driver-hop experiment.** Pion binds an RTP writer to each sender and writes directly through its interceptor chain. Rust currently uses a track-to-driver event hop, followed by a core mutex and later flush. Removing that hop is high-risk ownership work and must be a separate WebRTC-fork design with ordering, backpressure, renegotiation, and disconnect tests. Data-channel `WriteNotify` coalescing is not a media-path optimization and is therefore not justified by the current profile.
-3. **Timer attribution.** The current 2.76% `__vdso_clock_gettime` samples have no recorded caller because this capture excludes user call chains. Do not change timing code from flat attribution. First add/use a profiling mode that proves a caller below VDSO (for example LBR-based capture), retain 160/160 zero-loss workload validation, then decide whether any caller is Oxide-controlled.
-4. **Event-driven settings propagation.** LiveKit applies debounced settings to an individual `SubscribedTrack`, not in its packet loop. OxideSFU still reads the global settings generation per packet; replace it with a reader-target notification only if a focused profile makes it material.
-5. **MID extension and packet-header reuse.** The current cached-MID fast path avoids generic extension marshalling. Profile its remaining extension storage and packet/header clones before considering bounded, owner-local reuse. Do not introduce an unbounded global pool or `unsafe`.
+2. **Completed: attribution-quality profiling tooling.** `tools/profiling/profile-load-test.sh` now offers opt-in `--attribution-mode lbr`, which preflights branch-stack caller capture before starting the workload, and records the selected call-graph mode in metadata. It also offers `--client-netns` and requires an explicitly non-loopback `OXIDESFU_PROFILE_URL`, so an operator can profile preconfigured remote/network-namespace clients without interpreting loopback epoll work as server CPU. Run a supported LBR capture and retain 160/160 zero-loss validation before assigning the current VDSO samples to a caller.
+3. **Completed: active-SSRC sequence-state fast path.** `SubscriberRtpState` now keeps the active SSRC and extended-sequence reference outside `highest_incoming_ext_seq_by_ssrc`, retaining the map only for inactive sources. The common selected-layer packet avoids a hash probe; source switches persist/restore exact fallback state. TDD covers `A → B → C → A` history, wraps on both sides of a switch, late and duplicate old-source packets, and timestamp continuity.
+4. **Bound writer / driver-hop experiment — design required.** A driver-only output cap cannot bound the RTC core lock-held pipeline work: the first `core.poll_write()` may stage the complete queue before returning. Do not add a speculative driver continuation. A future RTC-core design needs a budget-aware poll/drain primitive, an explicit more-writes-pending signal, and deterministic RTP/RTCP/data FIFO, backpressure, timer/UDP/close fairness, renegotiation, and disconnect tests.
+5. **Event-driven settings propagation — broadened ownership required.** Effective debounced TrackSettings mutations occur in `media/track_settings.rs` and `signal_request.rs`, not in the packet reader. Wire notifications from that effective update/removal point to the affected reader target; do not introduce a polling task that changes debounce, disable/enable, quality, FPS, or teardown semantics.
+6. **Remote-client network profiling.** `ep_poll_callback` and kernel lock samples are amplified by loopback `lk` clients. Use the completed network-namespace client wrapper, or a remote client, before changing UDP, epoll, socket, or transport architecture.
+7. **Completed: MID extension lookup reuse.** Each compatible `TrackLocalStaticRTP` binding now captures its negotiated SDES MID extension ID. Packet writes reuse that bounded owner-local value while preserving independent queued packet ownership; no global pool or `unsafe` was introduced.
 
 ### Reference evidence for the remaining work
 
@@ -298,11 +302,11 @@ The WebRTC fork now reuses the driver-owned core-output `Vec<TaggedBytesMut>` ba
   - `track_local_static.go` uses a pooled shallow RTP packet and target-bound writers.
   - `rtpsender.go` binds the interceptor/SRTP writer once.
   - `interceptor.go` dispatches through the bound writer without a peer-connection driver event queue.
-- OxideSFU WebRTC fork `ef1e77dbb5e59942fdc3bef1ab5114618f9ac82e` (the preceding profile used `4913263432b9f6ba38a1b06ff1fc3672cfba40fc`):
+- OxideSFU WebRTC fork `84af4f6236f855add36781dce285305034e1a48a` (RTC `129c78f84da5c9ef15664f26b84356b093b94c70`):
   - `src/media_stream/track_local/static_rtp.rs` has cached-MID injection and a driver event enqueue.
   - `src/peer_connection/driver.rs` owns event delivery, core locking, batch draining, and socket writes.
-  - `rtc/rtc/src/peer_connection/handler/mod.rs` owns core `poll_write` retry and temporary queues.
-  - RTC `fb25d55238c8a534c3b69a5b8842cbbbe0ff7331` consumes the RTP marshal buffer in `rtc-srtp/src/context/srtp.rs` and `cipher/cipher_aead_aes_gcm.rs`.
+  - `rtc/rtc/src/peer_connection/handler/mod.rs` owns core `poll_write`, lossless retry ownership, and temporary queues.
+  - `rtc-srtp/src/context/srtp.rs` and `cipher/cipher_aead_aes_gcm.rs` retain in-place ring-backed AEAD RTP encryption.
 
 ### Final two-round comparison and current limit
 

@@ -75,9 +75,9 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 # Pin all three packages below to that published outer-WebRTC commit and refresh
 # Cargo.lock; never use a local path override. Validate the RTC suite, focused
 # Oxide media contracts, and record the exact outer and nested RTC revisions.
-webrtc = { git = "https://github.com/andreeco/webrtc.git", rev = "e8f5b72cf8e0d05ebf02d0f8709e1c2201887679", default-features = false, features = ["runtime-tokio"] }
-rtc = { git = "https://github.com/andreeco/webrtc.git", rev = "e8f5b72cf8e0d05ebf02d0f8709e1c2201887679" }
-rtc-stun = { git = "https://github.com/andreeco/webrtc.git", rev = "e8f5b72cf8e0d05ebf02d0f8709e1c2201887679" }
+webrtc = { git = "https://github.com/andreeco/webrtc.git", rev = "84af4f6236f855add36781dce285305034e1a48a", default-features = false, features = ["runtime-tokio"] }
+rtc = { git = "https://github.com/andreeco/webrtc.git", rev = "84af4f6236f855add36781dce285305034e1a48a" }
+rtc-stun = { git = "https://github.com/andreeco/webrtc.git", rev = "84af4f6236f855add36781dce285305034e1a48a" }
 
 # Optimized profiling builds retain symbols without changing normal release artifacts.
 [profile.profiling]
