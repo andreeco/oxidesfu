@@ -178,13 +178,14 @@ Oxide server internals cannot provide the equivalent Go selection state. A fair 
 ```sh
 cargo fmt --all -- --check
 cargo check -p oxidesfu-signaling
+cargo test -p oxidesfu-rtc --lib
 cargo test -p oxidesfu-signaling --lib
 cargo test -p oxidesfu-test \
   rust_sdk_room_simulcast_video_quality_switch_preserves_video_delivery_contract \
   -- --nocapture
 ```
 
-The focused signaling suite passed with `508 passed, 3 ignored` after the temporal-controller slice. The focused native SDK quality-transition, concurrent spatial-isolation, and concurrent FPS-isolation contracts passed serially. Full workspace testing and clippy remain required after the remaining work above is implemented; known unrelated workspace flakes must be reported separately.
+The focused RTC suite passed with `36 passed`; the focused signaling suite passed with `509 passed, 3 ignored` after descriptor-aware VP9/AV1 source-switch gating. The focused native SDK quality-transition, concurrent spatial-isolation, and concurrent FPS-isolation contracts passed serially before the descriptor slice. Full workspace testing and clippy remain required after the remaining work above is implemented; known unrelated workspace flakes must be reported separately.
 
 ## Completion criteria
 
