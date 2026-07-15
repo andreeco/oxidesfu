@@ -1,6 +1,6 @@
 # Firefox browser conformance harness
 
-This opt-in Playwright project tests the browser-visible media contract that native Rust SDK probes cannot cover: the active Firefox receiver must keep receiving and decoding frames after adaptive-stream settings churn.
+This opt-in Playwright project tests browser-visible media contracts that native Rust SDK probes cannot cover: the active Firefox receiver must keep receiving and decoding frames after adaptive-stream settings churn and after a reliable chat data packet is sent.
 
 ## Install
 
@@ -33,10 +33,11 @@ It must return stats for the `RTCRtpReceiver` currently attached to the rendered
 <div data-testid="browser-harness-ready"></div>
 ```
 
-The harness should install its `RTCPeerConnection` observer before loading LiveKit, keep a mapping from the rendered video element to its receiver track, and execute the adaptive sequence:
+The harness should install its `RTCPeerConnection` observer before loading LiveKit and keep a mapping from the rendered video element to its receiver track. The Playwright contracts exercise both:
 
 ```text
 HIGH -> LOW -> HIGH -> LOW
+reliable data packet delivered -> same video receiver continues decoding
 ```
 
 For Meet-specific coverage it should additionally drive the visibility sequence:

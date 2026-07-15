@@ -2056,6 +2056,14 @@ pub(crate) fn force_sendonly_sections_without_msid_recvonly(
     attached_mids: &HashSet<&str>,
 ) -> String {
     fn rewrite_section_if_needed(section: &mut [String], attached_mids: &HashSet<&str>) {
+        let is_media_section = section.first().is_some_and(|line| {
+            let line = sdp_line_without_ending(line);
+            line.starts_with("m=audio ") || line.starts_with("m=video ")
+        });
+        if !is_media_section {
+            return;
+        }
+
         let mut direction_line_index: Option<usize> = None;
         let mut has_msid = false;
         let mut mid = None;
@@ -7182,7 +7190,8 @@ mod tests {
         ForwardingDecisionRevisions, add_track_response,
         apply_publisher_codec_preferences_to_answer, cached_forwarding_decision_for_subscriber,
         clear_publisher_subscription_active_if_no_remaining_tracks, data_channel_kind_for_label,
-        filter_h264_from_publisher_answer_for_client, normalize_incoming_data_packet,
+        filter_h264_from_publisher_answer_for_client,
+        force_sendonly_sections_without_msid_recvonly, normalize_incoming_data_packet,
         preferred_codec_mime_for_participant_track, relay_data_packet_after_channel_convergence,
         relay_data_track_packet, reliable_channel_label_rank,
         reorder_section_media_line_payloads_for_preferred_codec,
@@ -10095,6 +10104,35 @@ mod tests {
         assert_eq!(
             resolved_destination_identities_for_packet(&packet),
             vec!["carol".to_string()]
+        );
+    }
+
+    #[test]
+    fn preserves_sctp_application_section_when_deactivating_unbound_media_sections() {
+        let answer_sdp = "v=0\r\n\
+            m=video 9 UDP/TLS/RTP/SAVPF 96\r\n\
+            a=mid:0\r\n\
+            a=sendonly\r\n\
+            a=rtpmap:96 VP8/90000\r\n\
+            m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
+            a=mid:1\r\n\
+            a=sendonly\r\n\
+            a=sctp-port:5000\r\n";
+
+        let rewritten = force_sendonly_sections_without_msid_recvonly(answer_sdp, &HashSet::new());
+        let video_section = rewritten
+            .split("m=application")
+            .next()
+            .expect("video section should precede the application section");
+        let application_section = rewritten
+            .split_once("m=application")
+            .map(|(_, section)| section)
+            .expect("application section should remain present");
+
+        assert!(video_section.contains("a=inactive"));
+        assert!(
+            application_section.contains("a=sendonly"),
+            "SCTP application sections are not media receive sections and must stay enabled"
         );
     }
 

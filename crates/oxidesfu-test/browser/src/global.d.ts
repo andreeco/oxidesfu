@@ -9,6 +9,8 @@ declare global {
       packetsReceived: number;
       framesDecoded: number;
     }>;
+    oxidesfuSendChatMessage: (message: string) => Promise<void>;
+    oxidesfuReceivedChatMessages: () => string[];
     oxidesfuClose: () => void;
   }
 }

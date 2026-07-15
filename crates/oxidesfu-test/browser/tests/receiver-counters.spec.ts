@@ -91,3 +91,42 @@ test('final adaptive low request keeps the active Firefox receiver advancing', a
   await publisherContext.close();
   await subscriberContext.close();
 });
+
+test('Meet-style chat delivery keeps the active Firefox video receiver advancing', async ({ browser }) => {
+  const serverUrl = process.env.OXIDESFU_URL;
+  const room = `browser-chat-video-${randomUUID()}`;
+  const publisherContext = await browser.newContext();
+  const subscriberContext = await browser.newContext();
+  const publisher = await publisherContext.newPage();
+  const subscriber = await subscriberContext.newPage();
+  const publisherUrl = `/?role=publisher&url=${encodeURIComponent(serverUrl!)}&token=${encodeURIComponent(token('browser-chat-publisher', room))}`;
+  const subscriberUrl = `/?role=publisher&url=${encodeURIComponent(serverUrl!)}&token=${encodeURIComponent(token('browser-chat-subscriber', room))}`;
+  const message = `chat-${randomUUID()}`;
+
+  await publisher.goto(publisherUrl);
+  await waitForHarnessReady(publisher, 'publisher');
+  await subscriber.goto(subscriberUrl);
+  await waitForHarnessReady(subscriber, 'subscriber');
+  await expect.poll(
+    () => subscriber.evaluate(() => document.querySelector('video[data-testid="remote-video"]')?.srcObject !== null),
+  ).toBe(true);
+
+  const before = await subscriber.evaluate(() => window.oxidesfuReceiverSample()) as ReceiverSample;
+  await publisher.evaluate((message) => window.oxidesfuSendChatMessage(message), message);
+  await expect.poll(
+    () => subscriber.evaluate(() => window.oxidesfuReceivedChatMessages()),
+  ).toContain(message);
+
+  await subscriber.waitForTimeout(5_000);
+  const after = await subscriber.evaluate(() => window.oxidesfuReceiverSample()) as ReceiverSample;
+
+  expect(after.pcId).toBe(before.pcId);
+  expect(after.trackId).toBe(before.trackId);
+  expect(after.packetsReceived).toBeGreaterThan(before.packetsReceived);
+  expect(after.framesDecoded).toBeGreaterThan(before.framesDecoded);
+
+  await publisher.evaluate(() => window.oxidesfuClose());
+  await subscriber.evaluate(() => window.oxidesfuClose());
+  await publisherContext.close();
+  await subscriberContext.close();
+});

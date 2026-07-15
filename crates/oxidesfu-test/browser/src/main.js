@@ -65,9 +65,14 @@ try {
   const { LocalVideoTrack, Room, RoomEvent, Track, VideoQuality } =
     await import('livekit-client');
   const room = new Room();
-    let publication;
+  let publication;
+  const receivedChatMessages = [];
 
-    room.on(RoomEvent.Connected, () => {
+  room.registerTextStreamHandler('lk.chat', async (reader) => {
+    receivedChatMessages.push(await reader.readAll());
+  });
+
+  room.on(RoomEvent.Connected, () => {
       ready.textContent = 'connected';
     });
     room.on(RoomEvent.Disconnected, (reason) => {
@@ -139,6 +144,10 @@ try {
     throw new Error('No inbound video RTP report belongs to the rendered track');
   };
 
+  window.oxidesfuSendChatMessage = async (message) => {
+    await room.localParticipant.sendText(message, { topic: 'lk.chat' });
+  };
+  window.oxidesfuReceivedChatMessages = () => receivedChatMessages.slice();
   window.oxidesfuClose = () => room.disconnect();
   ready.textContent = 'ready';
 } catch (error) {
