@@ -277,11 +277,11 @@ The latest Oxide-only `mixed_room_high_simulcast_large` profile used WebRTC fork
 | `SipHash::write` | 1.18% |
 | Oxide publisher forwarding reader | 1.00% |
 
-The WebRTC fork now reuses the driver-owned core-output `Vec<TaggedBytesMut>` batch. The current OxideSFU pin is `aa29e5b96332e0086952405d1334f990de1109f4`, which carries that work together with the compatible RTC-core queue-reuse and MID fixes. This removes one confirmed recurring allocation, but the profile does not yet prove a large CPU shift. Do not run another Go-versus-Rust comparison until an RTC-core profile or allocation result motivates and validates the next change.
+The WebRTC fork now reuses the driver-owned core-output `Vec<TaggedBytesMut>` batch. The current OxideSFU pin is `ef1e77dbb5e59942fdc3bef1ab5114618f9ac82e`, which also carries RTC commit `fb25d55238c8a534c3b69a5b8842cbbbe0ff7331`: already-marshaled RTP is encrypted in its existing `BytesMut` for AEAD AES-GCM instead of being copied to a second full-packet buffer. The new SRTP regression proves allocation identity, ciphertext equivalence, and successful decryption.
 
 ### Remaining opportunities, in priority order
 
-1. **RTC `poll_write` allocation/copy audit.** Heap-profile RTP marshal, SRTP encryption, temporary handler queues, retry-message clones, and header-extension manipulation. Reuse storage or bypass an unconditional clone only when the allocation profile proves it is material and retry semantics remain tested.
+1. **RTC `poll_write` retry ownership design.** The profile still samples `RTCMessageInternal::clone`; it is the generic retry copy made before every handler call. No current handler returns `ErrBufferFull`, but removing the copy without redesigning handler ownership would drop a future backpressured packet. Replace it only with a design that returns the unconsumed message on backpressure, plus ordering/backpressure tests.
 2. **Bound writer / driver-hop experiment.** Pion binds an RTP writer to each sender and writes directly through its interceptor chain. Rust currently uses a track-to-driver event hop, followed by a core mutex and later flush. Removing that hop is high-risk ownership work and must be a separate WebRTC-fork design with ordering, backpressure, renegotiation, and disconnect tests.
 3. **Timer attribution.** Attribute `clock_gettime` by caller before changing timers. It may be Tokio, ICE/DTLS, RTCP/SRTP, or forwarding diagnostics. The per-target PLI sweep has already been removed.
 4. **Event-driven settings propagation.** LiveKit applies debounced settings to an individual `SubscribedTrack`, not in its packet loop. OxideSFU still reads the global settings generation per packet; replace it with a reader-target notification only if a focused profile makes it material.
@@ -296,10 +296,24 @@ The WebRTC fork now reuses the driver-owned core-output `Vec<TaggedBytesMut>` ba
   - `track_local_static.go` uses a pooled shallow RTP packet and target-bound writers.
   - `rtpsender.go` binds the interceptor/SRTP writer once.
   - `interceptor.go` dispatches through the bound writer without a peer-connection driver event queue.
-- OxideSFU WebRTC fork `aa29e5b96332e0086952405d1334f990de1109f4` (the preceding profile used `4913263432b9f6ba38a1b06ff1fc3672cfba40fc`):
+- OxideSFU WebRTC fork `ef1e77dbb5e59942fdc3bef1ab5114618f9ac82e` (the preceding profile used `4913263432b9f6ba38a1b06ff1fc3672cfba40fc`):
   - `src/media_stream/track_local/static_rtp.rs` has cached-MID injection and a driver event enqueue.
   - `src/peer_connection/driver.rs` owns event delivery, core locking, batch draining, and socket writes.
   - `rtc/rtc/src/peer_connection/handler/mod.rs` owns core `poll_write` retry and temporary queues.
+  - RTC `fb25d55238c8a534c3b69a5b8842cbbbe0ff7331` consumes the RTP marshal buffer in `rtc-srtp/src/context/srtp.rs` and `cipher/cipher_aead_aes_gcm.rs`.
+
+### Final two-round comparison and current limit
+
+The final benchmark command was:
+
+```sh
+OXIDESFU_ENABLE_BENCHMARKS=1 OXIDESFU_BENCHMARK_MODE=full OXIDESFU_BENCHMARK_RUNS=2 \
+  cargo test -p oxidesfu-test benchmark_compare_mixed_room_high_simulcast_large_cpu_rss -- --nocapture
+```
+
+At OxideSFU `1bad531e`, the median `mixed_room_high_simulcast_large` result was wall time `32.451s` versus Go `32.468s` (`-0.1%`), CPU `7.920s` versus Go `7.080s` (`+11.9%`), and peak RSS `107.996MiB` versus Go `216.305MiB` (`-50.1%`). The two-round CPU gate passed, but two samples do not establish a stable capacity claim; use an otherwise idle host and five rounds before publishing one.
+
+The final Oxide-only video profile delivered `54/54` tracks with zero loss. Its top user-space costs remain AEAD GCM authentication (`Polyval::mul` 3.43%), RTC `poll_write` (3.32%), and the WebRTC driver loop (2.02%). The profile also attributes substantial execution to local loopback UDP/kernel networking; it is not evidence that application-level forwarding alone can close the remaining Go CPU delta.
 
 ### Phase 5 — WebRTC and transport investigation
 
