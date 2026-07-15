@@ -1140,7 +1140,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2345,7 +2345,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3612,7 +3612,7 @@ dependencies = [
 [[package]]
 name = "rtc"
 version = "0.20.0-rc.2"
-source = "git+https://github.com/andreeco/webrtc.git?rev=0fd069db4009e8d38cf1730ccd0da0eb067efcf3#0fd069db4009e8d38cf1730ccd0da0eb067efcf3"
+source = "git+https://github.com/andreeco/webrtc.git?rev=3fa6182fa8f8a9f4eafa047e83880115c905714f#3fa6182fa8f8a9f4eafa047e83880115c905714f"
 dependencies = [
  "bytes",
  "hex",
@@ -3630,9 +3630,9 @@ dependencies = [
  "rtc-rtp",
  "rtc-sctp",
  "rtc-sdp",
- "rtc-shared 0.20.0-rc.2 (git+https://github.com/andreeco/webrtc.git?rev=0fd069db4009e8d38cf1730ccd0da0eb067efcf3)",
+ "rtc-shared 0.20.0-rc.2 (git+https://github.com/andreeco/webrtc.git?rev=3fa6182fa8f8a9f4eafa047e83880115c905714f)",
  "rtc-srtp",
- "rtc-stun 0.20.0-rc.2 (git+https://github.com/andreeco/webrtc.git?rev=0fd069db4009e8d38cf1730ccd0da0eb067efcf3)",
+ "rtc-stun 0.20.0-rc.2 (git+https://github.com/andreeco/webrtc.git?rev=3fa6182fa8f8a9f4eafa047e83880115c905714f)",
  "rtc-turn",
  "rustls",
  "sansio",
@@ -3646,19 +3646,19 @@ dependencies = [
 [[package]]
 name = "rtc-datachannel"
 version = "0.20.0-rc.2"
-source = "git+https://github.com/andreeco/webrtc.git?rev=0fd069db4009e8d38cf1730ccd0da0eb067efcf3#0fd069db4009e8d38cf1730ccd0da0eb067efcf3"
+source = "git+https://github.com/andreeco/webrtc.git?rev=3fa6182fa8f8a9f4eafa047e83880115c905714f#3fa6182fa8f8a9f4eafa047e83880115c905714f"
 dependencies = [
  "bytes",
  "log",
  "rtc-sctp",
- "rtc-shared 0.20.0-rc.2 (git+https://github.com/andreeco/webrtc.git?rev=0fd069db4009e8d38cf1730ccd0da0eb067efcf3)",
+ "rtc-shared 0.20.0-rc.2 (git+https://github.com/andreeco/webrtc.git?rev=3fa6182fa8f8a9f4eafa047e83880115c905714f)",
  "sansio",
 ]
 
 [[package]]
 name = "rtc-dtls"
 version = "0.20.0-rc.2"
-source = "git+https://github.com/andreeco/webrtc.git?rev=0fd069db4009e8d38cf1730ccd0da0eb067efcf3#0fd069db4009e8d38cf1730ccd0da0eb067efcf3"
+source = "git+https://github.com/andreeco/webrtc.git?rev=3fa6182fa8f8a9f4eafa047e83880115c905714f#3fa6182fa8f8a9f4eafa047e83880115c905714f"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -3678,7 +3678,7 @@ dependencies = [
  "rcgen",
  "ring",
  "rkyv",
- "rtc-shared 0.20.0-rc.2 (git+https://github.com/andreeco/webrtc.git?rev=0fd069db4009e8d38cf1730ccd0da0eb067efcf3)",
+ "rtc-shared 0.20.0-rc.2 (git+https://github.com/andreeco/webrtc.git?rev=3fa6182fa8f8a9f4eafa047e83880115c905714f)",
  "rustls",
  "sec1",
  "sha1 0.10.6",
@@ -3691,15 +3691,15 @@ dependencies = [
 [[package]]
 name = "rtc-ice"
 version = "0.20.0-rc.2"
-source = "git+https://github.com/andreeco/webrtc.git?rev=0fd069db4009e8d38cf1730ccd0da0eb067efcf3#0fd069db4009e8d38cf1730ccd0da0eb067efcf3"
+source = "git+https://github.com/andreeco/webrtc.git?rev=3fa6182fa8f8a9f4eafa047e83880115c905714f#3fa6182fa8f8a9f4eafa047e83880115c905714f"
 dependencies = [
  "bytes",
  "crc",
  "log",
  "rand 0.10.2",
  "rtc-mdns",
- "rtc-shared 0.20.0-rc.2 (git+https://github.com/andreeco/webrtc.git?rev=0fd069db4009e8d38cf1730ccd0da0eb067efcf3)",
- "rtc-stun 0.20.0-rc.2 (git+https://github.com/andreeco/webrtc.git?rev=0fd069db4009e8d38cf1730ccd0da0eb067efcf3)",
+ "rtc-shared 0.20.0-rc.2 (git+https://github.com/andreeco/webrtc.git?rev=3fa6182fa8f8a9f4eafa047e83880115c905714f)",
+ "rtc-stun 0.20.0-rc.2 (git+https://github.com/andreeco/webrtc.git?rev=3fa6182fa8f8a9f4eafa047e83880115c905714f)",
  "sansio",
  "serde",
  "url",
@@ -3709,21 +3709,21 @@ dependencies = [
 [[package]]
 name = "rtc-interceptor"
 version = "0.20.0-rc.2"
-source = "git+https://github.com/andreeco/webrtc.git?rev=0fd069db4009e8d38cf1730ccd0da0eb067efcf3#0fd069db4009e8d38cf1730ccd0da0eb067efcf3"
+source = "git+https://github.com/andreeco/webrtc.git?rev=3fa6182fa8f8a9f4eafa047e83880115c905714f#3fa6182fa8f8a9f4eafa047e83880115c905714f"
 dependencies = [
  "log",
  "rand 0.10.2",
  "rtc-interceptor-derive",
  "rtc-rtcp",
  "rtc-rtp",
- "rtc-shared 0.20.0-rc.2 (git+https://github.com/andreeco/webrtc.git?rev=0fd069db4009e8d38cf1730ccd0da0eb067efcf3)",
+ "rtc-shared 0.20.0-rc.2 (git+https://github.com/andreeco/webrtc.git?rev=3fa6182fa8f8a9f4eafa047e83880115c905714f)",
  "sansio",
 ]
 
 [[package]]
 name = "rtc-interceptor-derive"
 version = "0.20.0-rc.2"
-source = "git+https://github.com/andreeco/webrtc.git?rev=0fd069db4009e8d38cf1730ccd0da0eb067efcf3#0fd069db4009e8d38cf1730ccd0da0eb067efcf3"
+source = "git+https://github.com/andreeco/webrtc.git?rev=3fa6182fa8f8a9f4eafa047e83880115c905714f#3fa6182fa8f8a9f4eafa047e83880115c905714f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3733,11 +3733,11 @@ dependencies = [
 [[package]]
 name = "rtc-mdns"
 version = "0.20.0-rc.2"
-source = "git+https://github.com/andreeco/webrtc.git?rev=0fd069db4009e8d38cf1730ccd0da0eb067efcf3#0fd069db4009e8d38cf1730ccd0da0eb067efcf3"
+source = "git+https://github.com/andreeco/webrtc.git?rev=3fa6182fa8f8a9f4eafa047e83880115c905714f#3fa6182fa8f8a9f4eafa047e83880115c905714f"
 dependencies = [
  "bytes",
  "log",
- "rtc-shared 0.20.0-rc.2 (git+https://github.com/andreeco/webrtc.git?rev=0fd069db4009e8d38cf1730ccd0da0eb067efcf3)",
+ "rtc-shared 0.20.0-rc.2 (git+https://github.com/andreeco/webrtc.git?rev=3fa6182fa8f8a9f4eafa047e83880115c905714f)",
  "sansio",
  "socket2 0.5.10",
 ]
@@ -3745,47 +3745,47 @@ dependencies = [
 [[package]]
 name = "rtc-media"
 version = "0.20.0-rc.2"
-source = "git+https://github.com/andreeco/webrtc.git?rev=0fd069db4009e8d38cf1730ccd0da0eb067efcf3#0fd069db4009e8d38cf1730ccd0da0eb067efcf3"
+source = "git+https://github.com/andreeco/webrtc.git?rev=3fa6182fa8f8a9f4eafa047e83880115c905714f#3fa6182fa8f8a9f4eafa047e83880115c905714f"
 dependencies = [
  "byteorder",
  "bytes",
  "rand 0.10.2",
  "rtc-rtp",
- "rtc-shared 0.20.0-rc.2 (git+https://github.com/andreeco/webrtc.git?rev=0fd069db4009e8d38cf1730ccd0da0eb067efcf3)",
+ "rtc-shared 0.20.0-rc.2 (git+https://github.com/andreeco/webrtc.git?rev=3fa6182fa8f8a9f4eafa047e83880115c905714f)",
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "rtc-rtcp"
 version = "0.20.0-rc.2"
-source = "git+https://github.com/andreeco/webrtc.git?rev=0fd069db4009e8d38cf1730ccd0da0eb067efcf3#0fd069db4009e8d38cf1730ccd0da0eb067efcf3"
+source = "git+https://github.com/andreeco/webrtc.git?rev=3fa6182fa8f8a9f4eafa047e83880115c905714f#3fa6182fa8f8a9f4eafa047e83880115c905714f"
 dependencies = [
  "bytes",
- "rtc-shared 0.20.0-rc.2 (git+https://github.com/andreeco/webrtc.git?rev=0fd069db4009e8d38cf1730ccd0da0eb067efcf3)",
+ "rtc-shared 0.20.0-rc.2 (git+https://github.com/andreeco/webrtc.git?rev=3fa6182fa8f8a9f4eafa047e83880115c905714f)",
 ]
 
 [[package]]
 name = "rtc-rtp"
 version = "0.20.0-rc.2"
-source = "git+https://github.com/andreeco/webrtc.git?rev=0fd069db4009e8d38cf1730ccd0da0eb067efcf3#0fd069db4009e8d38cf1730ccd0da0eb067efcf3"
+source = "git+https://github.com/andreeco/webrtc.git?rev=3fa6182fa8f8a9f4eafa047e83880115c905714f#3fa6182fa8f8a9f4eafa047e83880115c905714f"
 dependencies = [
  "bytes",
  "memchr",
  "rand 0.10.2",
- "rtc-shared 0.20.0-rc.2 (git+https://github.com/andreeco/webrtc.git?rev=0fd069db4009e8d38cf1730ccd0da0eb067efcf3)",
+ "rtc-shared 0.20.0-rc.2 (git+https://github.com/andreeco/webrtc.git?rev=3fa6182fa8f8a9f4eafa047e83880115c905714f)",
  "serde",
 ]
 
 [[package]]
 name = "rtc-sctp"
 version = "0.20.0-rc.2"
-source = "git+https://github.com/andreeco/webrtc.git?rev=0fd069db4009e8d38cf1730ccd0da0eb067efcf3#0fd069db4009e8d38cf1730ccd0da0eb067efcf3"
+source = "git+https://github.com/andreeco/webrtc.git?rev=3fa6182fa8f8a9f4eafa047e83880115c905714f#3fa6182fa8f8a9f4eafa047e83880115c905714f"
 dependencies = [
  "bytes",
  "crc32c",
  "log",
  "rand 0.10.2",
- "rtc-shared 0.20.0-rc.2 (git+https://github.com/andreeco/webrtc.git?rev=0fd069db4009e8d38cf1730ccd0da0eb067efcf3)",
+ "rtc-shared 0.20.0-rc.2 (git+https://github.com/andreeco/webrtc.git?rev=3fa6182fa8f8a9f4eafa047e83880115c905714f)",
  "rustc-hash",
  "slab",
  "thiserror 2.0.18",
@@ -3794,17 +3794,17 @@ dependencies = [
 [[package]]
 name = "rtc-sdp"
 version = "0.20.0-rc.2"
-source = "git+https://github.com/andreeco/webrtc.git?rev=0fd069db4009e8d38cf1730ccd0da0eb067efcf3#0fd069db4009e8d38cf1730ccd0da0eb067efcf3"
+source = "git+https://github.com/andreeco/webrtc.git?rev=3fa6182fa8f8a9f4eafa047e83880115c905714f#3fa6182fa8f8a9f4eafa047e83880115c905714f"
 dependencies = [
  "rand 0.10.2",
- "rtc-shared 0.20.0-rc.2 (git+https://github.com/andreeco/webrtc.git?rev=0fd069db4009e8d38cf1730ccd0da0eb067efcf3)",
+ "rtc-shared 0.20.0-rc.2 (git+https://github.com/andreeco/webrtc.git?rev=3fa6182fa8f8a9f4eafa047e83880115c905714f)",
  "url",
 ]
 
 [[package]]
 name = "rtc-shared"
 version = "0.20.0-rc.2"
-source = "git+https://github.com/andreeco/webrtc.git?rev=0fd069db4009e8d38cf1730ccd0da0eb067efcf3#0fd069db4009e8d38cf1730ccd0da0eb067efcf3"
+source = "git+https://github.com/andreeco/webrtc.git?rev=3fa6182fa8f8a9f4eafa047e83880115c905714f#3fa6182fa8f8a9f4eafa047e83880115c905714f"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -3846,7 +3846,7 @@ dependencies = [
 [[package]]
 name = "rtc-srtp"
 version = "0.20.0-rc.2"
-source = "git+https://github.com/andreeco/webrtc.git?rev=0fd069db4009e8d38cf1730ccd0da0eb067efcf3#0fd069db4009e8d38cf1730ccd0da0eb067efcf3"
+source = "git+https://github.com/andreeco/webrtc.git?rev=3fa6182fa8f8a9f4eafa047e83880115c905714f#3fa6182fa8f8a9f4eafa047e83880115c905714f"
 dependencies = [
  "aead",
  "aes",
@@ -3857,7 +3857,7 @@ dependencies = [
  "hmac 0.12.1",
  "rtc-rtcp",
  "rtc-rtp",
- "rtc-shared 0.20.0-rc.2 (git+https://github.com/andreeco/webrtc.git?rev=0fd069db4009e8d38cf1730ccd0da0eb067efcf3)",
+ "rtc-shared 0.20.0-rc.2 (git+https://github.com/andreeco/webrtc.git?rev=3fa6182fa8f8a9f4eafa047e83880115c905714f)",
  "sha1 0.10.6",
  "subtle",
 ]
@@ -3865,7 +3865,7 @@ dependencies = [
 [[package]]
 name = "rtc-stun"
 version = "0.20.0-rc.2"
-source = "git+https://github.com/andreeco/webrtc.git?rev=0fd069db4009e8d38cf1730ccd0da0eb067efcf3#0fd069db4009e8d38cf1730ccd0da0eb067efcf3"
+source = "git+https://github.com/andreeco/webrtc.git?rev=3fa6182fa8f8a9f4eafa047e83880115c905714f#3fa6182fa8f8a9f4eafa047e83880115c905714f"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -3874,7 +3874,7 @@ dependencies = [
  "md-5",
  "rand 0.10.2",
  "ring",
- "rtc-shared 0.20.0-rc.2 (git+https://github.com/andreeco/webrtc.git?rev=0fd069db4009e8d38cf1730ccd0da0eb067efcf3)",
+ "rtc-shared 0.20.0-rc.2 (git+https://github.com/andreeco/webrtc.git?rev=3fa6182fa8f8a9f4eafa047e83880115c905714f)",
  "sansio",
  "subtle",
  "url",
@@ -3901,12 +3901,12 @@ dependencies = [
 [[package]]
 name = "rtc-turn"
 version = "0.20.0-rc.2"
-source = "git+https://github.com/andreeco/webrtc.git?rev=0fd069db4009e8d38cf1730ccd0da0eb067efcf3#0fd069db4009e8d38cf1730ccd0da0eb067efcf3"
+source = "git+https://github.com/andreeco/webrtc.git?rev=3fa6182fa8f8a9f4eafa047e83880115c905714f#3fa6182fa8f8a9f4eafa047e83880115c905714f"
 dependencies = [
  "bytes",
  "log",
- "rtc-shared 0.20.0-rc.2 (git+https://github.com/andreeco/webrtc.git?rev=0fd069db4009e8d38cf1730ccd0da0eb067efcf3)",
- "rtc-stun 0.20.0-rc.2 (git+https://github.com/andreeco/webrtc.git?rev=0fd069db4009e8d38cf1730ccd0da0eb067efcf3)",
+ "rtc-shared 0.20.0-rc.2 (git+https://github.com/andreeco/webrtc.git?rev=3fa6182fa8f8a9f4eafa047e83880115c905714f)",
+ "rtc-stun 0.20.0-rc.2 (git+https://github.com/andreeco/webrtc.git?rev=3fa6182fa8f8a9f4eafa047e83880115c905714f)",
  "sansio",
 ]
 
@@ -3950,7 +3950,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4008,7 +4008,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4449,7 +4449,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5117,7 +5117,7 @@ dependencies = [
 [[package]]
 name = "webrtc"
 version = "0.20.0-rc.2"
-source = "git+https://github.com/andreeco/webrtc.git?rev=0fd069db4009e8d38cf1730ccd0da0eb067efcf3#0fd069db4009e8d38cf1730ccd0da0eb067efcf3"
+source = "git+https://github.com/andreeco/webrtc.git?rev=3fa6182fa8f8a9f4eafa047e83880115c905714f#3fa6182fa8f8a9f4eafa047e83880115c905714f"
 dependencies = [
  "async-trait",
  "bytes",
@@ -5177,7 +5177,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
