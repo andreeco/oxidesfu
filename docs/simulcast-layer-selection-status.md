@@ -85,7 +85,7 @@ The native SDK contract in `crates/oxidesfu-test/src/probes/media.rs` now additi
 
 ## Known missing work
 
-### 1. Allocation policy and bandwidth/layout producer are complete; end-to-end transition coverage remains
+### 1. Allocation policy, bandwidth/layout producer, and end-to-end transitions are complete
 
 `TrackAllocationStore` is now an independent, private, target-scoped allocation input. It publishes semantic revisioned changes to the reader that owns each `ForwardTarget`; the reader merges its desired quality with `UpdateTrackSettings` maximum quality and clamps desired to that ceiling. Allocation changes therefore use the same keyframe-gated selector transition as subscription changes without mutating client permission/settings.
 
@@ -93,11 +93,9 @@ The store defaults to no allocation, making `desired = max` and preserving curre
 
 A one-second timer-driven producer now reads each subscriber receiver's congestion-feedback `available_outgoing_bitrate`, divides it across eligible video subscriptions according to layout weight, and selects the highest advertised `VideoLayer.bitrate` that fits. A subscriber `UpdateTrackSettings` viewport area takes precedence for weight; otherwise the largest advertised layer dimensions are used. It writes semantic spatial and temporal targets through `TrackAllocationStore`; no RTP packet performs BWE lookup or allocation work.
 
-Remaining work:
+The native Rust SDK allocation contract now uses a server test-support capacity override to drive the production one-second allocator through `2 Mbps → 100 kbps → 2 Mbps`. It proves a real subscriber's decoded dimensions and frame cadence downgrade then recover without calling SDK quality/FPS controls. The override is room/subscriber scoped, restores normal candidate-pair statistics when removed, and is not a client protocol or production configuration input.
 
-- add end-to-end allocation-driven downgrade/upgrade coverage.
-
-### 2. Temporal target state and allocator temporal intent are complete; end-to-end transition coverage remains
+### 2. Temporal target state and allocator temporal intent are complete
 
 `SubscriberVideoTemporalController` is reader-local state in each `ForwardTarget`. For a requested FPS and receiver-observed temporal cadence it derives an explicit `TemporalLayerPolicy` with `max` and `desired`, admits only temporal IDs at or below that maximum, and records the highest currently forwarded temporal layer. A policy reduction clamps the current state without resetting spatial source selection or RTP rewrite history.
 
@@ -114,13 +112,9 @@ The native Rust SDK FPS-isolation contract also passes with the controller in th
 
 `TrackAllocationStore` now also carries a bounded target-local desired temporal layer (`T0`–`T2`). The reader merges it with the FPS-derived maximum, clamps it to that maximum, and drops only enhancement layers above the allocator target. The default remains `desired = max` when no allocation is present.
 
-The one-second receiver-bandwidth allocator supplies this temporal intent alongside spatial policy, with the same viewport-weighted per-subscription budget described above.
+The one-second receiver-bandwidth allocator supplies this temporal intent alongside spatial policy, with the same viewport-weighted per-subscription budget described above. The allocation transition contract also proves temporal downgrade and recovery by observing decoded cadence under the same production allocator changes.
 
-Remaining work:
-
-- add end-to-end allocation-driven temporal downgrade/upgrade coverage.
-
-### 3. Dependency-descriptor decode targets are used for VP9/AV1 switching; end-to-end stream coverage remains
+### 3. Dependency-descriptor decode targets are used for VP9/AV1 switching; native SDK fixture coverage remains
 
 Oxide is pinned to outer WebRTC `3b0b2f0d8f0443deeab47fb83dada7eb4d7778ea`, nested RTC `56a36e408913475baeeb5672bd3e30036dea820f`.
 
@@ -132,9 +126,10 @@ Covered regressions:
 - `oxidesfu-rtc`: both descriptor frame start and `Switch` are required for the exposed result;
 - signaling: a descriptor `false` result blocks a VP9 payload-keyframe heuristic, a descriptor `true` result permits the transition, and absent metadata falls back to the payload detector.
 
+The RTC integration regression now feeds stateful real RTP header-extension sequences into `RemoteTrackState`: a non-`Switch` frame start blocks selection, an active `Switch` frame start permits it, and a following descriptor-free packet cannot inherit stale eligibility. Forwarding-facing VP9 and AV1 regressions compose that decision with the selector and `SubscriberRtpForwarder`, proving continuous outgoing sequence/timestamp translation across the permitted source switch.
+
 Remaining work:
 
-- add RTP packet-sequence integration coverage that exercises descriptor state through a real scalable VP9/AV1 remote track and verifies source-switch RTP continuity;
 - add native SDK scalable-stream coverage when a deterministic dependency-descriptor publisher fixture is available.
 
 ### 4. Source liveness expiry is complete; decodability availability remains limited
@@ -160,21 +155,15 @@ Still required:
 
 `rust_sdk_room_simulcast_video_quality_isolated_per_subscriber_contract` publishes one real simulcast source to two native SDK subscribers, drains stale frames after settings propagation, and proves that every sampled low decoded dimension is lower than every sampled high dimension. It then upgrades only the low subscriber and proves that it recovers high dimensions without reducing the independent high subscriber.
 
-### 7. Differential evidence remains incomplete
+### 7. Paired client-observed evidence is implemented; a real sweep and server-internal correlation remain
 
-The paired profiler currently compares aggregate workload output. It does not retain the per-track post-warm-up selection information needed to establish equal media work.
+`tools/profiling/profile-paired-scale-sweep.sh` now runs a Rust SDK observer for every Go and Oxide point and writes a versioned `client-media-evidence.json` after an independent warm-up/window. The parity-safe report includes subscriber/publisher/track identifiers, received bytes/sec, decoded dimensions/frames, drops/discards, PLI/NACK counts, dimension transitions, and an explicit `backpressure.available = false` value rather than inventing a server metric for Go.
 
-Required report fields:
+Remaining work:
 
-- subscriber identity and track SID;
-- requested/max/desired/current layer;
-- selected RID/SSRC;
-- decoded dimensions from a client-observed probe;
-- successful bytes/sec;
-- selector PLI count and selection transition count;
-- secondary driver-channel wait/backpressure evidence.
-
-Oxide server internals cannot provide the equivalent Go selection state. A fair Go/Oxide differential report requires client-observed per-track data or separately scoped Go instrumentation.
+- run and retain a real paired Go/Oxide sweep using the new artifact, then compare post-warm-up media work;
+- correlate Oxide client evidence with server target/max/desired/current, RID/SSRC, selector PLI, transitions, and driver wait/backpressure in a machine-readable server snapshot;
+- use separately scoped Go instrumentation only if client-observed evidence is insufficient.
 
 ## Validation completed for the current slice
 
@@ -194,10 +183,9 @@ The focused RTC suite passed with `36 passed`; the focused signaling suite most 
 
 This work should be called complete only when:
 
-1. allocation-driven spatial and temporal downgrade/upgrade transitions have end-to-end delivery coverage;
-2. source switching is proven decodable through real scalable VP9/AV1 descriptor packet sequences and native SDK fixtures where applicable;
-3. source availability, fallback, and retry behavior are bounded and observable, including decoder-usability semantics for scalable streams;
-4. observability exports selector suppression/receiver-feedback counts, wire-byte rates, and a machine-readable profiler snapshot;
-5. concurrent real subscribers prove independent low/high decoded dimensions and isolated updates;
-6. paired Go/Oxide runs capture comparable post-warm-up per-track delivery evidence; and
-7. focused tests, workspace tests, and a clean or explicitly remediated workspace clippy baseline have documented outcomes.
+1. source switching is proven decodable through a native SDK scalable VP9/AV1 fixture where applicable;
+2. source availability, fallback, and retry behavior are bounded and observable, including decoder-usability semantics for scalable streams;
+3. observability exports selector suppression/receiver-feedback counts, wire-byte rates, and a machine-readable profiler snapshot;
+4. concurrent real subscribers prove independent low/high decoded dimensions and isolated updates;
+5. a real paired Go/Oxide run captures comparable post-warm-up client-observed per-track delivery evidence and any needed server correlation; and
+6. focused tests, workspace tests, and a clean or explicitly remediated workspace clippy baseline have documented outcomes.
