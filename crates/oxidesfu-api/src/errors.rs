@@ -1,11 +1,11 @@
-use axum::{
-    http::{HeaderMap, StatusCode, header},
-    response::Response,
-};
 #[cfg(test)]
 use axum::{
     extract::{Request, State},
     middleware::Next,
+};
+use axum::{
+    http::{HeaderMap, StatusCode, header},
+    response::Response,
 };
 use oxidesfu_auth::{AuthContext, AuthError};
 use oxidesfu_room::RoomStoreError;

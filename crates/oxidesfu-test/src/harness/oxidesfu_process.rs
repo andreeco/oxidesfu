@@ -129,18 +129,3 @@
             );
         }
     }
-    fn assert_success_with_stdout_contains(output: Output, context: &str, expected: &str) {
-        if !output.status.success() {
-            panic!(
-                "{context}\nstdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            stdout.contains(expected),
-            "{context}\nexpected stdout to contain {expected:?}\nstdout:\n{stdout}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }

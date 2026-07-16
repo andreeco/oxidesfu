@@ -1,7 +1,7 @@
 use super::*;
 
 mod harness;
-pub(crate) use harness::*;
+use harness::*;
 
 mod agents;
 mod multinode;

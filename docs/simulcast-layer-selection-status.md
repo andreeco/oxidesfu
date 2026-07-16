@@ -145,7 +145,7 @@ Native Rust SDK fixture boundary:
 - Oxide's native probes are pinned to Rust SDK `9afe85bb8593c9e955de4ee4949706fc04699ed9`. It exposes `SvcEncodedVideoFrame` and `NativeVideoSource::capture_svc_encoded_frame`, and the local SDK-contract test validates a three-spatial-layer active `Switch` descriptor at this boundary.
 - `crates/oxidesfu-test/fixtures/vp9-svc/` now contains reproducibly generated, independently decodable `320×180` and `1280×720` VP9 keyframes plus its `ffmpeg` generator. The VP9 `L3T3_KEY` low → high native contract now runs unignored with `NativeVideoSource::new_encoded` and `VideoEncoderBackend::PreEncoded`, so it exercises the SDK passthrough encoder rather than the raw-frame path.
 - Delivery now passes after rust-sdks commit `2dc87b5cde110365aef8c090d19a50d0fdbec5ae` (preserve codec-specific packetization metadata in descriptor-aware passthrough frames). The full workspace run includes `rust_sdk_room_vp9_svc_quality_low_to_high_preserves_delivery_contract` passing.
-- Oxide currently pins this SDK fix via a temporary local git URL while upstream publishing is pending from this environment; replace the local pin with the equivalent published `https://github.com/andreeco/rust-sdks.git` commit once available.
+- Oxide now pins this SDK fix from the published remote fork at `https://github.com/andreeco/rust-sdks.git` rev `2dc87b5cde110365aef8c090d19a50d0fdbec5ae`; the temporary local git URL pin has been removed.
 
 ### 4. Source liveness expiry is complete; decodability availability remains limited
 
@@ -217,12 +217,12 @@ cargo test -p oxidesfu-test \
 
 The focused RTC suite passed with `38 passed`, including the VP9-only forwarding SDP regression; the focused signaling suite now passes with `534 passed, 3 ignored`. The dependency-descriptor-gated VP9/AV1 RTP-continuity regression passes. The browser harness production build passes, and a fresh-server Firefox run passed all three receiver-counter contracts, including the VP9 SVC quality-churn contract. Focused native SDK quality-transition, concurrent spatial-isolation, concurrent FPS-isolation, allocation-transition, and AV1 DD cadence contracts passed. The former signal-only quality-aggregate probe is superseded: upstream LiveKit sends dynacast demand after `SubscribedTrack.OnCodecNegotiated`, so Oxide now suppresses premature all-off demand until a compatible receiver is active and emits enabled demand at that activation boundary.
 
-`cargo test --workspace` now passes with `118 passed, 10 ignored`. Strict Clippy passes for both `oxidesfu-signaling` and `oxidesfu-server` after the reader/negotiation context refactor and server telemetry/WHIP cleanup. Workspace Clippy now reaches only `oxidesfu-test` test-support hygiene (legacy protocol fixture fields, dead opt-in harness helpers, and style lints). An attempted bulk cleanup was intentionally discarded because legacy-file formatting produced more than 12,000 lines of unrelated churn; resume that work as small, hand-applied, per-file commits rather than accepting formatter noise.
+`cargo test --workspace` now passes with `119 passed, 9 ignored`. Strict Clippy now passes workspace-wide with `cargo clippy --workspace --all-targets -- -D warnings`, including the `oxidesfu-test` support suite after surgical lint cleanup.
 
 ## Completion criteria
 
 This work should be called complete only when:
 
-1. one-SSRC scalable forwarding remains covered by both Firefox VP9 SVC browser and native SDK descriptor-aware VP9 low→high contracts; repin the native SDK dependency from local git URL to the published andreeco commit once push access is available;
+1. one-SSRC scalable forwarding remains covered by both Firefox VP9 SVC browser and native SDK descriptor-aware VP9 low→high contracts;
 2. repeat paired Go/Oxide runs on an otherwise idle host before making CPU/capacity conclusions; and
-3. remediate the remaining `oxidesfu-test` strict-Clippy test-support backlog with surgical per-file edits, or retain its explicit documented outcome.
+3. retain docs and profiler artifacts for handoff continuity.

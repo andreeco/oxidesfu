@@ -579,13 +579,13 @@ async fn run_benchmark_comparison_if_enabled(scenario: BenchmarkScenario) {
     }
 
     let config = benchmark_config();
-    if let Some((soft_limit, _hard_limit)) = read_self_fd_limits() {
-        if soft_limit < 65_535 {
-            eprintln!(
-                "benchmark warning: soft open-files limit is {} (< 65535); high-scale load scenarios may under-report capacity",
-                soft_limit
-            );
-        }
+    if let Some((soft_limit, _hard_limit)) = read_self_fd_limits()
+        && soft_limit < 65_535
+    {
+        eprintln!(
+            "benchmark warning: soft open-files limit is {} (< 65535); high-scale load scenarios may under-report capacity",
+            soft_limit
+        );
     }
     if !should_run_scenario_for_mode(config, scenario) {
         eprintln!(

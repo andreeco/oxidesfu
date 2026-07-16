@@ -63,6 +63,7 @@ use super::*;
         .expect("publisher should receive expected SubscribedQualityUpdate flags before timeout")
     }
 
+    #[allow(deprecated)]
     fn subscribed_quality_flags(update: &proto::SubscribedQualityUpdate) -> [bool; 3] {
         let mut flags = [false; 3];
         for quality in &update.subscribed_qualities {

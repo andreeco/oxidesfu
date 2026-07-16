@@ -5,6 +5,7 @@
 pub struct OxideSFUTestHarness;
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) mod support {
     use std::{
         collections::{HashMap, HashSet},
@@ -20,10 +21,7 @@ pub(crate) mod support {
     use livekit::{
         DataPacket, DataPacketKind, Room, RoomEvent, RoomOptions,
         options::TrackPublishOptions,
-        prelude::{
-            DataTrackFrame, DataTrackSubscribeError, DataTrackSubscribeOptions, LocalAudioTrack,
-            LocalTrack, LocalVideoTrack, PublishError, RtcAudioSource,
-        },
+        prelude::{DataTrackFrame, LocalAudioTrack, LocalTrack, LocalVideoTrack, RtcAudioSource},
         webrtc::{
             audio_frame::AudioFrame,
             audio_source::native::NativeAudioSource,
@@ -170,6 +168,15 @@ pub(crate) mod support {
     }
 
     #[cfg(any(feature = "harness-e2e", feature = "upstream-livekit"))]
+    #[allow(deprecated, unused_mut, dead_code)]
+    #[allow(
+        clippy::cmp_owned,
+        clippy::collapsible_if,
+        clippy::items_after_test_module,
+        clippy::let_and_return,
+        clippy::manual_is_multiple_of,
+        clippy::same_item_push
+    )]
     mod upstream_livekit {
         include!(concat!(
             env!("CARGO_MANIFEST_DIR"),
