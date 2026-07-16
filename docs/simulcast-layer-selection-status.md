@@ -141,15 +141,13 @@ Remaining limitation:
 - availability currently means recently observed RTP, not independently verified decoder usability;
 - descriptor switch targets protect source transitions, but are not yet used to establish complete decoder-usability availability semantics.
 
-### 5. Production observability is partially complete
+### 5. Production observability and profiler snapshot are complete
 
 The existing three-second target heartbeat now reports reader-local maximum/desired/current spatial layers, maximum/desired/current temporal layers, selector acquisition state, waiting layer, acquisition age, remaining selector PLI budget, selected RID/SSRC, layer transitions, categorized spatial and temporal drops, selector PLI requests, rewrite drops, successful RTP packet count, successful rewritten payload bytes, and write errors. Counters update without locks, allocation, formatting, or clock reads in the RTP path.
 
-Still required:
+The bounded reader-heartbeat snapshot now separately exports selector PLI sent/suppression reasons, downstream PLI/FIR received/scheduled/suppressed counters, RTP wire bytes and packets per reporting window, acquisition/fallback state and waiting information, layer policy/current selection, and forwarding outcomes. `GET /debug/forwarding-snapshots` returns bounded JSONL for local profiler collection; the paired profiler retains it as `oxide-forwarding-snapshot.jsonl` only for Oxide runs.
 
-- selector PLI suppression reasons and receiver-feedback PLI/FIR counters as separate fields;
-- full RTP wire-byte accounting and a reporting-window bytes/sec export rather than cumulative payload bytes in debug heartbeat;
-- acquisition/fallback state and waiting duration in a machine-readable profiler snapshot.
+The first real paired sweep reached build completion but encountered an empty Go `perf.data` during post-processing before workload artifacts could be retained. The profiler now records this as a non-fatal missing CPU profile so a rerun can preserve media evidence.
 
 ### 6. Black-box target isolation is complete
 
@@ -161,8 +159,8 @@ Still required:
 
 Remaining work:
 
-- run and retain a real paired Go/Oxide sweep using the new artifact, then compare post-warm-up media work;
-- correlate Oxide client evidence with server target/max/desired/current, RID/SSRC, selector PLI, transitions, and driver wait/backpressure in a machine-readable server snapshot;
+- rerun and retain a real paired Go/Oxide sweep using the new artifacts, then compare post-warm-up media work;
+- correlate Oxide client evidence with the collected server target/max/desired/current, RID/SSRC, selector PLI, transitions, and driver wait/backpressure fields;
 - use separately scoped Go instrumentation only if client-observed evidence is insufficient.
 
 ## Validation completed for the current slice

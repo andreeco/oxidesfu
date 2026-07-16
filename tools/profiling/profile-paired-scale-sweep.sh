@@ -326,10 +326,15 @@ run_profile() {
     kill -INT "${perf_pid}" 2>/dev/null || true
     wait "${perf_pid}" 2>/dev/null || true
     active_perf_pid=""
-    inferno-collapse-perf < <(perf script -i "${point_dir}/perf.data") | \
-        inferno-flamegraph >"${point_dir}/flamegraph.svg"
-    perf report --stdio --no-children -i "${point_dir}/perf.data" \
-        --sort overhead,symbol --percent-limit 0.8 >"${point_dir}/perf-report.txt" 2>&1 || true
+    if [[ -s "${point_dir}/perf.data" ]]; then
+        inferno-collapse-perf < <(perf script -i "${point_dir}/perf.data") | \
+            inferno-flamegraph >"${point_dir}/flamegraph.svg"
+        perf report --stdio --no-children -i "${point_dir}/perf.data" \
+            --sort overhead,symbol --percent-limit 0.8 >"${point_dir}/perf-report.txt" 2>&1 || true
+    else
+        printf 'perf.data was empty; media evidence remains valid but no CPU profile was captured.\n' \
+            >"${point_dir}/perf-report.txt"
+    fi
     kill -TERM "${server_pid}" 2>/dev/null || true
     wait "${server_pid}" 2>/dev/null || true
     active_server_pid=""
