@@ -1288,12 +1288,10 @@ fn vp9_svc_switch_descriptor(spatial_id: u8) -> livekit::webrtc::video_frame::De
     }
 }
 
-// The fixture validates and is accepted by NativeVideoSource, but the current
-// SDK/libwebrtc pre-encoded descriptor path does not deliver a decoded frame to
-// the remote NativeVideoStream. Keep the complete contract ready to promote
-// once that upstream bridge delivery defect is resolved.
+// Deterministic descriptor-aware VP9 SVC contract:
+// publish pre-encoded low/high keyframes with explicit dependency descriptors,
+// request low, then request high, and assert decoded delivery is preserved.
 #[tokio::test]
-#[ignore = "descriptor-aware pre-encoded VP9 frames are accepted but not delivered by the pinned SDK bridge"]
 async fn rust_sdk_room_vp9_svc_quality_low_to_high_preserves_delivery_contract() {
     let _media_probe_guard = NATIVE_MEDIA_PROBE_LOCK.lock().await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

@@ -1000,7 +1000,7 @@ checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
 [[package]]
 name = "device-info"
 version = "0.1.1"
-source = "git+https://github.com/andreeco/rust-sdks.git?rev=9afe85bb8593c9e955de4ee4949706fc04699ed9#9afe85bb8593c9e955de4ee4949706fc04699ed9"
+source = "git+file:///home/andre/rustprojects/othercode/rust-sdks?rev=2dc87b5cde110365aef8c090d19a50d0fdbec5ae#2dc87b5cde110365aef8c090d19a50d0fdbec5ae"
 dependencies = [
  "core-foundation",
  "jni 0.21.1",
@@ -2015,7 +2015,7 @@ dependencies = [
 [[package]]
 name = "libwebrtc"
 version = "0.3.41"
-source = "git+https://github.com/andreeco/rust-sdks.git?rev=9afe85bb8593c9e955de4ee4949706fc04699ed9#9afe85bb8593c9e955de4ee4949706fc04699ed9"
+source = "git+file:///home/andre/rustprojects/othercode/rust-sdks?rev=2dc87b5cde110365aef8c090d19a50d0fdbec5ae#2dc87b5cde110365aef8c090d19a50d0fdbec5ae"
 dependencies = [
  "cxx",
  "jni 0.21.1",
@@ -2059,7 +2059,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 [[package]]
 name = "livekit"
 version = "0.7.52"
-source = "git+https://github.com/andreeco/rust-sdks.git?rev=9afe85bb8593c9e955de4ee4949706fc04699ed9#9afe85bb8593c9e955de4ee4949706fc04699ed9"
+source = "git+file:///home/andre/rustprojects/othercode/rust-sdks?rev=2dc87b5cde110365aef8c090d19a50d0fdbec5ae#2dc87b5cde110365aef8c090d19a50d0fdbec5ae"
 dependencies = [
  "base64 0.22.1",
  "bmrng",
@@ -2073,7 +2073,7 @@ dependencies = [
  "livekit-common",
  "livekit-data-stream",
  "livekit-datatrack",
- "livekit-protocol 0.7.10 (git+https://github.com/andreeco/rust-sdks.git?rev=9afe85bb8593c9e955de4ee4949706fc04699ed9)",
+ "livekit-protocol 0.7.10 (git+file:///home/andre/rustprojects/othercode/rust-sdks?rev=2dc87b5cde110365aef8c090d19a50d0fdbec5ae)",
  "livekit-runtime",
  "log",
  "parking_lot",
@@ -2089,7 +2089,7 @@ dependencies = [
 [[package]]
 name = "livekit-api"
 version = "0.5.5"
-source = "git+https://github.com/andreeco/rust-sdks.git?rev=9afe85bb8593c9e955de4ee4949706fc04699ed9#9afe85bb8593c9e955de4ee4949706fc04699ed9"
+source = "git+file:///home/andre/rustprojects/othercode/rust-sdks?rev=2dc87b5cde110365aef8c090d19a50d0fdbec5ae#2dc87b5cde110365aef8c090d19a50d0fdbec5ae"
 dependencies = [
  "base64 0.21.7",
  "bytes",
@@ -2100,7 +2100,7 @@ dependencies = [
  "http",
  "jsonwebtoken",
  "livekit-common",
- "livekit-protocol 0.7.10 (git+https://github.com/andreeco/rust-sdks.git?rev=9afe85bb8593c9e955de4ee4949706fc04699ed9)",
+ "livekit-protocol 0.7.10 (git+file:///home/andre/rustprojects/othercode/rust-sdks?rev=2dc87b5cde110365aef8c090d19a50d0fdbec5ae)",
  "livekit-runtime",
  "log",
  "os_info",
@@ -2123,15 +2123,15 @@ dependencies = [
 [[package]]
 name = "livekit-common"
 version = "0.1.0"
-source = "git+https://github.com/andreeco/rust-sdks.git?rev=9afe85bb8593c9e955de4ee4949706fc04699ed9#9afe85bb8593c9e955de4ee4949706fc04699ed9"
+source = "git+file:///home/andre/rustprojects/othercode/rust-sdks?rev=2dc87b5cde110365aef8c090d19a50d0fdbec5ae#2dc87b5cde110365aef8c090d19a50d0fdbec5ae"
 dependencies = [
- "livekit-protocol 0.7.10 (git+https://github.com/andreeco/rust-sdks.git?rev=9afe85bb8593c9e955de4ee4949706fc04699ed9)",
+ "livekit-protocol 0.7.10 (git+file:///home/andre/rustprojects/othercode/rust-sdks?rev=2dc87b5cde110365aef8c090d19a50d0fdbec5ae)",
 ]
 
 [[package]]
 name = "livekit-data-stream"
 version = "0.1.0"
-source = "git+https://github.com/andreeco/rust-sdks.git?rev=9afe85bb8593c9e955de4ee4949706fc04699ed9#9afe85bb8593c9e955de4ee4949706fc04699ed9"
+source = "git+file:///home/andre/rustprojects/othercode/rust-sdks?rev=2dc87b5cde110365aef8c090d19a50d0fdbec5ae#2dc87b5cde110365aef8c090d19a50d0fdbec5ae"
 dependencies = [
  "bmrng",
  "bytes",
@@ -2139,7 +2139,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "livekit-common",
- "livekit-protocol 0.7.10 (git+https://github.com/andreeco/rust-sdks.git?rev=9afe85bb8593c9e955de4ee4949706fc04699ed9)",
+ "livekit-protocol 0.7.10 (git+file:///home/andre/rustprojects/othercode/rust-sdks?rev=2dc87b5cde110365aef8c090d19a50d0fdbec5ae)",
  "log",
  "parking_lot",
  "prost 0.12.6",
@@ -2151,7 +2151,7 @@ dependencies = [
 [[package]]
 name = "livekit-datatrack"
 version = "0.1.11"
-source = "git+https://github.com/andreeco/rust-sdks.git?rev=9afe85bb8593c9e955de4ee4949706fc04699ed9#9afe85bb8593c9e955de4ee4949706fc04699ed9"
+source = "git+file:///home/andre/rustprojects/othercode/rust-sdks?rev=2dc87b5cde110365aef8c090d19a50d0fdbec5ae#2dc87b5cde110365aef8c090d19a50d0fdbec5ae"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2159,7 +2159,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "indexmap",
- "livekit-protocol 0.7.10 (git+https://github.com/andreeco/rust-sdks.git?rev=9afe85bb8593c9e955de4ee4949706fc04699ed9)",
+ "livekit-protocol 0.7.10 (git+file:///home/andre/rustprojects/othercode/rust-sdks?rev=2dc87b5cde110365aef8c090d19a50d0fdbec5ae)",
  "livekit-runtime",
  "log",
  "rand 0.9.4",
@@ -2183,7 +2183,7 @@ dependencies = [
 [[package]]
 name = "livekit-protocol"
 version = "0.7.10"
-source = "git+https://github.com/andreeco/rust-sdks.git?rev=9afe85bb8593c9e955de4ee4949706fc04699ed9#9afe85bb8593c9e955de4ee4949706fc04699ed9"
+source = "git+file:///home/andre/rustprojects/othercode/rust-sdks?rev=2dc87b5cde110365aef8c090d19a50d0fdbec5ae#2dc87b5cde110365aef8c090d19a50d0fdbec5ae"
 dependencies = [
  "pbjson",
  "pbjson-types",
@@ -2194,7 +2194,7 @@ dependencies = [
 [[package]]
 name = "livekit-runtime"
 version = "0.4.0"
-source = "git+https://github.com/andreeco/rust-sdks.git?rev=9afe85bb8593c9e955de4ee4949706fc04699ed9#9afe85bb8593c9e955de4ee4949706fc04699ed9"
+source = "git+file:///home/andre/rustprojects/othercode/rust-sdks?rev=2dc87b5cde110365aef8c090d19a50d0fdbec5ae#2dc87b5cde110365aef8c090d19a50d0fdbec5ae"
 dependencies = [
  "tokio",
  "tokio-stream",
@@ -2863,7 +2863,7 @@ dependencies = [
  "hmac 0.13.0",
  "livekit",
  "livekit-api",
- "livekit-protocol 0.7.10 (git+https://github.com/andreeco/rust-sdks.git?rev=9afe85bb8593c9e955de4ee4949706fc04699ed9)",
+ "livekit-protocol 0.7.10 (git+file:///home/andre/rustprojects/othercode/rust-sdks?rev=2dc87b5cde110365aef8c090d19a50d0fdbec5ae)",
  "md-5",
  "oxidesfu-auth",
  "oxidesfu-core",
@@ -5121,7 +5121,7 @@ dependencies = [
 [[package]]
 name = "webrtc-sys"
 version = "0.3.38"
-source = "git+https://github.com/andreeco/rust-sdks.git?rev=9afe85bb8593c9e955de4ee4949706fc04699ed9#9afe85bb8593c9e955de4ee4949706fc04699ed9"
+source = "git+file:///home/andre/rustprojects/othercode/rust-sdks?rev=2dc87b5cde110365aef8c090d19a50d0fdbec5ae#2dc87b5cde110365aef8c090d19a50d0fdbec5ae"
 dependencies = [
  "cc",
  "cxx",
@@ -5135,7 +5135,7 @@ dependencies = [
 [[package]]
 name = "webrtc-sys-build"
 version = "0.3.18"
-source = "git+https://github.com/andreeco/rust-sdks.git?rev=9afe85bb8593c9e955de4ee4949706fc04699ed9#9afe85bb8593c9e955de4ee4949706fc04699ed9"
+source = "git+file:///home/andre/rustprojects/othercode/rust-sdks?rev=2dc87b5cde110365aef8c090d19a50d0fdbec5ae#2dc87b5cde110365aef8c090d19a50d0fdbec5ae"
 dependencies = [
  "anyhow",
  "fs2",
