@@ -673,6 +673,27 @@ impl LocalRtpTrack {
         Ok(())
     }
 
+    /// Writes a prepared batch of video RTP packets while preserving target-local extensions.
+    ///
+    /// The WebRTC driver accepts at most 64 packets per batch and requires a compatible sender
+    /// binding plus this wrapper's cached forwarding MID. Callers must use this only after
+    /// observing [`ForwardTrackBindResult::Compatible`].
+    pub async fn write_rtp_batch_with_cached_mid_preserving_extensions(
+        &self,
+        packets: Vec<rtp::Packet>,
+    ) -> RtcResult<()> {
+        let Some(mid) = self.forwarding_mid_bytes.clone() else {
+            return Err(std::io::Error::other(
+                "prepared RTP batch requires a cached forwarding MID",
+            )
+            .into());
+        };
+        self.inner
+            .write_rtp_batch_with_sdes_mid_bytes(packets, mid, true)
+            .await?;
+        Ok(())
+    }
+
     /// Writes RTCP packets to this local forwarding track sender.
     pub async fn write_rtcp_packets(&self, packets: Vec<Box<dyn rtcp::Packet>>) -> RtcResult<()> {
         self.inner.write_rtcp(packets).await?;

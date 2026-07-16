@@ -1182,6 +1182,84 @@ struct DownstreamFeedbackCounters {
     fir_suppressed: u64,
 }
 
+const MAX_PREPARED_VIDEO_RTP_BATCH_SIZE: usize = 64;
+
+const fn uses_prepared_video_batching(is_video_track: bool) -> bool {
+    is_video_track
+}
+
+/// Target-local, frame-bounded output retained until one prepared driver write.
+///
+/// Packets have already received their final RTP rewrite before entering this queue. This keeps
+/// retransmission caching independent from when the prepared batch reaches the WebRTC driver.
+#[derive(Default)]
+struct PendingVideoRtpBatch {
+    packets: Vec<rtc::rtp::Packet>,
+    timestamp: Option<u32>,
+    payload_bytes: u64,
+    wire_bytes: u64,
+    first_incoming_payload_type: Option<u8>,
+    first_forwarded_payload_type: Option<u8>,
+}
+
+impl PendingVideoRtpBatch {
+    fn needs_flush_before(&self, timestamp: u32) -> bool {
+        self.timestamp.is_some_and(|current| current != timestamp)
+            || self.packets.len() >= MAX_PREPARED_VIDEO_RTP_BATCH_SIZE
+    }
+
+    fn push(
+        &mut self,
+        packet: rtc::rtp::Packet,
+        incoming_payload_type: u8,
+        wire_bytes: u64,
+    ) -> bool {
+        debug_assert!(self.packets.len() < MAX_PREPARED_VIDEO_RTP_BATCH_SIZE);
+        if self.packets.is_empty() {
+            self.timestamp = Some(packet.header.timestamp);
+            self.first_incoming_payload_type = Some(incoming_payload_type);
+            self.first_forwarded_payload_type = Some(packet.header.payload_type);
+        }
+        self.payload_bytes = self
+            .payload_bytes
+            .saturating_add(packet.payload.len() as u64);
+        self.wire_bytes = self.wire_bytes.saturating_add(wire_bytes);
+        let flush_after =
+            packet.header.marker || self.packets.len() + 1 == MAX_PREPARED_VIDEO_RTP_BATCH_SIZE;
+        self.packets.push(packet);
+        flush_after
+    }
+
+    fn take(&mut self) -> Option<CompletedVideoRtpBatch> {
+        (!self.packets.is_empty()).then(|| CompletedVideoRtpBatch {
+            packets: std::mem::take(&mut self.packets),
+            timestamp: self
+                .timestamp
+                .take()
+                .expect("non-empty video batch has a timestamp"),
+            payload_bytes: std::mem::take(&mut self.payload_bytes),
+            wire_bytes: std::mem::take(&mut self.wire_bytes),
+            incoming_payload_type: self
+                .first_incoming_payload_type
+                .take()
+                .expect("non-empty video batch has an incoming payload type"),
+            forwarded_payload_type: self
+                .first_forwarded_payload_type
+                .take()
+                .expect("non-empty video batch has a forwarded payload type"),
+        })
+    }
+}
+
+struct CompletedVideoRtpBatch {
+    packets: Vec<rtc::rtp::Packet>,
+    timestamp: u32,
+    payload_bytes: u64,
+    wire_bytes: u64,
+    incoming_payload_type: u8,
+    forwarded_payload_type: u8,
+}
+
 #[derive(Debug, Default)]
 struct VideoForwardingCounters {
     layer_switches: u64,
@@ -1226,12 +1304,60 @@ struct ForwardTarget {
     target_primary_ssrc: Option<Option<u32>>,
     target_payload_type: Option<Option<u8>>,
     target_dependency_descriptor_extension_id: Option<Option<u8>>,
+    prepared_video_batching_compatible: Option<bool>,
+    pending_video_rtp_batch: PendingVideoRtpBatch,
 
     forwarded_once: bool,
     logged_video_rewrite_drop: bool,
     logged_audio_rewrite_drop: bool,
     video_write_errors: u64,
     audio_write_errors: u64,
+}
+
+async fn flush_pending_video_rtp_batch(
+    target: &mut ForwardTarget,
+) -> oxidesfu_rtc::RtcResult<Option<CompletedVideoRtpBatch>> {
+    let Some(batch) = target.pending_video_rtp_batch.take() else {
+        return Ok(None);
+    };
+    let packet_count = batch.packets.len() as u64;
+    let local_forward_track = target.local_forward_track.clone();
+    let CompletedVideoRtpBatch {
+        packets,
+        timestamp,
+        payload_bytes,
+        wire_bytes,
+        incoming_payload_type,
+        forwarded_payload_type,
+    } = batch;
+    match local_forward_track
+        .write_rtp_batch_with_cached_mid_preserving_extensions(packets)
+        .await
+    {
+        Ok(()) => {
+            target.video_counters.successful_rtp_packets = target
+                .video_counters
+                .successful_rtp_packets
+                .saturating_add(packet_count);
+            target.video_counters.successful_rtp_payload_bytes = target
+                .video_counters
+                .successful_rtp_payload_bytes
+                .saturating_add(payload_bytes);
+            target.rtp_window.record_successful_write(wire_bytes);
+            Ok(Some(CompletedVideoRtpBatch {
+                packets: Vec::new(),
+                timestamp,
+                payload_bytes,
+                wire_bytes,
+                incoming_payload_type,
+                forwarded_payload_type,
+            }))
+        }
+        Err(error) => {
+            target.video_write_errors = target.video_write_errors.saturating_add(packet_count);
+            Err(error)
+        }
+    }
 }
 
 impl ForwardTarget {
@@ -1256,6 +1382,8 @@ impl ForwardTarget {
             target_primary_ssrc: None,
             target_payload_type: None,
             target_dependency_descriptor_extension_id: None,
+            prepared_video_batching_compatible: None,
+            pending_video_rtp_batch: PendingVideoRtpBatch::default(),
 
             forwarded_once: false,
             logged_video_rewrite_drop: false,
@@ -1273,6 +1401,7 @@ impl ForwardTarget {
         self.local_forward_track = local_forward_track;
         self.rtp_forwarder = rtp_forwarder;
         self.target_dependency_descriptor_extension_id = None;
+        self.prepared_video_batching_compatible = None;
     }
 
     fn subscriber_identity(&self) -> &str {
@@ -1288,6 +1417,25 @@ fn dependency_descriptor_dti(
         rtc::rtp::extension::dependency_descriptor_extension::DependencyDescriptorDecodeTargetIndication::Discardable => DependencyDescriptorDti::Discardable,
         rtc::rtp::extension::dependency_descriptor_extension::DependencyDescriptorDecodeTargetIndication::Switch => DependencyDescriptorDti::Switch,
         rtc::rtp::extension::dependency_descriptor_extension::DependencyDescriptorDecodeTargetIndication::Required => DependencyDescriptorDti::Required,
+    }
+}
+
+/// Removes entries that cannot be represented by RFC 8285 one-byte extension headers.
+///
+/// A zero-length one-byte extension would underflow the WebRTC RTP serializer. Such an entry has
+/// no valid wire representation (ID zero is padding), so removing it preserves the serializable
+/// final-wire packet used for both batching and retransmission caching.
+fn remove_unencodable_one_byte_extensions(packet: &mut rtc::rtp::Packet) {
+    if packet.header.extension_profile == rtc::rtp::header::EXTENSION_PROFILE_ONE_BYTE {
+        packet
+            .header
+            .extensions
+            .retain(|extension| extension.id != 0 && !extension.payload.is_empty());
+        if packet.header.extensions.is_empty() {
+            packet.header.extension = false;
+            packet.header.extension_profile = 0;
+            packet.header.extensions_padding = 0;
+        }
     }
 }
 
@@ -1577,7 +1725,7 @@ pub(super) fn take_forwarding_debug_heartbeat(heartbeat_due: &mut bool) -> bool 
     std::mem::take(heartbeat_due)
 }
 
-fn refresh_forward_targets_for_track(
+async fn refresh_forward_targets_for_track(
     targets: &mut Vec<ForwardTarget>,
     forward_tracks: &ForwardTrackStore,
     rtp_forwarding: &RtpForwardingStore,
@@ -1585,6 +1733,16 @@ fn refresh_forward_targets_for_track(
     publisher_identity: &str,
     track_sid: &str,
 ) {
+    for target in targets.iter_mut() {
+        if let Err(error) = flush_pending_video_rtp_batch(target).await {
+            tracing::warn!(
+                subscriber_identity = %target.subscriber_identity(),
+                write_errors = target.video_write_errors,
+                error = %error,
+                "video_forwarding_write_failed_before_target_transport_replacement"
+            );
+        }
+    }
     let mut previous_targets = std::mem::take(targets)
         .into_iter()
         .map(|target| (target.key.clone(), target))
@@ -6833,7 +6991,8 @@ async fn forward_publisher_remote_track(
                                 &room_name,
                                 &publisher_identity,
                                 &track_sid,
-                            );
+                            )
+                            .await;
                             cached_forward_tracks_revision = Some(current_revision);
                         }
                         record_forwarding_snapshot(
@@ -6975,7 +7134,8 @@ async fn forward_publisher_remote_track(
                                 &room_name,
                                 &publisher_identity,
                                 &track_sid,
-                            );
+                            )
+                            .await;
                             cached_forward_tracks_revision = Some(current_revision);
                         }
                         let total_forward_targets = cached_forward_targets.len();
@@ -7241,7 +7401,8 @@ async fn forward_publisher_remote_track(
                             &room_name,
                             &publisher_identity,
                             &track_sid,
-                        );
+                        )
+                        .await;
                         cached_forward_tracks_revision = Some(current_revision);
                     }
                     let had_targets_now = !cached_forward_targets.is_empty();
@@ -7333,6 +7494,58 @@ async fn forward_publisher_remote_track(
                         &packet.payload,
                         packet_temporal_layer_hint,
                     );
+                    macro_rules! record_completed_video_batch {
+                        ($target:expr, $batch:expr) => {{
+                            let batch = $batch;
+                            if !$target.forwarded_once {
+                                $target.forwarded_once = true;
+                                if !track_subscribed_signaled_to_publisher
+                                    && should_emit_track_subscribed_for_subscriber(
+                                        &rooms,
+                                        &room_name,
+                                        &publisher_identity,
+                                        $target.subscriber_identity(),
+                                    )
+                                {
+                                    signal_track_subscribed_to_publisher(
+                                        &publisher_subscription_active_pairs,
+                                        &signal_connections,
+                                        &room_name,
+                                        &publisher_identity,
+                                        $target.subscriber_identity(),
+                                        &track_sid,
+                                    );
+                                    track_subscribed_signaled_to_publisher = true;
+                                }
+                                tracing::info!(
+                                    room = %room_name,
+                                    publisher_identity = %publisher_identity,
+                                    track_sid = %track_sid,
+                                    subscriber_identity = %$target.subscriber_identity(),
+                                    incoming_payload_type = batch.incoming_payload_type,
+                                    forwarded_payload_type = batch.forwarded_payload_type,
+                                    batch_packets = $target.video_counters.successful_rtp_packets,
+                                    "video_forwarding_first_packet_forwarded"
+                                );
+                            }
+                        }};
+                    }
+                    macro_rules! record_video_batch_error {
+                        ($target:expr, $error:expr) => {{
+                            if $target.video_write_errors % 50 == 0 {
+                                tracing::warn!(
+                                    room = %room_name,
+                                    publisher_identity = %publisher_identity,
+                                    track_sid = %track_sid,
+                                    subscriber_identity = %$target.subscriber_identity(),
+                                    write_errors = $target.video_write_errors,
+                                    error = %$error,
+                                    "video_forwarding_write_failed"
+                                );
+                            }
+                        }};
+                    }
+
                     for target in &mut cached_forward_targets {
                         let mut packet_descriptor_forwarding_decision = None;
                         let settings_revision = target.settings_revision.unwrap_or_default();
@@ -7612,6 +7825,53 @@ async fn forward_publisher_remote_track(
                                 target
                                     .rtp_forwarder
                                     .replace_cached_retransmission_packet(&rewritten_packet);
+                            }
+                        }
+
+                        if is_video_track {
+                            remove_unencodable_one_byte_extensions(&mut rewritten_packet);
+                        }
+
+                        if uses_prepared_video_batching(is_video_track) {
+                            if target.prepared_video_batching_compatible.is_none() {
+                                target.prepared_video_batching_compatible = Some(
+                                    target.local_forward_track.forwarding_mid().is_some()
+                                        && matches!(
+                                            target.local_forward_track.bind_result().await,
+                                            oxidesfu_rtc::ForwardTrackBindResult::Compatible { .. }
+                                        ),
+                                );
+                            }
+                            if target.prepared_video_batching_compatible == Some(true) {
+                                if target
+                                    .pending_video_rtp_batch
+                                    .needs_flush_before(rewritten_packet.header.timestamp)
+                                {
+                                    match flush_pending_video_rtp_batch(target).await {
+                                        Ok(Some(batch)) => {
+                                            record_completed_video_batch!(target, batch)
+                                        }
+                                        Ok(None) => {}
+                                        Err(error) => record_video_batch_error!(target, error),
+                                    }
+                                }
+                                let rewritten_wire_bytes =
+                                    outgoing_rtp_wire_bytes(&rewritten_packet);
+                                let flush_after = target.pending_video_rtp_batch.push(
+                                    rewritten_packet,
+                                    packet.header.payload_type,
+                                    rewritten_wire_bytes,
+                                );
+                                if flush_after {
+                                    match flush_pending_video_rtp_batch(target).await {
+                                        Ok(Some(batch)) => {
+                                            record_completed_video_batch!(target, batch)
+                                        }
+                                        Ok(None) => {}
+                                        Err(error) => record_video_batch_error!(target, error),
+                                    }
+                                }
+                                continue;
                             }
                         }
 
@@ -7935,6 +8195,22 @@ async fn forward_publisher_remote_track(
                         "forward_track_reader_remote_track_error"
                     );
                     break;
+                }
+            }
+        }
+
+        if is_video_track {
+            for target in &mut cached_forward_targets {
+                if let Err(error) = flush_pending_video_rtp_batch(target).await {
+                    tracing::warn!(
+                        room = %room_name,
+                        publisher_identity = %publisher_identity,
+                        track_sid = %track_sid,
+                        subscriber_identity = %target.subscriber_identity(),
+                        write_errors = target.video_write_errors,
+                        error = %error,
+                        "video_forwarding_write_failed_before_reader_exit"
+                    );
                 }
             }
         }
@@ -8893,6 +9169,7 @@ mod tests {
         normalize_incoming_data_packet, outgoing_rtp_wire_bytes,
         preferred_codec_mime_for_participant_track, relay_data_packet_after_channel_convergence,
         relay_data_track_packet, reliable_channel_label_rank,
+        remove_unencodable_one_byte_extensions,
         reorder_section_media_line_payloads_for_preferred_codec,
         resolved_destination_identities_for_packet, rewrite_dependency_descriptor_for_target,
         selected_forwarding_mime_type_for_subscriber, signal_track_subscribed_to_publisher,
@@ -8907,6 +9184,110 @@ mod tests {
     };
     use oxidesfu_auth::{ApiKeyStore, TokenVerifier};
     use oxidesfu_rtc::{DataChannelKind, DependencyDescriptorMetadataSnapshot};
+
+    fn video_batch_packet(sequence_number: u16, timestamp: u32, marker: bool) -> rtc::rtp::Packet {
+        rtc::rtp::Packet {
+            header: rtc::rtp::header::Header {
+                sequence_number,
+                timestamp,
+                marker,
+                payload_type: 98,
+                extension: true,
+                extension_profile: rtc::rtp::header::EXTENSION_PROFILE_ONE_BYTE,
+                ..Default::default()
+            },
+            payload: vec![sequence_number as u8].into(),
+        }
+    }
+
+    #[test]
+    fn video_prepared_batch_flushes_on_marker_and_preserves_final_packet_fifo() {
+        let mut batch = super::PendingVideoRtpBatch::default();
+        let mut first = video_batch_packet(10, 9_000, false);
+        first.header.extensions.push(rtc::rtp::header::Extension {
+            id: 9,
+            payload: b"final-target-local-descriptor".to_vec().into(),
+        });
+        assert!(!batch.push(first, 96, 25));
+        assert!(batch.push(video_batch_packet(11, 9_000, true), 96, 13));
+
+        let completed = batch
+            .take()
+            .expect("marker must complete the prepared batch");
+        assert_eq!(completed.timestamp, 9_000);
+        assert_eq!(completed.payload_bytes, 2);
+        assert_eq!(completed.wire_bytes, 38);
+        assert_eq!(
+            completed
+                .packets
+                .iter()
+                .map(|packet| packet.header.sequence_number)
+                .collect::<Vec<_>>(),
+            vec![10, 11]
+        );
+        assert_eq!(
+            completed.packets[0].header.get_extension(9),
+            Some(b"final-target-local-descriptor".to_vec().into()),
+            "the batch must retain the final rewritten wire packet, not a pre-rewrite cache copy"
+        );
+    }
+
+    #[test]
+    fn video_prepared_batch_flushes_at_capacity_or_timestamp_boundary() {
+        let mut batch = super::PendingVideoRtpBatch::default();
+        for sequence_number in 0..super::MAX_PREPARED_VIDEO_RTP_BATCH_SIZE as u16 {
+            assert_eq!(
+                batch.push(video_batch_packet(sequence_number, 9_000, false), 96, 13),
+                sequence_number as usize + 1 == super::MAX_PREPARED_VIDEO_RTP_BATCH_SIZE
+            );
+        }
+        assert!(batch.needs_flush_before(12_000));
+        assert_eq!(
+            batch
+                .take()
+                .expect("capacity must complete a batch")
+                .packets
+                .len(),
+            64
+        );
+
+        assert!(!batch.push(video_batch_packet(64, 12_000, false), 96, 13));
+        assert!(batch.needs_flush_before(15_000));
+    }
+
+    #[test]
+    fn only_video_targets_use_the_prepared_batch_path() {
+        assert!(super::uses_prepared_video_batching(true));
+        assert!(!super::uses_prepared_video_batching(false));
+    }
+
+    #[test]
+    fn video_batch_normalization_removes_unencodable_empty_one_byte_extensions() {
+        let mut packet = video_batch_packet(10, 9_000, true);
+        packet.header.extensions = vec![
+            rtc::rtp::header::Extension {
+                id: 0,
+                payload: Vec::new().into(),
+            },
+            rtc::rtp::header::Extension {
+                id: 4,
+                payload: Vec::new().into(),
+            },
+            rtc::rtp::header::Extension {
+                id: 9,
+                payload: b"final".to_vec().into(),
+            },
+        ];
+
+        remove_unencodable_one_byte_extensions(&mut packet);
+
+        assert_eq!(
+            packet.header.get_extension(9),
+            Some(b"final".to_vec().into())
+        );
+        assert_eq!(packet.header.extensions.len(), 1);
+        assert!(packet.header.extension);
+    }
 
     #[test]
     fn dependency_descriptor_rewrite_is_target_local_and_strips_when_unnegotiated() {

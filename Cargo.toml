@@ -67,17 +67,17 @@ tower = { version = "0.5.3", features = ["util"] }
 turn-server = { git = "https://github.com/andreeco/turn-rs.git", rev = "79d1bc2a0b92329df51f827036d284ad577ca1ff", default-features = false, features = ["udp"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
-# Pinned from andreeco/webrtc's oxidesfu/webrtc-compat branch for LiveKit compatibility.
+# Pinned from andreeco/webrtc's rebase/webrtc-compat-2026-07-15-upstream-master branch.
 #
 # Update order matters: first commit and push any RTC-core work to
 # andreeco/rtc:oxidesfu/rtc-compat, then update the `rtc` submodule in
-# andreeco/webrtc, commit and push it to andreeco/webrtc:oxidesfu/webrtc-compat.
-# Pin all three packages below to that published outer-WebRTC commit and refresh
-# Cargo.lock; never use a local path override. Validate the RTC suite, focused
-# Oxide media contracts, and record the exact outer and nested RTC revisions.
-webrtc = { git = "https://github.com/andreeco/webrtc.git", rev = "0b370d10e1100d9e3ecb14cedcbc7fc2a22133a2", default-features = false, features = ["runtime-tokio"] }
-rtc = { git = "https://github.com/andreeco/webrtc.git", rev = "0b370d10e1100d9e3ecb14cedcbc7fc2a22133a2" }
-rtc-stun = { git = "https://github.com/andreeco/webrtc.git", rev = "0b370d10e1100d9e3ecb14cedcbc7fc2a22133a2" }
+# andreeco/webrtc, commit and push the outer WebRTC fork. Pin all three packages
+# below to that published outer-WebRTC commit and refresh Cargo.lock; never use
+# a local path override. Validate the RTC suite, focused Oxide media contracts,
+# and record the exact outer and nested RTC revisions.
+webrtc = { git = "https://github.com/andreeco/webrtc.git", rev = "a1f15cd14b3ea6555c49702bd1d7c8e3fd793fff", default-features = false, features = ["runtime-tokio"] }
+rtc = { git = "https://github.com/andreeco/webrtc.git", rev = "a1f15cd14b3ea6555c49702bd1d7c8e3fd793fff" }
+rtc-stun = { git = "https://github.com/andreeco/webrtc.git", rev = "a1f15cd14b3ea6555c49702bd1d7c8e3fd793fff" }
 
 # Optimized profiling builds retain symbols without changing normal release artifacts.
 [profile.profiling]
