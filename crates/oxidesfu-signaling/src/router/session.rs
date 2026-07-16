@@ -1117,6 +1117,7 @@ struct CachedForwardingDecision {
     should_forward_media: bool,
     requested_max_quality: Option<proto::VideoQuality>,
     desired_quality: Option<proto::VideoQuality>,
+    desired_temporal_layer: Option<u8>,
     requested_fps: Option<u32>,
     revisions: ForwardingDecisionRevisions,
 }
@@ -1129,6 +1130,7 @@ struct VideoForwardingCounters {
     drop_above_maximum: u64,
     drop_unknown_layer: u64,
     drop_temporal_above_maximum: u64,
+    drop_temporal_above_desired: u64,
     drop_temporal_timestamp_cap: u64,
     selector_pli_requests: u64,
     rewrite_drops: u64,
@@ -1260,6 +1262,11 @@ fn cached_forwarding_decision_for_subscriber(
         requested_video_quality_from_settings(settings.as_ref(), track_info);
     let allocated_desired_quality =
         track_allocations.get_desired_quality_for_track(room_name, subscriber_identity, track_sid);
+    let allocated_desired_temporal_layer = track_allocations.get_desired_temporal_layer_for_track(
+        room_name,
+        subscriber_identity,
+        track_sid,
+    );
     let should_forward_media = should_forward_media_for_subscriber_with_settings_value(
         media_subscriptions,
         auto_subscribe_preferences,
@@ -1288,6 +1295,7 @@ fn cached_forwarding_decision_for_subscriber(
             requested_max_quality,
             allocated_desired_quality,
         ),
+        desired_temporal_layer: allocated_desired_temporal_layer,
         requested_fps: requested_video_fps_from_settings(settings.as_ref()),
         revisions,
     };
@@ -1320,6 +1328,11 @@ fn cached_forwarding_decision_for_target(
         requested_video_quality_from_settings(settings.as_ref(), track_info);
     let allocated_desired_quality =
         track_allocations.get_desired_quality_for_track(room_name, subscriber_identity, track_sid);
+    let allocated_desired_temporal_layer = track_allocations.get_desired_temporal_layer_for_track(
+        room_name,
+        subscriber_identity,
+        track_sid,
+    );
     let decision = CachedForwardingDecision {
         should_forward_media: should_forward_media_for_subscriber_with_settings_value(
             media_subscriptions,
@@ -1347,6 +1360,7 @@ fn cached_forwarding_decision_for_target(
             requested_max_quality,
             allocated_desired_quality,
         ),
+        desired_temporal_layer: allocated_desired_temporal_layer,
         requested_fps: requested_video_fps_from_settings(settings.as_ref()),
         revisions,
     };
@@ -1760,6 +1774,7 @@ pub(crate) struct TemporalLayerPolicy {
 pub(crate) enum TemporalIngressDecision {
     Forward,
     DropAboveMaximum,
+    DropAboveDesired,
     DropTimestampCap,
 }
 
@@ -1792,6 +1807,20 @@ impl SubscriberVideoTemporalController {
         requested_fps: u32,
         receiver_temporal_layer_fps: Option<[Option<f32>; 3]>,
     ) {
+        self.set_requested_fps_with_desired_temporal_layer(
+            requested_fps,
+            receiver_temporal_layer_fps,
+            None,
+        );
+    }
+
+    /// Applies an allocator temporal target while preserving the subscriber FPS ceiling.
+    pub(crate) fn set_requested_fps_with_desired_temporal_layer(
+        &mut self,
+        requested_fps: u32,
+        receiver_temporal_layer_fps: Option<[Option<f32>; 3]>,
+        desired_temporal_layer: Option<u8>,
+    ) {
         let Some(receiver_temporal_layer_fps) = receiver_temporal_layer_fps else {
             self.policy = None;
             self.current = None;
@@ -1809,15 +1838,19 @@ impl SubscriberVideoTemporalController {
             return;
         };
 
-        let policy = TemporalLayerPolicy { max, desired: max };
+        let desired = desired_temporal_layer
+            .and_then(TemporalLayer::from_id)
+            .map(|desired| desired.min(max))
+            .unwrap_or(max);
+        let policy = TemporalLayerPolicy { max, desired };
         if self.policy != Some(policy) {
             self.policy = Some(policy);
-            self.current = self.current.map(|current| current.min(max));
+            self.current = self.current.map(|current| current.min(desired));
         }
         self.timestamp_cap_required = should_apply_timestamp_fps_cap_for_selected_temporal_layer(
             requested_fps,
             &receiver_temporal_layer_fps,
-            max as u8,
+            desired as u8,
         );
     }
 
@@ -1836,6 +1869,9 @@ impl SubscriberVideoTemporalController {
         {
             if temporal > policy.max {
                 return TemporalIngressDecision::DropAboveMaximum;
+            }
+            if temporal > policy.desired {
+                return TemporalIngressDecision::DropAboveDesired;
             }
             if self.timestamp_cap_required
                 && !self
@@ -6594,10 +6630,13 @@ async fn forward_publisher_remote_track(
 
                         if track_supports_quality_control {
                             if let Some(requested_fps) = decision.requested_fps {
-                                target.video_temporal_controller.set_requested_fps(
-                                    requested_fps,
-                                    packet_receiver_temporal_layer_fps,
-                                );
+                                target
+                                    .video_temporal_controller
+                                    .set_requested_fps_with_desired_temporal_layer(
+                                        requested_fps,
+                                        packet_receiver_temporal_layer_fps,
+                                        decision.desired_temporal_layer,
+                                    );
                                 match target.video_temporal_controller.observe_packet(
                                     packet.header.timestamp,
                                     requested_fps,
@@ -6606,6 +6645,11 @@ async fn forward_publisher_remote_track(
                                     TemporalIngressDecision::Forward => {}
                                     TemporalIngressDecision::DropAboveMaximum => {
                                         target.video_counters.drop_temporal_above_maximum += 1;
+                                        filtered_out_targets += 1;
+                                        continue;
+                                    }
+                                    TemporalIngressDecision::DropAboveDesired => {
+                                        target.video_counters.drop_temporal_above_desired += 1;
                                         filtered_out_targets += 1;
                                         continue;
                                     }
@@ -6810,6 +6854,7 @@ async fn forward_publisher_remote_track(
                                 drop_above_maximum = target.video_counters.drop_above_maximum,
                                 drop_unknown_layer = target.video_counters.drop_unknown_layer,
                                 drop_temporal_above_maximum = target.video_counters.drop_temporal_above_maximum,
+                                drop_temporal_above_desired = target.video_counters.drop_temporal_above_desired,
                                 drop_temporal_timestamp_cap = target.video_counters.drop_temporal_timestamp_cap,
                                 selector_pli_requests = target.video_counters.selector_pli_requests,
                                 rewrite_drops = target.video_counters.rewrite_drops,
@@ -11168,6 +11213,36 @@ mod tests {
             TemporalIngressDecision::Forward
         );
         assert_eq!(controller.current(), Some(TemporalLayer::T0));
+    }
+
+    #[test]
+    fn temporal_controller_clamps_allocator_target_to_subscriber_maximum() {
+        let mut controller = SubscriberVideoTemporalController::default();
+        let layers = Some([Some(8.0), Some(16.0), Some(30.0)]);
+        controller.set_requested_fps_with_desired_temporal_layer(30, layers, Some(1));
+
+        assert_eq!(
+            controller
+                .policy()
+                .map(|policy| (policy.max, policy.desired)),
+            Some((TemporalLayer::T2, TemporalLayer::T1))
+        );
+        assert_eq!(
+            controller.observe_packet(3_000, 30, Some(2)),
+            TemporalIngressDecision::DropAboveDesired
+        );
+        assert_eq!(
+            controller.observe_packet(6_000, 30, Some(1)),
+            TemporalIngressDecision::Forward
+        );
+
+        controller.set_requested_fps_with_desired_temporal_layer(8, layers, Some(2));
+        assert_eq!(
+            controller
+                .policy()
+                .map(|policy| (policy.max, policy.desired)),
+            Some((TemporalLayer::T0, TemporalLayer::T0))
+        );
     }
 
     #[test]

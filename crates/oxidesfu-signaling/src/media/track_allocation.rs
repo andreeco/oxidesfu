@@ -22,6 +22,7 @@ pub(crate) struct EffectiveTrackAllocationChange {
 #[derive(Debug, Clone)]
 pub(crate) struct TrackAllocationStore {
     desired_quality: Arc<Mutex<HashMap<TrackAllocationKey, proto::VideoQuality>>>,
+    desired_temporal_layer: Arc<Mutex<HashMap<TrackAllocationKey, u8>>>,
     revisions: Arc<Mutex<HashMap<TrackAllocationKey, u64>>>,
     revision: Arc<AtomicU64>,
     effective_changes: tokio::sync::broadcast::Sender<EffectiveTrackAllocationChange>,
@@ -32,6 +33,7 @@ impl Default for TrackAllocationStore {
         let (effective_changes, _) = tokio::sync::broadcast::channel(256);
         Self {
             desired_quality: Arc::default(),
+            desired_temporal_layer: Arc::default(),
             revisions: Arc::default(),
             revision: Arc::default(),
             effective_changes,
@@ -106,6 +108,29 @@ impl TrackAllocationStore {
         })
     }
 
+    /// Returns the allocator's desired temporal layer for one subscriber target.
+    ///
+    /// `0`, `1`, and `2` correspond to base through highest temporal enhancement layers.
+    pub(crate) fn get_desired_temporal_layer_for_track(
+        &self,
+        room: &str,
+        identity: &str,
+        track_sid: &str,
+    ) -> Option<u8> {
+        self.desired_temporal_layer
+            .lock()
+            .ok()
+            .and_then(|allocations| {
+                allocations
+                    .get(&(
+                        room.to_string(),
+                        identity.to_string(),
+                        track_sid.to_string(),
+                    ))
+                    .copied()
+            })
+    }
+
     /// Sets or clears the allocator desired quality for one subscriber target.
     pub(crate) fn set_desired_quality_for_track(
         &self,
@@ -141,8 +166,46 @@ impl TrackAllocationStore {
         }
     }
 
+    /// Sets or clears the allocator desired temporal layer for one subscriber target.
+    /// Values above temporal layer two are ignored rather than becoming an invalid policy.
+    pub(crate) fn set_desired_temporal_layer_for_track(
+        &self,
+        room: &str,
+        identity: &str,
+        track_sid: &str,
+        desired_temporal_layer: Option<u8>,
+    ) {
+        let desired_temporal_layer = desired_temporal_layer.filter(|layer| *layer <= 2);
+        let key = (
+            room.to_string(),
+            identity.to_string(),
+            track_sid.to_string(),
+        );
+        let mut changed = false;
+
+        if let Ok(mut allocations) = self.desired_temporal_layer.lock() {
+            match desired_temporal_layer {
+                Some(desired_temporal_layer) => {
+                    changed = allocations.get(&key).copied() != Some(desired_temporal_layer);
+                    if changed {
+                        allocations.insert(key.clone(), desired_temporal_layer);
+                    }
+                }
+                None => {
+                    changed = allocations.remove(&key).is_some();
+                }
+            }
+        }
+
+        if changed {
+            let revision = self.mark_changed(key.clone());
+            self.notify_effective_change(key, revision);
+        }
+    }
+
     pub(crate) fn remove_for_track(&self, room: &str, identity: &str, track_sid: &str) {
         self.set_desired_quality_for_track(room, identity, track_sid, None);
+        self.set_desired_temporal_layer_for_track(room, identity, track_sid, None);
     }
 
     pub(crate) fn remove_for_participant(&self, room: &str, identity: &str) {
@@ -215,6 +278,27 @@ mod tests {
         store.remove_for_track("room", "sub", "TR_video");
         let third = changes.recv().await.expect("removal should publish");
         assert!(third.revision > second.revision);
+    }
+
+    #[test]
+    fn desired_temporal_layer_is_target_scoped_and_validated() {
+        let store = TrackAllocationStore::default();
+        store.set_desired_temporal_layer_for_track("room", "sub-a", "TR_video", Some(1));
+        store.set_desired_temporal_layer_for_track("room", "sub-b", "TR_video", Some(2));
+        store.set_desired_temporal_layer_for_track("room", "sub-a", "TR_invalid", Some(3));
+
+        assert_eq!(
+            store.get_desired_temporal_layer_for_track("room", "sub-a", "TR_video"),
+            Some(1)
+        );
+        assert_eq!(
+            store.get_desired_temporal_layer_for_track("room", "sub-b", "TR_video"),
+            Some(2)
+        );
+        assert_eq!(
+            store.get_desired_temporal_layer_for_track("room", "sub-a", "TR_invalid"),
+            None
+        );
     }
 
     #[test]

@@ -97,7 +97,7 @@ Remaining work:
 - implement the bandwidth/layout allocator producer that writes `TrackAllocationStore` from actual receiver transport estimates and layout policy;
 - add end-to-end allocation-driven downgrade/upgrade coverage once that producer exists.
 
-### 2. Temporal target state is implemented; allocator temporal intent remains
+### 2. Temporal target state and allocator temporal intent are plumbed; producer remains
 
 `SubscriberVideoTemporalController` is reader-local state in each `ForwardTarget`. For a requested FPS and receiver-observed temporal cadence it derives an explicit `TemporalLayerPolicy` with `max` and `desired`, admits only temporal IDs at or below that maximum, and records the highest currently forwarded temporal layer. A policy reduction clamps the current state without resetting spatial source selection or RTP rewrite history.
 
@@ -112,9 +112,11 @@ Covered deterministic tests:
 
 The native Rust SDK FPS-isolation contract also passes with the controller in the production reader.
 
+`TrackAllocationStore` now also carries a bounded target-local desired temporal layer (`T0`–`T2`). The reader merges it with the FPS-derived maximum, clamps it to that maximum, and drops only enhancement layers above the allocator target. The default remains `desired = max` when no allocation is present.
+
 Remaining work:
 
-- extend allocator output so it can set an independent desired temporal target, rather than deriving `desired = max` only from `UpdateTrackSettings.fps`;
+- implement the bandwidth/layout allocator producer from real receiver transport estimates and layout policy;
 - add end-to-end allocation-driven temporal downgrade/upgrade coverage once that producer exists.
 
 ### 3. Dependency-descriptor decode targets are used for VP9/AV1 switching; end-to-end stream coverage remains
