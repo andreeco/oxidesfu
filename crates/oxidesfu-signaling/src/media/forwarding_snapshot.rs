@@ -47,6 +47,7 @@ pub(crate) struct ForwardingTargetSnapshot {
 /// Target-local spatial selector state at the end of the timer window.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct SpatialSelectionSnapshot {
+    pub(crate) source_kind: &'static str,
     pub(crate) maximum: &'static str,
     pub(crate) desired: &'static str,
     pub(crate) current: Option<&'static str>,

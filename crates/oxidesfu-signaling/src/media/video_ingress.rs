@@ -35,11 +35,22 @@ impl LayerPolicy {
     }
 }
 
+/// Identifies whether spatial layers are separate source streams or packets inside one scalable
+/// source stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VideoSourceKind {
+    /// Independent simulcast SSRC/RID sources; policy selects one spatial source.
+    Simulcast,
+    /// A single VP9/AV1 scalable SSRC; policy must not be mistaken for source selection.
+    SingleScalable,
+}
+
 /// Metadata resolved by the forwarding reader before a target-local decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct LayerPacketMetadata {
     pub(crate) ssrc: u32,
     pub(crate) spatial: Option<SpatialLayer>,
+    pub(crate) source_kind: VideoSourceKind,
     pub(crate) is_decodable_switch_point: bool,
 }
 
@@ -85,6 +96,11 @@ pub(crate) struct SubscriberVideoLayerSelector {
     fallback_locked: bool,
     pli_ticks: u8,
     remaining_pli_requests: u8,
+    single_scalable_active: bool,
+    single_scalable_current: Option<u32>,
+    single_scalable_seen: Option<u32>,
+    single_scalable_seen_age_ticks: u8,
+    single_scalable_current_age_ticks: u8,
 }
 
 impl Default for SubscriberVideoLayerSelector {
@@ -119,15 +135,33 @@ impl SubscriberVideoLayerSelector {
             fallback_locked: false,
             pli_ticks: 0,
             remaining_pli_requests: Self::MAX_KEYFRAME_REQUESTS_PER_ACQUISITION,
+            single_scalable_active: false,
+            single_scalable_current: None,
+            single_scalable_seen: None,
+            single_scalable_seen_age_ticks: u8::MAX,
+            single_scalable_current_age_ticks: u8::MAX,
         }
     }
 
     pub(crate) fn selected_ssrc(&self) -> Option<u32> {
-        self.current.map(|(ssrc, _)| ssrc)
+        self.single_scalable_current
+            .or_else(|| self.current.map(|(ssrc, _)| ssrc))
     }
 
+    /// Returns the selected simulcast spatial source, if any.
+    ///
+    /// A selected single-SSRC scalable source deliberately returns `None`: its packet-level
+    /// decode targets are not interchangeable with simulcast source selection.
     pub(crate) fn current_spatial(&self) -> Option<SpatialLayer> {
         self.current.map(|(_, spatial)| spatial)
+    }
+
+    pub(crate) const fn source_kind(&self) -> VideoSourceKind {
+        if self.single_scalable_active {
+            VideoSourceKind::SingleScalable
+        } else {
+            VideoSourceKind::Simulcast
+        }
     }
 
     pub(crate) const fn policy(&self) -> LayerPolicy {
@@ -147,6 +181,13 @@ impl SubscriberVideoLayerSelector {
     }
 
     pub(crate) fn acquisition_state(&self) -> LayerAcquisitionState {
+        if self.single_scalable_active {
+            return if self.single_scalable_current.is_some() {
+                LayerAcquisitionState::Stable
+            } else {
+                LayerAcquisitionState::WaitingForDesired
+            };
+        }
         if self.fallback_locked {
             LayerAcquisitionState::FallbackLocked
         } else if self.fallback_started {
@@ -200,6 +241,10 @@ impl SubscriberVideoLayerSelector {
         packet: LayerPacketMetadata,
         dependency_descriptor_metadata_available: bool,
     ) -> VideoIngressDecision {
+        if packet.source_kind == VideoSourceKind::SingleScalable {
+            return self.observe_single_scalable_packet(packet);
+        }
+
         let Some(spatial) = packet.spatial else {
             return if self.current.is_some_and(|(ssrc, _)| ssrc == packet.ssrc) {
                 VideoIngressDecision::Forward {
@@ -273,6 +318,9 @@ impl SubscriberVideoLayerSelector {
     /// The caller owns RTCP I/O and must keep this separate from downstream PLI/FIR relay.
     pub(crate) fn on_timer(&mut self) -> Option<KeyframeRequest> {
         self.expire_stale_sources();
+        if self.single_scalable_active {
+            return self.on_single_scalable_timer();
+        }
         if self.fallback_locked {
             return None;
         }
@@ -313,7 +361,73 @@ impl SubscriberVideoLayerSelector {
         Some(KeyframeRequest { media_ssrc: ssrc })
     }
 
+    fn observe_single_scalable_packet(
+        &mut self,
+        packet: LayerPacketMetadata,
+    ) -> VideoIngressDecision {
+        self.single_scalable_active = true;
+        self.single_scalable_seen = Some(packet.ssrc);
+        self.single_scalable_seen_age_ticks = 0;
+
+        if self.single_scalable_current == Some(packet.ssrc) {
+            self.single_scalable_current_age_ticks = 0;
+            return VideoIngressDecision::Forward {
+                selected_ssrc_changed: false,
+            };
+        }
+        if self.single_scalable_current.is_some() {
+            return VideoIngressDecision::DropNonSelectedSsrc;
+        }
+        if !packet.is_decodable_switch_point {
+            return VideoIngressDecision::DropWaitingForKeyframe;
+        }
+
+        self.single_scalable_current = Some(packet.ssrc);
+        self.single_scalable_current_age_ticks = 0;
+        self.acquisition_ticks = 0;
+        self.pli_ticks = 0;
+        self.remaining_pli_requests = Self::MAX_KEYFRAME_REQUESTS_PER_ACQUISITION;
+        VideoIngressDecision::Forward {
+            selected_ssrc_changed: true,
+        }
+    }
+
+    fn on_single_scalable_timer(&mut self) -> Option<KeyframeRequest> {
+        if self.single_scalable_current.is_some() {
+            return None;
+        }
+        self.acquisition_ticks = self.acquisition_ticks.saturating_add(1);
+        if self.pli_ticks > 0 {
+            self.pli_ticks -= 1;
+            return None;
+        }
+        if self.remaining_pli_requests == 0 {
+            return None;
+        }
+
+        let media_ssrc = self.single_scalable_seen?;
+        self.pli_ticks = Self::KEYFRAME_RETRY_TICKS.saturating_sub(1);
+        self.remaining_pli_requests -= 1;
+        Some(KeyframeRequest { media_ssrc })
+    }
+
     fn expire_stale_sources(&mut self) {
+        if self.single_scalable_active {
+            self.single_scalable_seen_age_ticks =
+                self.single_scalable_seen_age_ticks.saturating_add(1);
+            if self.single_scalable_seen_age_ticks >= Self::SOURCE_STALE_TICKS {
+                self.single_scalable_seen = None;
+            }
+            if self.single_scalable_current.is_some() {
+                self.single_scalable_current_age_ticks =
+                    self.single_scalable_current_age_ticks.saturating_add(1);
+                if self.single_scalable_current_age_ticks >= Self::SOURCE_STALE_TICKS {
+                    self.single_scalable_current = None;
+                }
+            }
+            return;
+        }
+
         for index in 0..self.rtp_seen_ssrc.len() {
             self.seen_age_ticks[index] = self.seen_age_ticks[index].saturating_add(1);
             if self.seen_age_ticks[index] >= Self::SOURCE_STALE_TICKS {
@@ -347,13 +461,14 @@ impl SubscriberVideoLayerSelector {
 mod tests {
     use super::{
         KeyframeRequest, LayerAcquisitionState, LayerPacketMetadata, LayerPolicy, SpatialLayer,
-        SubscriberVideoLayerSelector, VideoIngressDecision,
+        SubscriberVideoLayerSelector, VideoIngressDecision, VideoSourceKind,
     };
 
     fn packet(ssrc: u32, spatial: SpatialLayer, keyframe: bool) -> LayerPacketMetadata {
         LayerPacketMetadata {
             ssrc,
             spatial: Some(spatial),
+            source_kind: VideoSourceKind::Simulcast,
             is_decodable_switch_point: keyframe,
         }
     }
@@ -385,6 +500,89 @@ mod tests {
             selector.acquisition_state(),
             LayerAcquisitionState::FallbackLocked
         );
+    }
+
+    #[test]
+    fn single_scalable_source_acquires_without_conflating_packet_spatial_policy() {
+        let mut selector = SubscriberVideoLayerSelector::new(LayerPolicy::fixed(SpatialLayer::Low));
+        let delta = LayerPacketMetadata {
+            ssrc: 10,
+            spatial: None,
+            source_kind: VideoSourceKind::SingleScalable,
+            is_decodable_switch_point: false,
+        };
+        assert_eq!(
+            selector.observe_packet(delta),
+            VideoIngressDecision::DropWaitingForKeyframe
+        );
+        assert_eq!(
+            selector.observe_packet(LayerPacketMetadata {
+                is_decodable_switch_point: true,
+                ..delta
+            }),
+            VideoIngressDecision::Forward {
+                selected_ssrc_changed: true
+            }
+        );
+        assert_eq!(selector.selected_ssrc(), Some(10));
+        assert_eq!(selector.current_spatial(), None);
+        assert_eq!(selector.source_kind(), VideoSourceKind::SingleScalable);
+        assert_eq!(
+            selector.observe_packet(delta),
+            VideoIngressDecision::Forward {
+                selected_ssrc_changed: false
+            }
+        );
+    }
+
+    #[test]
+    fn stale_single_scalable_source_requires_a_fresh_decodable_boundary_to_replace() {
+        let mut selector =
+            SubscriberVideoLayerSelector::new(LayerPolicy::fixed(SpatialLayer::High));
+        let first_source = LayerPacketMetadata {
+            ssrc: 10,
+            spatial: None,
+            source_kind: VideoSourceKind::SingleScalable,
+            is_decodable_switch_point: true,
+        };
+        assert_eq!(
+            selector.observe_packet(first_source),
+            VideoIngressDecision::Forward {
+                selected_ssrc_changed: true
+            }
+        );
+
+        let replacement_delta = LayerPacketMetadata {
+            ssrc: 20,
+            is_decodable_switch_point: false,
+            ..first_source
+        };
+        assert_eq!(
+            selector.observe_packet(replacement_delta),
+            VideoIngressDecision::DropNonSelectedSsrc
+        );
+        for _ in 0..SubscriberVideoLayerSelector::SOURCE_STALE_TICKS {
+            assert_eq!(
+                selector.observe_packet(replacement_delta),
+                VideoIngressDecision::DropNonSelectedSsrc
+            );
+            let _ = selector.on_timer();
+        }
+        assert_eq!(selector.selected_ssrc(), None);
+        assert_eq!(
+            selector.observe_packet(replacement_delta),
+            VideoIngressDecision::DropWaitingForKeyframe
+        );
+        assert_eq!(
+            selector.observe_packet(LayerPacketMetadata {
+                is_decodable_switch_point: true,
+                ..replacement_delta
+            }),
+            VideoIngressDecision::Forward {
+                selected_ssrc_changed: true
+            }
+        );
+        assert_eq!(selector.selected_ssrc(), Some(20));
     }
 
     #[test]

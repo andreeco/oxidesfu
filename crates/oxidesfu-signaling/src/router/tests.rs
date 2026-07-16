@@ -5625,33 +5625,23 @@ fn vp9_temporal_layer_id_from_payload_rejects_out_of_range_tid() {
 }
 
 #[test]
-fn inferred_scalable_packet_quality_uses_known_codec_spatial_metadata() {
-    assert_eq!(
-        super::session::inferred_scalable_packet_quality(Some("video/vp9"), Some(0), false),
-        Some(proto::VideoQuality::Low)
-    );
-    assert_eq!(
-        super::session::inferred_scalable_packet_quality(Some("video/AV1"), Some(1), false),
-        Some(proto::VideoQuality::Medium)
-    );
-    assert_eq!(
-        super::session::inferred_scalable_packet_quality(Some("video/vp9"), Some(2), false),
-        Some(proto::VideoQuality::High)
-    );
-    assert_eq!(
-        super::session::inferred_scalable_packet_quality(Some("video/vp9"), None, false),
-        Some(proto::VideoQuality::High),
-        "a known single scalable source must not be dropped as unknown simulcast input"
-    );
-    assert_eq!(
-        super::session::inferred_scalable_packet_quality(Some("video/vp8"), Some(0), false),
-        None
-    );
-    assert_eq!(
-        super::session::inferred_scalable_packet_quality(Some("video/vp9"), Some(0), true),
-        None,
-        "advertised simulcast mappings remain authoritative"
-    );
+fn single_scalable_source_requires_known_scalable_codec_without_simulcast_mapping() {
+    assert!(super::session::is_single_scalable_source(
+        Some("video/vp9"),
+        false
+    ));
+    assert!(super::session::is_single_scalable_source(
+        Some("video/AV1"),
+        false
+    ));
+    assert!(!super::session::is_single_scalable_source(
+        Some("video/vp8"),
+        false
+    ));
+    assert!(!super::session::is_single_scalable_source(
+        Some("video/vp9"),
+        true
+    ));
 }
 
 #[test]

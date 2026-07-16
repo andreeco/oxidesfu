@@ -6,7 +6,7 @@ use std::{
 use super::*;
 use crate::media::{
     ForwardTrackKey, LayerAcquisitionState, LayerPacketMetadata, LayerPolicy, SpatialLayer,
-    SubscriberVideoLayerSelector, VideoIngressDecision,
+    SubscriberVideoLayerSelector, VideoIngressDecision, VideoSourceKind,
 };
 use forwarding_snapshot::{
     DownstreamFeedbackSnapshot, ForwardingResultSnapshot, ForwardingSnapshot,
@@ -1266,6 +1266,13 @@ const fn spatial_layer_name(layer: SpatialLayer) -> &'static str {
     }
 }
 
+const fn video_source_kind_name(source_kind: VideoSourceKind) -> &'static str {
+    match source_kind {
+        VideoSourceKind::Simulcast => "simulcast",
+        VideoSourceKind::SingleScalable => "single_scalable",
+    }
+}
+
 const fn temporal_layer_name(layer: TemporalLayer) -> &'static str {
     match layer {
         TemporalLayer::T0 => "t0",
@@ -1327,6 +1334,7 @@ fn record_forwarding_snapshot(
             ForwardingTargetSnapshot {
                 subscriber_identity: target.subscriber_identity().to_string(),
                 spatial: SpatialSelectionSnapshot {
+                    source_kind: video_source_kind_name(target.video_layer_selector.source_kind()),
                     maximum: spatial_layer_name(spatial_policy.max),
                     desired: spatial_layer_name(spatial_policy.desired),
                     current: target
@@ -2020,32 +2028,22 @@ pub(crate) fn packet_video_quality_for_track(
     None
 }
 
-/// Resolves a quality identity for a known scalable codec when signaling did not advertise a
-/// simulcast SSRC/RID catalog. This is deliberately not a generic unknown-layer fallback.
+/// Returns whether a known scalable codec has one source stream rather than an advertised
+/// simulcast SSRC/RID catalog.
 ///
-/// VP9/AV1 scalable streams can carry multiple spatial layers on one primary SSRC. Their parsed
-/// spatial IDs are ordered base-to-enhancement (`0`, `1`, `2+`). A stream without a layer ID is a
-/// single known source and is treated as high rather than being silently black-holed as ambiguous
-/// simulcast input.
-#[allow(deprecated)]
-pub(crate) fn inferred_scalable_packet_quality(
+/// Spatial packets within this source are decoder targets, not alternate source streams. Their
+/// filtering therefore belongs to scalable decode-target policy, not the simulcast source selector.
+pub(crate) fn is_single_scalable_source(
     codec_mime: Option<&str>,
-    spatial_id: Option<u8>,
     has_advertised_layer_mapping: bool,
-) -> Option<proto::VideoQuality> {
+) -> bool {
     if has_advertised_layer_mapping {
-        return None;
+        return false;
     }
 
-    let codec_mime = codec_mime?.trim().to_ascii_lowercase();
-    if !codec_mime.contains("vp9") && !codec_mime.contains("av1") {
-        return None;
-    }
-
-    Some(match spatial_id {
-        Some(0) => proto::VideoQuality::Low,
-        Some(1) => proto::VideoQuality::Medium,
-        Some(_) | None => proto::VideoQuality::High,
+    codec_mime.is_some_and(|mime| {
+        let mime = mime.trim().to_ascii_lowercase();
+        mime.contains("vp9") || mime.contains("av1")
     })
 }
 
@@ -6797,6 +6795,7 @@ async fn forward_publisher_remote_track(
             match recv_event {
                 Ok(oxidesfu_rtc::RemoteTrackEvent::RtpPacket(packet)) => {
                     let mut packet_video_quality: Option<proto::VideoQuality> = None;
+                    let mut packet_source_kind = VideoSourceKind::Simulcast;
                     let mut effective_video_ssrc = packet.header.ssrc;
                     if is_video_track {
                         let incoming_ssrc = packet.header.ssrc;
@@ -6931,16 +6930,12 @@ async fn forward_publisher_remote_track(
                         let incoming_codec_mime = video_ssrc_codec_mime
                             .get(&incoming_ssrc)
                             .and_then(|mime| mime.as_deref());
-                        let packet_spatial_layer_hint = remote_track
-                            .last_observed_spatial_layer_for_ssrc(incoming_ssrc)
-                            .or_else(|| {
-                                incoming_codec_mime.and_then(|mime| {
-                                    mime.to_ascii_lowercase()
-                                        .contains("vp9")
-                                        .then(|| vp9_spatial_layer_id_from_payload(&packet.payload))
-                                        .flatten()
-                                })
-                            });
+                        packet_source_kind = is_single_scalable_source(
+                            incoming_codec_mime,
+                            !layer_quality_by_ssrc.is_empty() || !layer_quality_by_rid.is_empty(),
+                        )
+                        .then_some(VideoSourceKind::SingleScalable)
+                        .unwrap_or(VideoSourceKind::Simulcast);
                         packet_video_quality = packet_video_quality_for_track(
                             incoming_ssrc,
                             video_ssrc_rids
@@ -6948,15 +6943,7 @@ async fn forward_publisher_remote_track(
                                 .and_then(|rid| rid.as_deref()),
                             &layer_quality_by_ssrc,
                             &layer_quality_by_rid,
-                        )
-                        .or_else(|| {
-                            inferred_scalable_packet_quality(
-                                incoming_codec_mime,
-                                packet_spatial_layer_hint,
-                                !layer_quality_by_ssrc.is_empty()
-                                    || !layer_quality_by_rid.is_empty(),
-                            )
-                        });
+                        );
                     }
 
                     if !logged_first_rtp {
@@ -7153,23 +7140,22 @@ async fn forward_publisher_remote_track(
                                 desired: SpatialLayer::from_quality(desired_quality),
                             };
                             target.video_layer_selector.set_policy(policy);
-                            let layer_selection =
-                                target
-                                    .video_layer_selector
-                                    .observe_packet_with_dependency_descriptor_metadata(
-                                        LayerPacketMetadata {
-                                            ssrc: effective_video_ssrc,
-                                            spatial: packet_video_quality
-                                                .map(SpatialLayer::from_quality),
-                                            is_decodable_switch_point:
-                                                video_is_decodable_switch_point_with_dependency_descriptor(
-                                                    packet_codec_mime,
-                                                    &packet.payload,
-                                                    packet_descriptor_switch_point,
-                                                ),
-                                        },
-                                        packet_descriptor_switch_point.is_some(),
-                                    );
+                            let layer_selection = target
+                                .video_layer_selector
+                                .observe_packet_with_dependency_descriptor_metadata(
+                                LayerPacketMetadata {
+                                    ssrc: effective_video_ssrc,
+                                    spatial: packet_video_quality.map(SpatialLayer::from_quality),
+                                    source_kind: packet_source_kind,
+                                    is_decodable_switch_point:
+                                        video_is_decodable_switch_point_with_dependency_descriptor(
+                                            packet_codec_mime,
+                                            &packet.payload,
+                                            packet_descriptor_switch_point,
+                                        ),
+                                },
+                                packet_descriptor_switch_point.is_some(),
+                            );
                             match layer_selection {
                                 VideoIngressDecision::Forward {
                                     selected_ssrc_changed,

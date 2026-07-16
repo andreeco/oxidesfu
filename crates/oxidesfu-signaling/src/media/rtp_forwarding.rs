@@ -812,7 +812,7 @@ mod tests {
         use crate::{
             media::{
                 LayerPacketMetadata, LayerPolicy, SpatialLayer, SubscriberVideoLayerSelector,
-                VideoIngressDecision,
+                VideoIngressDecision, VideoSourceKind,
             },
             router::session::video_is_decodable_switch_point_with_dependency_descriptor,
         };
@@ -837,6 +837,7 @@ mod tests {
                 selector.observe_packet(LayerPacketMetadata {
                     ssrc: source_low,
                     spatial: Some(SpatialLayer::Low),
+                    source_kind: VideoSourceKind::Simulcast,
                     is_decodable_switch_point: true,
                 }),
                 VideoIngressDecision::Forward {
@@ -864,6 +865,7 @@ mod tests {
                 selector.observe_packet(LayerPacketMetadata {
                     ssrc: source_high,
                     spatial: Some(SpatialLayer::High),
+                    source_kind: VideoSourceKind::Simulcast,
                     is_decodable_switch_point: false,
                 }),
                 VideoIngressDecision::DropWaitingForKeyframe,
@@ -881,6 +883,7 @@ mod tests {
                 selector.observe_packet(LayerPacketMetadata {
                     ssrc: source_high,
                     spatial: Some(SpatialLayer::High),
+                    source_kind: VideoSourceKind::Simulcast,
                     is_decodable_switch_point: true,
                 }),
                 VideoIngressDecision::Forward {

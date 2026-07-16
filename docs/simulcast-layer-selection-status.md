@@ -59,7 +59,7 @@ A browser publisher can initially register a generic video track before the firs
 
 `oxidesfu-rtc::PeerConnection` now treats `video/vp9` as a first-class forwarding codec: it uses the pinned RTC's VP9 profile 0 (`PT 98`, `profile-id=0`) and constrains both dual-PC and single-PC forwarding transceivers to VP9 when the resolved track requires it. The browser harness explicitly requests `VP9` with `L3T3_KEY` for the scalable-video contract.
 
-The first fresh-server Firefox run exposed one further reader integration issue: a one-SSRC VP9 SVC source has no simulcast SSRC/RID quality catalog, so every packet was counted as `drop_unknown_layer`. The reader now derives an explicit quality from known VP9/AV1 scalable spatial metadata (`0` low, `1` medium, `2+` high); a known single scalable source with no spatial ID is explicitly high. This fallback is limited to VP9/AV1 without advertised layer mappings, so ordinary ambiguous simulcast input remains observable and is not silently selected.
+The first fresh-server Firefox run exposed one further reader integration issue: a one-SSRC VP9 SVC source has no simulcast SSRC/RID quality catalog, so every packet was counted as `drop_unknown_layer`. The reader now classifies known VP9/AV1 tracks without an advertised SSRC/RID catalog as an explicit **single scalable source**. This mode acquires one source only on a decodable boundary, keeps its source liveness independent of packet-level spatial IDs, and requires a new decodable boundary after a stale source SSRC is replaced. It deliberately does **not** reinterpret VP9/AV1 packet spatial IDs as simulcast source quality: those are scalable decode targets and require descriptor-aware decode-target forwarding rather than the source selector. Ambiguous non-scalable input remains observable and is not silently selected.
 
 ### Decodable source-switch boundaries
 
@@ -83,7 +83,9 @@ Production selector tests cover:
 - bounded fallback to an observed permitted source;
 - high → low → high transitions remain boundary-gated;
 - selector target state is isolated between subscribers;
-- a persistently unusable target has a bounded PLI request budget.
+- a persistently unusable target has a bounded PLI request budget;
+- a one-SSRC scalable source is acquired at a decodable boundary without conflating packet spatial metadata with simulcast policy;
+- a stale one-SSRC scalable source cannot be replaced until the new source reaches a fresh decodable boundary.
 
 The native SDK contract in `crates/oxidesfu-test/src/probes/media.rs` now additionally verifies that:
 
@@ -140,6 +142,7 @@ Live Firefox validation now passes against a freshly built local OxideSFU server
 
 Remaining work:
 
+- implement descriptor-aware decode-target forwarding for one-SSRC VP9/AV1 scalable sources; the source selector now intentionally forwards the selected source rather than pretending packet spatial IDs are alternate simulcast sources;
 - add native SDK scalable-stream coverage when a deterministic dependency-descriptor publisher fixture is available.
 
 ### 4. Source liveness expiry is complete; decodability availability remains limited
@@ -194,14 +197,14 @@ cargo test -p oxidesfu-test \
   -- --nocapture
 ```
 
-The focused RTC suite passed with `38 passed`, including the VP9-only forwarding SDP regression; the focused signaling suite passed with `523 passed, 3 ignored`, including scalable quality inference. The browser harness production build passes, and a fresh-server Firefox run passed all three receiver-counter contracts, including the VP9 SVC quality-churn contract. Focused native SDK quality-transition, concurrent spatial-isolation, and concurrent FPS-isolation contracts passed serially. `cargo test --workspace` also passed earlier (`115 passed, 7 ignored`, plus passing doctests). `cargo clippy --workspace --all-targets -- -D warnings` remains blocked by pre-existing diagnostics across signaling test/support code; this slice does not change that broader baseline.
+The focused RTC suite passed with `38 passed`, including the VP9-only forwarding SDP regression; the focused signaling suite now passes with `525 passed, 3 ignored`, including single-scalable acquisition and stale-source replacement regressions. The dependency-descriptor-gated VP9/AV1 RTP-continuity regression passes. The browser harness production build passes, and a second fresh-server Firefox run passed all three receiver-counter contracts, including the VP9 SVC quality-churn contract; one preceding run had a non-reproducing chat/video receiver-window timing failure. Focused native SDK quality-transition, concurrent spatial-isolation, and concurrent FPS-isolation contracts passed serially. `cargo test --workspace` also passed earlier (`115 passed, 7 ignored`, plus passing doctests). `cargo clippy --workspace --all-targets -- -D warnings` remains blocked by pre-existing diagnostics across signaling test/support code; this slice does not change that broader baseline.
 
 ## Completion criteria
 
 This work should be called complete only when:
 
-1. source switching is proven decodable through a native SDK scalable VP9/AV1 fixture where applicable; the Firefox VP9 SVC browser contract now passes against a fresh server build;
-2. source availability, fallback, and retry behavior are bounded and observable, including decoder-usability semantics for scalable streams;
+1. simulcast source switching is proven decodable through a native SDK scalable VP9/AV1 fixture where applicable, and one-SSRC scalable sources apply descriptor-aware decode-target forwarding; the Firefox VP9 SVC browser contract now passes against a fresh server build;
+2. source availability, fallback, and retry behavior are bounded and observable, including decoder-usability semantics for simulcast and scalable streams;
 3. observability exports selector suppression/receiver-feedback counts, wire-byte rates, and a machine-readable profiler snapshot;
 4. concurrent real subscribers prove independent low/high decoded dimensions and isolated updates;
 5. a real paired Go/Oxide run captures comparable post-warm-up client-observed per-track delivery evidence and any needed server correlation; and
