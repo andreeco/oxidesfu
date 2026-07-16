@@ -7571,6 +7571,35 @@ async fn unsupported_bound_video_track_emits_one_error_and_is_removed() {
 }
 
 #[tokio::test]
+async fn single_pc_sender_removal_requests_renegotiation_without_a_server_offer() {
+    let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    session::signal_single_pc_sender_removal_negotiation(
+        "single-pc-sender-removal-room",
+        "subscriber",
+        &outbound_tx,
+    )
+    .await
+    .expect("single-PC sender removal should request renegotiation");
+
+    let response = outbound_rx
+        .recv()
+        .await
+        .expect("single-PC sender removal should signal a response");
+    let Some(proto::signal_response::Message::MediaSectionsRequirement(requirement)) =
+        response.message
+    else {
+        panic!("single-PC sender removal must not emit a server offer");
+    };
+    assert_eq!(requirement.num_audios, 0);
+    assert_eq!(requirement.num_videos, 0);
+    assert!(
+        outbound_rx.try_recv().is_err(),
+        "single-PC sender removal should emit one renegotiation request"
+    );
+}
+
+#[tokio::test]
 async fn dual_pc_subscriber_answer_correlates_vp8_only_mid_to_h264_forward_track() {
     let state = state();
     let room = "dual-pc-answer-bind-correlation-room";
@@ -8827,13 +8856,16 @@ a=sendonly\r\n"
 
     cleanup_participant_runtime_state(&state, "room", "publisher-c2", true).await;
 
-    let cleanup_offer = subscriber_outbound_rx
+    let cleanup_renegotiation = subscriber_outbound_rx
         .try_recv()
-        .expect("combined-PC cleanup should emit a server offer");
-    assert!(matches!(
-        cleanup_offer.message,
-        Some(proto::signal_response::Message::Offer(_))
-    ));
+        .expect("single-PC cleanup should request renegotiation");
+    let Some(proto::signal_response::Message::MediaSectionsRequirement(requirement)) =
+        cleanup_renegotiation.message
+    else {
+        panic!("single-PC cleanup must not emit a server offer");
+    };
+    assert_eq!(requirement.num_audios, 0);
+    assert_eq!(requirement.num_videos, 0);
 
     assert!(
         state

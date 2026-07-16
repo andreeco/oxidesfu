@@ -1675,10 +1675,8 @@ async fn signal_consolidated_forwarding_cleanup_negotiation(
         let _ = match connection_kind {
             MediaForwardingConnectionKind::SinglePcPublisher => {
                 session::signal_single_pc_sender_removal_negotiation(
-                    state,
                     room_name,
                     &subscriber_identity,
-                    &subscriber_pc,
                     &subscriber_outbound_tx,
                 )
                 .await
@@ -1790,10 +1788,8 @@ async fn remove_orphaned_forward_tracks_for_departing_publisher(
         match connection_kind {
             MediaForwardingConnectionKind::SinglePcPublisher => {
                 let _ = session::signal_single_pc_sender_removal_negotiation(
-                    state,
                     room_name,
                     &subscriber_identity,
-                    &subscriber_pc,
                     &subscriber_outbound_tx,
                 )
                 .await;

@@ -4145,10 +4145,8 @@ async fn remove_subscriber_media_forwarding_for_track_with_negotiation(
 
     if connection_kind == MediaForwardingConnectionKind::SinglePcPublisher {
         signal_single_pc_sender_removal_negotiation(
-            state,
             room_name,
             subscriber_identity,
-            &subscriber_pc,
             &subscriber_outbound_tx,
         )
         .await
@@ -8669,22 +8667,25 @@ async fn emit_claimed_subscriber_forwarding_offer(
 }
 
 pub(crate) async fn signal_single_pc_sender_removal_negotiation(
-    state: &SignalState,
     room_name: &str,
     subscriber_identity: &str,
-    peer_connection: &SharedPeerConnection,
     outbound_tx: &OutboundSignalSender,
 ) -> oxidesfu_rtc::RtcResult<()> {
-    signal_server_offer_with_offer_id(
-        state,
-        &state.subscriber_offer_ids,
-        room_name,
+    let send_result = outbound_tx.send(proto::SignalResponse {
+        message: Some(proto::signal_response::Message::MediaSectionsRequirement(
+            proto::MediaSectionsRequirement {
+                num_audios: 0,
+                num_videos: 0,
+            },
+        )),
+    });
+    tracing::debug!(
+        room = %room_name,
         subscriber_identity,
-        peer_connection,
-        rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Video,
-        outbound_tx,
-    )
-    .await
+        sent = send_result.is_ok(),
+        "single_pc_sender_removal_renegotiation_requested"
+    );
+    Ok(())
 }
 
 async fn signal_server_offer_with_offer_id(
