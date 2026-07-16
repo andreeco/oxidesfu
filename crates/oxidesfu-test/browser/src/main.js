@@ -151,7 +151,16 @@ try {
     publishedMediaTrack = mediaTrack;
     const track = new LocalVideoTrack(mediaTrack, undefined, true);
     ready.textContent = 'publishing-video';
-    await room.localParticipant.publishTrack(track, { simulcast: codec !== 'vp9' });
+    await room.localParticipant.publishTrack(
+      track,
+      codec === 'vp9' && scalabilityMode === 'L3T3_KEY'
+        ? {
+            simulcast: false,
+            videoCodec: 'vp9',
+            scalabilityMode: 'L3T3_KEY',
+          }
+        : { simulcast: true },
+    );
   }
 
   window.oxidesfuSetQuality = (quality) => {

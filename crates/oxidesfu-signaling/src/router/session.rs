@@ -6322,13 +6322,16 @@ async fn forward_publisher_remote_track(
 
     let forward_tracks = forward_tracks.clone();
     let media_forwarding = media_forwarding.clone();
+    let pending_media_section_requests = pending_media_section_requests.clone();
     let media_subscriptions = media_subscriptions.clone();
     let peer_connections = peer_connections.clone();
+    let subscribe_permissions = subscribe_permissions.clone();
     let auto_subscribe_preferences = auto_subscribe_preferences.clone();
     let track_settings = track_settings.clone();
     let track_allocations = track_allocations.clone();
     let rooms = rooms.clone();
     let rtp_forwarding = rtp_forwarding.clone();
+    let subscriber_offer_ids = subscriber_offer_ids.clone();
     let signal_connections = signal_connections.clone();
     let publisher_subscription_active_pairs = state.publisher_subscription_active_pairs();
     let state = state.clone();
@@ -6775,6 +6778,86 @@ async fn forward_publisher_remote_track(
                         }
                         if !video_ssrc_codec_mime.contains_key(&incoming_ssrc) {
                             let codec_mime = remote_track.codec_mime_for_ssrc(incoming_ssrc).await;
+                            if let Some(codec_mime) = codec_mime.as_deref() {
+                                let normalized_mime = codec_mime.trim().to_ascii_lowercase();
+                                let primary_video_codec = normalized_mime.starts_with("video/")
+                                    && !normalized_mime.contains("rtx")
+                                    && !normalized_mime.contains("red")
+                                    && !normalized_mime.contains("ulpfec");
+                                if primary_video_codec
+                                    && !track_info.mime_type.eq_ignore_ascii_case(&normalized_mime)
+                                {
+                                    match rooms.set_participant_track_mime_type(
+                                        &room_name,
+                                        &publisher_identity,
+                                        &track_sid,
+                                        &normalized_mime,
+                                    ) {
+                                        Ok(participant) => {
+                                            if let Some(updated_track) = participant
+                                                .tracks
+                                                .iter()
+                                                .find(|track| track.sid == track_sid)
+                                                .cloned()
+                                            {
+                                                track_info = updated_track;
+                                            }
+                                            state.updates.broadcast_update(&room_name, participant);
+                                            rebuild_forwarding_tracks_after_runtime_codec_change(
+                                                &state,
+                                                &room_name,
+                                                &publisher_identity,
+                                                &track_sid,
+                                            )
+                                            .await;
+                                            if let Err(error) =
+                                                ensure_subscriber_forwarding_from_parts(
+                                                    &state,
+                                                    &peer_connections,
+                                                    &rooms,
+                                                    &media_forwarding,
+                                                    &pending_media_section_requests,
+                                                    &media_subscriptions,
+                                                    &subscribe_permissions,
+                                                    &auto_subscribe_preferences,
+                                                    &forward_tracks,
+                                                    &subscriber_offer_ids,
+                                                    &signal_connections,
+                                                    &room_name,
+                                                    &publisher_identity,
+                                                    &track_info,
+                                                )
+                                                .await
+                                            {
+                                                tracing::warn!(
+                                                    room = %room_name,
+                                                    publisher_identity = %publisher_identity,
+                                                    track_sid = %track_sid,
+                                                    codec_mime = %normalized_mime,
+                                                    error = %error,
+                                                    "failed_to_rebuild_forwarding_after_runtime_codec_change"
+                                                );
+                                            }
+                                            // The next RTP packet observes the replacement target
+                                            // set. The triggering packet must not be sent through a
+                                            // stale sender negotiated for the prior codec.
+                                            video_ssrc_codec_mime.insert(
+                                                incoming_ssrc,
+                                                Some(codec_mime.to_string()),
+                                            );
+                                            continue;
+                                        }
+                                        Err(error) => tracing::warn!(
+                                            room = %room_name,
+                                            publisher_identity = %publisher_identity,
+                                            track_sid = %track_sid,
+                                            codec_mime = %normalized_mime,
+                                            error = %error,
+                                            "failed_to_reconcile_runtime_track_codec"
+                                        ),
+                                    }
+                                }
+                            }
                             video_ssrc_codec_mime.insert(incoming_ssrc, codec_mime);
                         }
                         if !video_ssrc_is_repair.contains_key(&incoming_ssrc) {

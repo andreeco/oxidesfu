@@ -53,6 +53,12 @@ The selector is synchronous, owns no locks, performs no async I/O, and does not 
 - applies a target-local temporal controller after spatial admission: known VP8/VP9/H265 temporal IDs are capped by an explicit maximum/desired/current temporal policy, while metadata-poor codecs retain deterministic timestamp gating;
 - passes selected source packets to the existing `SubscriberRtpForwarder`, preserving its existing outgoing SSRC, sequence-number, timestamp, retransmission, and source-history behavior.
 
+### Runtime codec reconciliation and VP9 forwarding
+
+A browser publisher can initially register a generic video track before the first primary RTP SSRC reveals its negotiated codec. The reader now reconciles that actual primary RTP codec before forwarding it: it updates the published track's MIME/codec metadata, tears down stale subscriber senders, recreates them with the resolved codec, and renegotiates before forwarding the next packet. The triggering packet is deliberately dropped rather than sending VP9 RTP through a sender negotiated as VP8.
+
+`oxidesfu-rtc::PeerConnection` now treats `video/vp9` as a first-class forwarding codec: it uses the pinned RTC's VP9 profile 0 (`PT 98`, `profile-id=0`) and constrains both dual-PC and single-PC forwarding transceivers to VP9 when the resolved track requires it. The browser harness explicitly requests `VP9` with `L3T3_KEY` for the scalable-video contract.
+
 ### Decodable source-switch boundaries
 
 The reader currently recognizes the following RTP-level source-switch starts:
@@ -130,6 +136,7 @@ The RTC integration regression now feeds stateful real RTP header-extension sequ
 
 Remaining work:
 
+- run the Firefox VP9 SVC browser contract against a freshly started OxideSFU process after the runtime codec reconciliation change; the harness build and in-process VP9 sender SDP regression pass, but this session had no running server for a live browser result;
 - add native SDK scalable-stream coverage when a deterministic dependency-descriptor publisher fixture is available.
 
 ### 4. Source liveness expiry is complete; decodability availability remains limited
@@ -184,13 +191,13 @@ cargo test -p oxidesfu-test \
   -- --nocapture
 ```
 
-The focused RTC suite passed with `36 passed`; the focused signaling suite most recently passed with `514 passed, 3 ignored`. Focused native SDK quality-transition, concurrent spatial-isolation, and concurrent FPS-isolation contracts passed serially. `cargo test --workspace` also passed (`115 passed, 7 ignored`, plus passing doctests). `cargo clippy --workspace --all-targets -- -D warnings` remains blocked by pre-existing diagnostics across `oxidesfu-api` and signaling test/support code; the forwarding-slice diagnostics fixed in commit `cb19ebf7` do not remove that broader baseline.
+The focused RTC suite passed with `38 passed`, including the VP9-only forwarding SDP regression; the focused signaling suite passed with `522 passed, 3 ignored`. The browser harness production build passes. Focused native SDK quality-transition, concurrent spatial-isolation, and concurrent FPS-isolation contracts passed serially. `cargo test --workspace` also passed earlier (`115 passed, 7 ignored`, plus passing doctests). `cargo clippy --workspace --all-targets -- -D warnings` remains blocked by pre-existing diagnostics across signaling test/support code; this slice does not change that broader baseline.
 
 ## Completion criteria
 
 This work should be called complete only when:
 
-1. source switching is proven decodable through a native SDK scalable VP9/AV1 fixture where applicable;
+1. source switching is proven decodable through a native SDK scalable VP9/AV1 fixture where applicable, and the Firefox VP9 SVC browser contract is rerun against a fresh server build;
 2. source availability, fallback, and retry behavior are bounded and observable, including decoder-usability semantics for scalable streams;
 3. observability exports selector suppression/receiver-feedback counts, wire-byte rates, and a machine-readable profiler snapshot;
 4. concurrent real subscribers prove independent low/high decoded dimensions and isolated updates;

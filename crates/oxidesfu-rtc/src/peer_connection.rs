@@ -16,7 +16,7 @@ use rtc::{
     media_stream::MediaStreamTrack,
     peer_connection::configuration::media_engine::{
         MIME_TYPE_AV1, MIME_TYPE_H264, MIME_TYPE_OPUS, MIME_TYPE_PCMA, MIME_TYPE_PCMU,
-        MIME_TYPE_VP8,
+        MIME_TYPE_VP8, MIME_TYPE_VP9,
     },
     rtp_transceiver::{
         RTCRtpTransceiverDirection, RTCRtpTransceiverInit,
@@ -211,6 +211,13 @@ impl PeerConnection {
                         sdp_fmtp_line: String::new(),
                         rtcp_feedback: vec![],
                     },
+                    "video/vp9" => RTCRtpCodec {
+                        mime_type: MIME_TYPE_VP9.to_string(),
+                        clock_rate: 90_000,
+                        channels: 0,
+                        sdp_fmtp_line: "profile-id=0".to_string(),
+                        rtcp_feedback: vec![],
+                    },
                     _ => RTCRtpCodec {
                         mime_type: MIME_TYPE_VP8.to_string(),
                         clock_rate: 90_000,
@@ -228,6 +235,12 @@ impl PeerConnection {
             return vec![RTCRtpCodecParameters {
                 rtp_codec: Self::forwarding_codec_for(RtpCodecKind::Video, Some("video/av1")),
                 payload_type: 45,
+            }];
+        }
+        if mime_type.is_some_and(|mime| mime.trim().eq_ignore_ascii_case("video/vp9")) {
+            return vec![RTCRtpCodecParameters {
+                rtp_codec: Self::forwarding_codec_for(RtpCodecKind::Video, Some("video/vp9")),
+                payload_type: 98,
             }];
         }
 
@@ -444,6 +457,13 @@ impl PeerConnection {
             transceiver
                 .set_direction(RTCRtpTransceiverDirection::Sendonly)
                 .await?;
+            let requires_explicit_video_codec_preferences = kind == RtpCodecKind::Video
+                && !mime_type.is_some_and(|mime| mime.trim().eq_ignore_ascii_case("video/h264"));
+            if requires_explicit_video_codec_preferences {
+                transceiver
+                    .set_codec_preferences(Self::forwarding_video_codec_preferences(mime_type))
+                    .await?;
+            }
             sender
                 .replace_track(local_track.clone() as Arc<dyn WebRtcTrackLocal>)
                 .await?;
@@ -1348,6 +1368,37 @@ mod tests {
         assert!(video_section.contains(
             "a=fmtp:108 level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42e01f"
         ));
+
+        forwarder.close().await.expect("forwarder should close");
+    }
+
+    #[tokio::test]
+    async fn vp9_forwarding_section_advertises_only_vp9() {
+        let forwarder = create_peer_connection()
+            .await
+            .expect("forwarder peer connection should create");
+        forwarder
+            .add_forwarding_track_with_mime(
+                "PA_publisher",
+                "TR_vp9",
+                RtpCodecKind::Video,
+                Some("video/vp9"),
+            )
+            .await
+            .expect("VP9 forwarding track should add");
+
+        let offer_sdp = forwarder.create_offer().await.expect("offer should create");
+        let video_section = offer_sdp
+            .split("m=video ")
+            .nth(1)
+            .expect("offer should contain a video section");
+
+        assert!(
+            video_section.contains("a=rtpmap:98 VP9/90000"),
+            "VP9 forwarding offer must advertise VP9 rather than silently falling back to VP8"
+        );
+        assert!(video_section.contains("a=fmtp:98 profile-id=0"));
+        assert!(!video_section.contains("a=rtpmap:96 VP8/90000"));
 
         forwarder.close().await.expect("forwarder should close");
     }
