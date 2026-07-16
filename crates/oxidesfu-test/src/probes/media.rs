@@ -1175,13 +1175,54 @@ fn rust_sdk_vp9_svc_options_construct_one_l3t3_key_encoding_and_three_spatial_la
     assert_eq!(dimensions, vec![(320, 180), (640, 360), (1280, 720)]);
 }
 
-// The native SDK exposes raw I420 and encoded access-unit capture, but not an RTP injection or
-// packet-extension API. Consequently this probe cannot construct a known VP9 packet sequence
-// whose first packet has a dependency descriptor with an active DTI Switch target. Its native
-// L3T3_KEY encoder produced no decoded low-layer frame in the bounded run below, so this remains
-// a regression contract rather than a passing default test until the SDK exposes such a fixture.
+#[test]
+fn rust_sdk_svc_dependency_descriptor_supports_a_three_spatial_layer_switch_frame() {
+    use livekit::webrtc::video_frame::{
+        DecodeTargetIndication, DependencyDescriptor, DependencyDescriptorStructure,
+        DependencyDescriptorTemplate,
+    };
+
+    let descriptor = DependencyDescriptor {
+        spatial_id: 2,
+        temporal_id: 0,
+        decode_target_indications: vec![
+            DecodeTargetIndication::NotPresent,
+            DecodeTargetIndication::NotPresent,
+            DecodeTargetIndication::Switch,
+        ],
+        frame_diffs: Vec::new(),
+        chain_diffs: Vec::new(),
+        active_decode_targets: 0b111,
+        structure: Some(DependencyDescriptorStructure {
+            structure_id: 0,
+            num_decode_targets: 3,
+            num_chains: 0,
+            decode_target_protected_by_chain: Vec::new(),
+            templates: vec![DependencyDescriptorTemplate {
+                spatial_id: 2,
+                temporal_id: 0,
+                decode_target_indications: vec![
+                    DecodeTargetIndication::NotPresent,
+                    DecodeTargetIndication::NotPresent,
+                    DecodeTargetIndication::Switch,
+                ],
+                frame_diffs: Vec::new(),
+                chain_diffs: Vec::new(),
+            }],
+        }),
+    };
+
+    descriptor
+        .validate()
+        .expect("pinned SDK should accept a three-spatial-layer switch descriptor");
+}
+
+// The pinned native SDK can now serialize dependency-descriptor metadata when it packetizes an
+// encoded VP9/AV1 access unit. A passing end-to-end SVC transition still needs a small, valid,
+// deterministic multi-spatial-layer encoded access-unit corpus; descriptor metadata cannot turn
+// a single-layer payload into decodable scalable video.
 #[tokio::test]
-#[ignore = "native SDK cannot construct a deterministic VP9 dependency-descriptor RTP switch packet"]
+#[ignore = "requires a deterministic valid layered VP9 access-unit fixture"]
 async fn rust_sdk_room_vp9_svc_quality_low_to_high_preserves_delivery_contract() {
     let _media_probe_guard = NATIVE_MEDIA_PROBE_LOCK.lock().await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

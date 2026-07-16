@@ -142,8 +142,8 @@ Live Firefox validation now passes against a freshly built local OxideSFU server
 
 Native Rust SDK fixture boundary:
 
-- The pinned Rust SDK exposes deterministic raw-I420 and pre-encoded access-unit capture, but not RTP packet/header-extension injection. It therefore cannot construct a controlled dependency-descriptor `Switch` sequence; the existing VP9 `L3T3_KEY` low → high contract remains ignored for that documented SDK limitation.
-- The browser Firefox VP9 `L3T3_KEY` contract is the required real-SVC coverage today. Promote the native contract only when the SDK exposes an RTP/dependency-descriptor fixture API or a deterministic encoder fixture.
+- Oxide's native probes are pinned to Rust SDK `9afe85bb8593c9e955de4ee4949706fc04699ed9`. It exposes `SvcEncodedVideoFrame` and `NativeVideoSource::capture_svc_encoded_frame`, so libwebrtc can packetize a valid VP9/AV1 access unit with a caller-provided dependency descriptor. The local SDK-contract test validates a three-spatial-layer active `Switch` descriptor at this boundary.
+- The ignored VP9 `L3T3_KEY` low → high black-box contract is now blocked only by the absence of a small, valid, deterministic *layered encoded access-unit corpus*. Descriptor metadata alone cannot make a single-layer VP9 payload decodable as SVC. The Firefox `L3T3_KEY` browser contract remains the required real-SVC coverage until such media is added.
 
 ### 4. Source liveness expiry is complete; decodability availability remains limited
 
@@ -199,7 +199,7 @@ Validation for this slice:
 - fresh-server Firefox receiver suite: 3/3 passed, including VP9 `L3T3_KEY` SVC;
 - `cargo check -p oxidesfu-rtc -p oxidesfu-signaling` and `git diff --check` passed.
 
-The remaining implementation-side work is complete for this compatibility slice. Native SDK scalable-fixture coverage is blocked on an upstream SDK RTP-fixture capability; repeated performance sweeps and workspace hygiene are evidence/maintenance work, not known forwarding correctness gaps.
+The remaining implementation-side forwarding work is complete for this compatibility slice. The native SDK now supports dependency-descriptor injection; only a deterministic layered encoded-media corpus is missing for its ignored end-to-end VP9 contract. Repeated performance sweeps and workspace hygiene are evidence/maintenance work, not known forwarding correctness gaps.
 
 ## Validation completed for the current slice
 
@@ -219,6 +219,6 @@ The focused RTC suite passed with `38 passed`, including the VP9-only forwarding
 
 This work should be called complete only when:
 
-1. one-SSRC scalable forwarding remains covered by the Firefox VP9 SVC browser contract; add a native equivalent only when the Rust SDK can create a deterministic RTP dependency-descriptor fixture;
+1. one-SSRC scalable forwarding remains covered by the Firefox VP9 SVC browser contract; promote the native equivalent once a deterministic valid layered VP9/AV1 encoded-media fixture is available for the SDK's descriptor-aware encoded-frame API;
 2. repeat paired Go/Oxide runs on an otherwise idle host before making CPU/capacity conclusions; and
 3. remediate the workspace Clippy backlog, or retain its explicit documented outcome.
