@@ -461,6 +461,7 @@ impl SubscriberVideoLayerSelector {
     /// Evaluates a packet without dependency-descriptor availability metadata.
     ///
     /// This preserves the existing keyframe fallback for codecs that do not provide a descriptor.
+    #[cfg(test)]
     pub(crate) fn observe_packet(&mut self, packet: LayerPacketMetadata) -> VideoIngressDecision {
         self.observe_packet_with_dependency_descriptor_metadata(packet, false)
     }
