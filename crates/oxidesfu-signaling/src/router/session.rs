@@ -2557,12 +2557,20 @@ pub(crate) fn aggregate_requested_quality_for_track(
             continue;
         }
 
-        if state.media_subscriptions.explicit_subscription(
+        let explicit_subscription = state.media_subscriptions.explicit_subscription(
             room_name,
             publisher_identity,
             track_sid,
             &subscriber_identity,
-        ) != Some(true)
+        );
+        if explicit_subscription == Some(false) {
+            continue;
+        }
+        if explicit_subscription.is_none()
+            && state
+                .signal_connections
+                .get(room_name, &subscriber_identity)
+                .is_none()
         {
             continue;
         }

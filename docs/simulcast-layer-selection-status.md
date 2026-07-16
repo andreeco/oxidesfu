@@ -163,13 +163,13 @@ A real one-run, 30-second paired sweep completed at `target/profiles/paired-mixe
 
 Remaining work:
 
-Snapshot correlation for the profiler observer is now available: its retained targets request `max=desired=high`, but several remain `waiting_for_fallback` with no current layer and one enters `fallback_locked=low`; other observer targets do stably reach high. This rules out an allocator ceiling choosing low for the measured observer. The next repair target is desired-layer availability/keyframe acquisition under real load (publisher dynacast demand and selector PLI/keyframe delivery), while preserving bounded fallback.
+Snapshot correlation identified a production publisher-demand defect: aggregate subscribed-quality updates considered only explicit subscription entries, excluding active default subscribers. A high default subscriber could therefore fail to request high simulcast demand from its publisher. The aggregate now includes active default subscribers, still excludes explicit unsubscribes, and excludes retained disconnected participants without a signal connection. The regression covers both active default demand and participant-leave recomputation.
+
+A repeat one-run, 30-second paired sweep at `target/profiles/paired-mixed_room_high_simulcast_large-20260716T075350Z-228c19ba` closes the observed media gap: Oxide video observers receive about `0.97–0.98 MB/s` at `1280×720`, versus Go at about `1.00–1.01 MB/s`; audio remains matched. Some transient waiting snapshots remain during observer join, but the post-warm-up client-visible media now converges to high quality.
 
 Remaining work:
 
-- add a real-load regression that reproduces a high target with unavailable/high-layer-late RTP and verifies desired-layer PLI/dynacast demand causes eventual high acquisition or records an explicit bounded-unavailable outcome;
-- inspect and repair publisher dynacast layer demand or upstream desired-layer keyframe delivery for those waiting targets;
-- repeat the paired comparison after that repair, with multiple runs before making CPU conclusions;
+- run multiple paired rounds on an idle host and compare the retained artifacts before making CPU conclusions;
 - use separately scoped Go instrumentation only if client-observed evidence is insufficient.
 
 ## Validation completed for the current slice

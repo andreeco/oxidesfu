@@ -1,3 +1,5 @@
+#![allow(deprecated, clippy::let_unit_value, clippy::manual_ignore_case_cmp)]
+
 use std::{
     collections::{HashMap, HashSet},
     io::Write,
@@ -4753,6 +4755,82 @@ async fn track_setting_disable_then_enable_restores_forwarding_and_publisher_lay
         ),
         Some(proto::VideoQuality::High),
         "the final dimensions, not the transient disabled dimensions, determine the active layer"
+    );
+}
+
+#[tokio::test]
+#[allow(deprecated)]
+async fn aggregate_requested_quality_uses_default_subscription_when_no_explicit_entry() {
+    let state = state();
+    let room = "aggregate-default-subscription-room";
+    let publisher = "publisher";
+    let subscriber = "subscriber";
+    let track_sid = "TR_default_subscription_aggregate";
+
+    join_participant_for_data_track_test(&state, room, publisher);
+    join_participant_for_data_track_test(&state, room, subscriber);
+    state
+        .rooms
+        .add_participant_track(
+            room,
+            publisher,
+            proto::TrackInfo {
+                sid: track_sid.to_string(),
+                r#type: proto::TrackType::Video as i32,
+                mime_type: "video/vp8".to_string(),
+                simulcast: true,
+                layers: vec![
+                    proto::VideoLayer {
+                        quality: proto::VideoQuality::Low as i32,
+                        ..Default::default()
+                    },
+                    proto::VideoLayer {
+                        quality: proto::VideoQuality::Medium as i32,
+                        ..Default::default()
+                    },
+                    proto::VideoLayer {
+                        quality: proto::VideoQuality::High as i32,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        )
+        .expect("publisher track should be added");
+
+    // No explicit MediaSubscriptionStore entry is set here. The active signal
+    // session makes this participant a default subscriber rather than a retained leaver.
+    let _ =
+        state
+            .rooms
+            .set_media_track_subscribed(room, publisher, track_sid, subscriber, true);
+    let (subscriber_signal_tx, _subscriber_signal_rx) = tokio::sync::mpsc::unbounded_channel();
+    state
+        .signal_connections
+        .insert(room, subscriber, subscriber_signal_tx);
+
+    let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::unbounded_channel();
+    let high_request = proto::UpdateTrackSettings {
+        track_sids: vec![track_sid.to_string()],
+        quality: proto::VideoQuality::High as i32,
+        ..Default::default()
+    };
+    signal_response_for_request(
+        proto::SignalRequest {
+            message: Some(proto::signal_request::Message::TrackSetting(high_request)),
+        },
+        &state,
+        room,
+        subscriber,
+        &outbound_tx,
+    )
+    .await
+    .expect("high track setting should process");
+
+    assert_eq!(
+        session::aggregate_requested_quality_for_track(&state, room, publisher, track_sid),
+        Some(proto::VideoQuality::High),
+        "default-subscribed tracks should contribute to aggregate publisher quality demand"
     );
 }
 
