@@ -1292,6 +1292,13 @@ fn allocation_temporal_layer_for_budget(
     )
 }
 
+fn allocation_available_outgoing_bitrate_bps(
+    test_support_override: Option<u64>,
+    rtc_estimate: Option<u64>,
+) -> Option<u64> {
+    test_support_override.or(rtc_estimate)
+}
+
 #[allow(deprecated)]
 fn allocation_layout_weight(
     track: &proto::TrackInfo,
@@ -6119,6 +6126,7 @@ async fn forward_publisher_remote_track(
     let rtp_forwarding = rtp_forwarding.clone();
     let signal_connections = signal_connections.clone();
     let publisher_subscription_active_pairs = state.publisher_subscription_active_pairs();
+    let state = state.clone();
     let room_name = room_name.to_string();
     let publisher_identity = publisher_identity.to_string();
     let publisher_sid = publisher_sid.to_string();
@@ -6234,9 +6242,20 @@ async fn forward_publisher_remote_track(
                                 );
                                 continue;
                             };
-                            let Some(available_bitrate_bps) =
+                            let test_support_override = state
+                                .test_support_available_outgoing_bitrate_bps(
+                                    &room_name,
+                                    subscriber_identity,
+                                );
+                            let rtc_estimate = if test_support_override.is_none() {
                                 receiver.available_outgoing_bitrate_bps().await
-                            else {
+                            } else {
+                                None
+                            };
+                            let Some(available_bitrate_bps) = allocation_available_outgoing_bitrate_bps(
+                                test_support_override,
+                                rtc_estimate,
+                            ) else {
                                 track_allocations.remove_for_track(
                                     &room_name,
                                     subscriber_identity,
@@ -8074,7 +8093,8 @@ mod tests {
 
     use super::{
         ForwardingDecisionRevisions, FpsForwardingState, SubscriberVideoTemporalController,
-        TemporalIngressDecision, TemporalLayer, add_track_response, allocation_layout_weight,
+        TemporalIngressDecision, TemporalLayer, add_track_response,
+        allocation_available_outgoing_bitrate_bps, allocation_layout_weight,
         allocation_quality_for_budget, allocation_temporal_layer_for_budget,
         apply_publisher_codec_preferences_to_answer, av1_is_keyframe_start,
         cached_forwarding_decision_for_subscriber,
@@ -8096,6 +8116,25 @@ mod tests {
     };
     use oxidesfu_auth::{ApiKeyStore, TokenVerifier};
     use oxidesfu_rtc::DataChannelKind;
+
+    #[test]
+    fn allocation_bitrate_source_prefers_test_override_and_falls_back_to_rtc_estimate() {
+        assert_eq!(
+            allocation_available_outgoing_bitrate_bps(Some(150_000), Some(900_000)),
+            Some(150_000),
+            "test support must override the production RTC estimate when explicitly set"
+        );
+        assert_eq!(
+            allocation_available_outgoing_bitrate_bps(None, Some(900_000)),
+            Some(900_000),
+            "production allocation must use the RTC estimate when no test override exists"
+        );
+        assert_eq!(
+            allocation_available_outgoing_bitrate_bps(None, None),
+            None,
+            "an absent override and absent RTC estimate must retain allocation removal behavior"
+        );
+    }
 
     #[test]
     fn preferred_codec_mime_for_participant_track_prefers_requested_video_codec() {

@@ -778,6 +778,216 @@ async fn rust_sdk_room_simulcast_video_quality_isolated_per_subscriber_contract(
 }
 
 #[tokio::test]
+async fn rust_sdk_room_allocation_drives_simulcast_spatial_and_temporal_downgrade_upgrade_contract() {
+    let _media_probe_guard = NATIVE_MEDIA_PROBE_LOCK.lock().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener should bind");
+    let addr = listener
+        .local_addr()
+        .expect("listener should have a local address");
+
+    let config = oxidesfu_core::ServerConfig::development();
+    let api_state = oxidesfu_server::api_state_from_config(&config);
+    let signal_state = oxidesfu_signaling::SignalState::with_data_channels(
+        api_state.rooms.clone(),
+        api_state.auth.clone(),
+        api_state.data_channels.clone(),
+    );
+    let room_name = format!("sdk-allocation-transition-{}", unique_suffix());
+    const SUBSCRIBER_IDENTITY: &str = "sdk-allocation-subscriber";
+    signal_state.set_test_support_available_outgoing_bitrate_bps(
+        &room_name,
+        SUBSCRIBER_IDENTITY,
+        Some(2_000_000),
+    );
+    let app = oxidesfu_server::app_with_api_signal_state_and_readiness(
+        api_state,
+        signal_state.clone(),
+        None,
+        Arc::new(oxidesfu_server::AlwaysReadyRelayBackendReadiness),
+    );
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("test server should run");
+    });
+
+    let publisher_token = AccessToken::with_api_key(API_KEY, API_SECRET)
+        .with_identity("sdk-allocation-publisher")
+        .with_grants(VideoGrants {
+            room_join: true,
+            room: room_name.clone(),
+            can_publish: true,
+            can_subscribe: true,
+            ..Default::default()
+        })
+        .to_jwt()
+        .expect("publisher token should encode");
+    let subscriber_token = AccessToken::with_api_key(API_KEY, API_SECRET)
+        .with_identity(SUBSCRIBER_IDENTITY)
+        .with_grants(VideoGrants {
+            room_join: true,
+            room: room_name.clone(),
+            can_publish: true,
+            can_subscribe: true,
+            ..Default::default()
+        })
+        .to_jwt()
+        .expect("subscriber token should encode");
+
+    let mut options = RoomOptions::default();
+    options.single_peer_connection = false;
+    options.connect_timeout = Duration::from_secs(10);
+    let (publisher_room, mut publisher_events) =
+        Room::connect(&format!("http://{addr}"), &publisher_token, options.clone())
+            .await
+            .expect("publisher room should connect");
+    let (subscriber_room, mut subscriber_events) =
+        Room::connect(&format!("http://{addr}"), &subscriber_token, options)
+            .await
+            .expect("subscriber room should connect");
+    wait_for_room_connected(&mut publisher_events).await;
+    wait_for_room_connected(&mut subscriber_events).await;
+
+    let source = NativeVideoSource::new(
+        VideoResolution {
+            width: 1280,
+            height: 720,
+        },
+        false,
+    );
+    let track = LocalVideoTrack::create_video_track("cam", RtcVideoSource::Native(source.clone()));
+    let _publication = publisher_room
+        .local_participant()
+        .publish_track(
+            LocalTrack::Video(track),
+            TrackPublishOptions {
+                simulcast: true,
+                video_encoding: Some(livekit::options::VideoEncoding {
+                    max_bitrate: 1_000_000,
+                    max_framerate: 30.0,
+                }),
+                simulcast_layers: Some(vec![
+                    livekit::options::VideoPreset::new(320, 180, 150_000, 8.0),
+                    livekit::options::VideoPreset::new(640, 360, 400_000, 30.0),
+                ]),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("publisher should publish a simulcast video track");
+    let (remote_video_track, remote_publication) =
+        wait_for_remote_video_subscription(&mut subscriber_events).await;
+    assert!(
+        remote_publication.simulcasted(),
+        "remote publication must advertise simulcast for allocation coverage"
+    );
+
+    let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let frame_pump_source = source.clone();
+    let frame_pump = tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_millis(33));
+        let mut luma = 96_u8;
+        loop {
+            tokio::select! {
+                _ = &mut stop_rx => break,
+                _ = ticker.tick() => {
+                    let mut buffer = livekit::webrtc::prelude::I420Buffer::new(1280, 720);
+                    let (y, u, v) = buffer.data_mut();
+                    y.fill(luma);
+                    u.fill(128);
+                    v.fill(128);
+                    luma = luma.wrapping_add(1);
+                    let frame = livekit::webrtc::prelude::VideoFrame::new(
+                        livekit::webrtc::prelude::VideoRotation::VideoRotation0,
+                        buffer,
+                    );
+                    frame_pump_source.capture_frame(&frame);
+                }
+            }
+        }
+    });
+    let mut video_stream =
+        livekit::webrtc::video_stream::native::NativeVideoStream::new(remote_video_track.rtc_track());
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    drain_video_frames_for_duration(&mut video_stream, Duration::from_secs(1)).await;
+    let high_pixels = collect_video_frame_pixels(&mut video_stream, 12, Duration::from_secs(3)).await;
+    let high_frames = count_video_frames_for_duration(
+        &mut video_stream,
+        Duration::from_secs(3),
+        Duration::from_millis(400),
+    )
+    .await;
+    let high_min_pixels = high_pixels.iter().copied().min().unwrap_or_default();
+    assert!(
+        high_min_pixels >= 640 * 360,
+        "the high allocation should deliver high-resolution frames before downgrade (min_pixels={high_min_pixels})"
+    );
+    assert!(
+        high_frames >= 18,
+        "the high allocation should deliver a sustained cadence before downgrade (frames={high_frames})"
+    );
+
+    signal_state.set_test_support_available_outgoing_bitrate_bps(
+        &room_name,
+        SUBSCRIBER_IDENTITY,
+        Some(100_000),
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    drain_video_frames_for_duration(&mut video_stream, Duration::from_secs(1)).await;
+    let low_pixels = collect_video_frame_pixels(&mut video_stream, 12, Duration::from_secs(3)).await;
+    let low_frames = count_video_frames_for_duration(
+        &mut video_stream,
+        Duration::from_secs(3),
+        Duration::from_millis(650),
+    )
+    .await;
+    let low_max_pixels = low_pixels.iter().copied().max().unwrap_or_default();
+    assert!(low_max_pixels > 0, "the downgraded allocation should keep decoding video");
+    assert!(
+        low_max_pixels < high_min_pixels,
+        "the low allocation must downgrade decoded spatial resolution (low_max={low_max_pixels}, high_min={high_min_pixels})"
+    );
+    assert!(
+        low_frames.saturating_mul(100) <= high_frames.saturating_mul(75),
+        "the low allocation must downgrade temporal cadence (low_frames={low_frames}, high_frames={high_frames})"
+    );
+
+    signal_state.set_test_support_available_outgoing_bitrate_bps(
+        &room_name,
+        SUBSCRIBER_IDENTITY,
+        Some(2_000_000),
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    drain_video_frames_for_duration(&mut video_stream, Duration::from_secs(1)).await;
+    let recovered_pixels =
+        collect_video_frame_pixels(&mut video_stream, 12, Duration::from_secs(3)).await;
+    let recovered_frames = count_video_frames_for_duration(
+        &mut video_stream,
+        Duration::from_secs(3),
+        Duration::from_millis(400),
+    )
+    .await;
+    let recovered_min_pixels = recovered_pixels.iter().copied().min().unwrap_or_default();
+    assert!(
+        recovered_min_pixels > low_max_pixels,
+        "the high allocation must recover decoded spatial resolution (recovered_min={recovered_min_pixels}, low_max={low_max_pixels})"
+    );
+    assert!(
+        recovered_frames > low_frames,
+        "the high allocation must recover temporal cadence (recovered_frames={recovered_frames}, low_frames={low_frames})"
+    );
+
+    let _ = stop_tx.send(());
+    let _ = frame_pump.await;
+    let _ = publisher_room.close().await;
+    let _ = subscriber_room.close().await;
+    server.abort();
+}
+
+#[tokio::test]
 async fn rust_sdk_room_simulcast_video_quality_switch_preserves_video_delivery_contract() {
     let _media_probe_guard = NATIVE_MEDIA_PROBE_LOCK.lock().await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

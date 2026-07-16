@@ -105,6 +105,7 @@ pub struct SignalState {
     participant_subscriber_primary: Arc<Mutex<HashMap<(String, String), bool>>>,
     publisher_subscription_active_pairs: Arc<Mutex<HashSet<(String, String, String)>>>,
     participant_data_blobs: Arc<Mutex<HashMap<(String, String, Vec<u8>), Vec<u8>>>>,
+    test_support_available_outgoing_bitrate_bps: Arc<Mutex<HashMap<(String, String), u64>>>,
     participant_data_blob_enabled: bool,
     participant_data_blob_max_key_length: usize,
 }
@@ -225,6 +226,7 @@ impl SignalState {
             participant_subscriber_primary: Arc::new(Mutex::new(HashMap::new())),
             publisher_subscription_active_pairs: Arc::new(Mutex::new(HashSet::new())),
             participant_data_blobs: Arc::new(Mutex::new(HashMap::new())),
+            test_support_available_outgoing_bitrate_bps: Arc::new(Mutex::new(HashMap::new())),
             participant_data_blob_enabled: true,
             participant_data_blob_max_key_length: DEFAULT_PARTICIPANT_DATA_BLOB_MAX_KEY_LENGTH,
         }
@@ -293,6 +295,42 @@ impl SignalState {
 
     pub(crate) fn datachannel_slow_threshold_bytes(&self) -> Option<u32> {
         self.datachannel_slow_threshold_bytes
+    }
+
+    /// Sets or clears a deterministic receiver bandwidth source for test support only.
+    ///
+    /// A set value applies only to the given room and subscriber identity. Clearing it restores
+    /// the production allocator's candidate-pair RTC statistics source.
+    #[doc(hidden)]
+    pub fn set_test_support_available_outgoing_bitrate_bps(
+        &self,
+        room_name: &str,
+        subscriber_identity: &str,
+        bitrate_bps: Option<u64>,
+    ) {
+        if let Ok(mut overrides) = self.test_support_available_outgoing_bitrate_bps.lock() {
+            let key = (room_name.to_string(), subscriber_identity.to_string());
+            if let Some(bitrate_bps) = bitrate_bps {
+                overrides.insert(key, bitrate_bps);
+            } else {
+                overrides.remove(&key);
+            }
+        }
+    }
+
+    pub(crate) fn test_support_available_outgoing_bitrate_bps(
+        &self,
+        room_name: &str,
+        subscriber_identity: &str,
+    ) -> Option<u64> {
+        self.test_support_available_outgoing_bitrate_bps
+            .lock()
+            .ok()
+            .and_then(|overrides| {
+                overrides
+                    .get(&(room_name.to_string(), subscriber_identity.to_string()))
+                    .copied()
+            })
     }
 
     pub fn with_participant_data_blob_enabled(mut self, enabled: bool) -> Self {
@@ -1451,6 +1489,50 @@ mod tests {
         let mut keys = ApiKeyStore::new();
         keys.insert("devkey", "secret");
         SignalState::new(RoomStore::default(), TokenVerifier::new(keys))
+    }
+
+    #[test]
+    fn test_support_available_outgoing_bitrate_override_is_scoped_and_removable() {
+        let state = test_state();
+
+        assert_eq!(
+            state.test_support_available_outgoing_bitrate_bps("room-a", "subscriber-a"),
+            None,
+            "an unset test override must preserve the production RTC-stat source"
+        );
+
+        state.set_test_support_available_outgoing_bitrate_bps(
+            "room-a",
+            "subscriber-a",
+            Some(150_000),
+        );
+        state.set_test_support_available_outgoing_bitrate_bps(
+            "room-a",
+            "subscriber-b",
+            Some(300_000),
+        );
+
+        assert_eq!(
+            state.test_support_available_outgoing_bitrate_bps("room-a", "subscriber-a"),
+            Some(150_000)
+        );
+        assert_eq!(
+            state.test_support_available_outgoing_bitrate_bps("room-a", "subscriber-b"),
+            Some(300_000),
+            "overrides must stay isolated per subscriber"
+        );
+        assert_eq!(
+            state.test_support_available_outgoing_bitrate_bps("room-b", "subscriber-a"),
+            None,
+            "overrides must stay isolated per room"
+        );
+
+        state.set_test_support_available_outgoing_bitrate_bps("room-a", "subscriber-a", None);
+        assert_eq!(
+            state.test_support_available_outgoing_bitrate_bps("room-a", "subscriber-a"),
+            None,
+            "clearing an override must restore RTC-stat allocation behavior"
+        );
     }
 
     #[test]
