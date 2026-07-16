@@ -362,6 +362,7 @@ pub struct LocalRtpTrack {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)] // LocalRtpTrack implementation follows its focused tests.
 mod tests {
     use super::{TemporalLayerFpsEstimate, dependency_descriptor_is_switch_point};
     use rtc::rtp::extension::dependency_descriptor_extension::{

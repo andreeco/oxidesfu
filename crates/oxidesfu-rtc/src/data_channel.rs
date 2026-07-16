@@ -284,22 +284,19 @@ impl DataChannel {
             .into());
         }
 
-        if is_unreliable {
-            if let Some(bitrate) = self.current_send_rate_bps().await {
-                let buffered_amount = self.inner.buffered_amount().await?;
-                let buffered_limit = u64::from(bitrate)
-                    .saturating_mul(UNRELIABLE_TARGET_LATENCY.as_millis() as u64)
-                    .saturating_div(8)
-                    .saturating_div(1_000);
-                if buffered_amount > buffered_limit
-                    && buffered_amount > UNRELIABLE_MIN_BUFFERED_AMOUNT
-                {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::WouldBlock,
-                        "data dropped due to high buffered amount",
-                    )
-                    .into());
-                }
+        if is_unreliable && let Some(bitrate) = self.current_send_rate_bps().await {
+            let buffered_amount = self.inner.buffered_amount().await?;
+            let buffered_limit = u64::from(bitrate)
+                .saturating_mul(UNRELIABLE_TARGET_LATENCY.as_millis() as u64)
+                .saturating_div(8)
+                .saturating_div(1_000);
+            if buffered_amount > buffered_limit && buffered_amount > UNRELIABLE_MIN_BUFFERED_AMOUNT
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "data dropped due to high buffered amount",
+                )
+                .into());
             }
         }
 
@@ -655,7 +652,7 @@ mod tests {
             .await
             .expect("initial reliable write should succeed");
 
-        dc.send_bytes(&vec![0; 10])
+        dc.send_bytes(&[0; 10])
             .await
             .expect("timeout should retry and then succeed when bitrate is healthy");
 
@@ -725,15 +722,15 @@ mod tests {
         });
         let dc = DataChannel::new(mock.clone());
 
-        dc.send_bytes(&vec![0; 128])
+        dc.send_bytes(&[0; 128])
             .await
             .expect("first lossy write should succeed");
         tokio::time::sleep(Duration::from_millis(60)).await;
-        dc.send_bytes(&vec![0; 128])
+        dc.send_bytes(&[0; 128])
             .await
             .expect("second lossy write should succeed");
         tokio::time::sleep(Duration::from_millis(60)).await;
-        dc.send_bytes(&vec![0; 128])
+        dc.send_bytes(&[0; 128])
             .await
             .expect("third lossy write should succeed");
 

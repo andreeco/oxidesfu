@@ -1177,8 +1177,8 @@ mod tests {
             let mut labels: Option<std::collections::BTreeSet<String>> = None;
 
             loop {
-                if channels_opened && labels.is_some() {
-                    break labels.expect("labels should be set once received");
+                if channels_opened && let Some(labels) = labels.take() {
+                    break labels;
                 }
 
                 tokio::select! {
