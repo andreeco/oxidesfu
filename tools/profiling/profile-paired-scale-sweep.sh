@@ -318,6 +318,11 @@ run_profile() {
         return 1
     fi
 
+    if [[ "${implementation}" == "oxidesfu" ]]; then
+        curl --fail --silent --show-error "${base_url}/debug/forwarding-snapshots" \
+            >"${point_dir}/oxide-forwarding-snapshot.jsonl"
+    fi
+
     kill -INT "${perf_pid}" 2>/dev/null || true
     wait "${perf_pid}" 2>/dev/null || true
     active_perf_pid=""

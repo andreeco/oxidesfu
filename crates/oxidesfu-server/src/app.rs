@@ -591,6 +591,15 @@ pub fn app_with_api_signal_state_readiness_webhooks_and_agent_relay(
             }),
         )
         .route("/metrics", get(crate::metrics::metrics))
+        .route(
+            "/debug/forwarding-snapshots",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "application/x-ndjson")],
+                    oxidesfu_signaling::forwarding_snapshot_json_lines(),
+                )
+            }),
+        )
         .merge(oxidesfu_api::router(api_state))
         .merge(oxidesfu_signaling::router(signal_state))
         .merge(oxidesfu_agent::router(agent_state))

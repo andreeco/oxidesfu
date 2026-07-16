@@ -1305,7 +1305,9 @@ fn outgoing_rtp_wire_bytes(packet: &rtc::rtp::Packet) -> u64 {
 
 /// Returns the bounded JSON-lines heartbeat tail for profiler collection.
 #[allow(dead_code)] // Coordinator-owned profiler/API integration consumes this internal path.
-pub(crate) fn forwarding_snapshot_json_lines() -> String {
+/// Returns bounded forwarding diagnostics for local profiler collection.
+#[doc(hidden)]
+pub fn forwarding_snapshot_json_lines() -> String {
     forwarding_snapshot::forwarding_snapshot_json_lines()
 }
 

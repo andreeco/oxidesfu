@@ -2131,6 +2131,7 @@ fn is_ping_req_signal_request_message(message: &WsMessage) -> bool {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_non_local_relay_accepted_socket_loop(
     socket: WebSocket,
     state: SignalState,
@@ -2389,6 +2390,7 @@ async fn run_non_local_relay_accepted_socket_loop(
 }
 
 pub(crate) mod session;
+pub use session::forwarding_snapshot_json_lines;
 
 use session::create_subscriber_offer;
 #[cfg(test)]
