@@ -8,7 +8,7 @@ use std::{
         Arc, OnceLock,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use rtc::{
@@ -25,6 +25,7 @@ use rtc::{
             RtpCodecKind,
         },
     },
+    statistics::{StatsSelector, report::RTCStatsReportEntry},
 };
 use tokio::sync::mpsc;
 use webrtc::data_channel::RTCDataChannelInit;
@@ -65,6 +66,28 @@ pub struct PeerConnection {
 }
 
 impl PeerConnection {
+    /// Returns the largest positive congestion-feedback outgoing bitrate estimate in bits/second.
+    ///
+    /// The value is absent until a nominated ICE candidate pair has produced transport feedback.
+    pub async fn available_outgoing_bitrate_bps(&self) -> Option<u64> {
+        let report = self
+            .inner
+            .get_stats(Instant::now(), StatsSelector::None)
+            .await;
+        report
+            .iter()
+            .filter_map(|entry| match entry {
+                RTCStatsReportEntry::IceCandidatePair(pair)
+                    if pair.available_outgoing_bitrate.is_finite()
+                        && pair.available_outgoing_bitrate > 0.0 =>
+                {
+                    Some(pair.available_outgoing_bitrate as u64)
+                }
+                _ => None,
+            })
+            .max()
+    }
+
     /// Creates a local data channel with default reliable/ordered options.
     pub async fn create_data_channel(&self, label: &str) -> RtcResult<DataChannel> {
         self.create_data_channel_with_options(label, DataChannelOptions::default())
