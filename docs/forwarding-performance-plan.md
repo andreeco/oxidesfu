@@ -4,7 +4,7 @@ _This document serves as a kind of memory for an LLM on how to continue with per
 
 ## Status
 
-**Phases 1–4 and the bounded RTC write batch are complete; remaining work is evidence-driven.** Large simulcast forwarding workloads are functionally healthy, but the current paired benchmark overview has one CPU outlier: `mixed_room_high_simulcast_large` is +19.7% CPU versus Go while every other real scenario is faster and uses substantially less RSS. Paired 5- and 20-second profiles also show unequal video bitrate between Go and OxideSFU, so the CPU delta is not yet an equal-work comparison.
+**Reader-local forwarding, bounded RTC writes, target-aware spatial/temporal selection, and viewport-weighted receiver-bandwidth allocation are implemented; remaining work is evidence-driven.** Large simulcast forwarding workloads are functionally healthy, but the current paired benchmark overview has one CPU outlier: `mixed_room_high_simulcast_large` is +19.7% CPU versus Go while every other real scenario is faster and uses substantially less RSS. Paired 5- and 20-second profiles also show unequal video bitrate between Go and OxideSFU, so the CPU delta is not yet an equal-work comparison.
 
 This plan records the evidence, reference behavior, target architecture, staged implementation plan, and compatibility gates for normalizing delivered simulcast media before attributing or closing the remaining CPU gap.
 
@@ -112,11 +112,11 @@ This is an important compatibility slice, **not the completed simulcast-layer-se
 
 | Status | Missing behavior / evidence | Required implementation and test |
 |---|---|---|
-| Partial | Allocator-driven policy | `TrackAllocationStore` supplies revisioned, target-scoped desired spatial quality and desired temporal layer inputs to forwarding readers. A reader-owned one-second producer reads each subscriber's candidate-pair congestion-feedback `available_outgoing_bitrate`, divides it proportionally over eligible video subscriptions using the subscriber viewport area (or largest advertised layer dimensions when no viewport exists), and selects the highest advertised `VideoLayer.bitrate` within the resulting budget. Spatial desired quality is clamped by `UpdateTrackSettings` maximum quality and temporal desired by the FPS-derived maximum. End-to-end allocation transitions remain. |
-| Partial | Temporal target state | `SubscriberVideoTemporalController` now owns FPS-derived maximum/desired/current temporal state and timestamp fallback per target. The reader accepts an independent allocator temporal target and enforces `DropAboveDesired` for enhancement layers above that target. Bandwidth/layout producer input and end-to-end allocation-driven temporal transitions remain. |
+| Partial | Allocator-driven policy | `TrackAllocationStore` supplies revisioned, target-scoped desired spatial quality and desired temporal layer inputs to forwarding readers. A reader-owned one-second producer reads each subscriber's candidate-pair congestion-feedback `available_outgoing_bitrate`, divides it proportionally over eligible video subscriptions using the subscriber viewport area (or largest advertised layer dimensions when no viewport exists), and selects the highest advertised `VideoLayer.bitrate` within the resulting budget. Spatial desired quality is clamped by `UpdateTrackSettings` maximum quality and temporal desired by the FPS-derived maximum. End-to-end allocation-driven downgrade/upgrade transitions remain. |
+| Partial | Temporal target state | `SubscriberVideoTemporalController` owns FPS-derived maximum/desired/current temporal state and timestamp fallback per target. The bandwidth/layout producer supplies an independent allocator temporal target and the reader enforces `DropAboveDesired` for enhancement layers above that target. End-to-end allocation-driven temporal transitions remain. |
 | Partial | Dependency-descriptor switching | Oxide is pinned to published outer WebRTC `3b0b2f0d8f0443deeab47fb83dada7eb4d7778ea`, nested RTC `56a36e408913475baeeb5672bd3e30036dea820f`. `RemoteTrack` now exposes the current-packet descriptor result and the forwarding reader uses it for VP9/AV1 source switching: frame start plus active DTI `Switch` is required when metadata is present, while absent metadata retains the codec-keyframe fallback. Parser, RTC-wrapper, and signaling policy regressions pass. Add real scalable RTP packet-sequence/source-continuity and native SDK fixture coverage. |
 | Partial | Availability and fallback liveness | The reader-local 250 ms timer now expires sources after two seconds and reacquires a live fallback once; the selector regression proves no retry storm/oscillation. Availability is still recently observed RTP rather than descriptor-verified decoder usability. |
-| Partial | Reader-local observability | The three-second target heartbeat now exports maximum/desired/current spatial and temporal layers, RID/SSRC, transitions, categorized spatial/temporal drops, selector PLIs, rewrite drops, successful RTP packet count/payload bytes, and write errors without hot-path locks, allocation, formatting, or clock reads. PLI suppression/feedback counters, wire-byte rate windows, and a machine-readable profiler snapshot remain. |
+| Partial | Reader-local observability | The three-second target heartbeat now exports maximum/desired/current spatial and temporal layers, selector acquisition/fallback state, waiting layer and age, remaining selector PLI budget, RID/SSRC, transitions, categorized spatial/temporal drops, selector PLIs, rewrite drops, successful RTP packet count/payload bytes, and write errors without hot-path locks, allocation, formatting, or clock reads. PLI suppression/feedback counters, wire-byte rate windows, and a machine-readable profiler snapshot remain. |
 | Complete | Native target isolation | `rust_sdk_room_simulcast_video_quality_isolated_per_subscriber_contract` proves simultaneous low/high decoded dimensions and that upgrading one target does not lower the other. |
 | Pending | Differential evidence | Extend profiling to retain machine-readable post-warm-up selection reports. The report must define bytes/sec as successfully written rewritten RTP bytes over the reporting window, and distinguish selector PLIs from downstream feedback. A Go-comparable result requires client-observed reporting or separately scoped Go instrumentation; Oxide-only internals cannot reveal Go's selected layer. |
 | Pending | Broader validation | Run focused source-switch/RTP-continuity integration coverage, then the workspace suite and clippy. Existing workspace flakes must be reported separately rather than hidden by this feature work. |
@@ -297,7 +297,7 @@ Use an actor-like reader command channel if it keeps ownership local and avoids 
 
 ### Phase 3 — Target-local keyframe acquisition actor
 
-**Status: complete for spatial acquisition.** The reader's 250 ms timer drives bounded target-local selector PLIs; downstream PLI/FIR relay remains separate. RTT-aware retry policy and descriptor-aware scalable switching remain deferred.
+**Status: complete for current spatial acquisition behavior.** The reader's 250 ms timer drives bounded target-local selector PLIs; downstream PLI/FIR relay remains separate. VP9/AV1 source transitions use dependency-descriptor frame-start plus active DTI `Switch` when metadata is present, with codec parsing only when descriptors are absent. Real scalable packet-sequence and native SDK fixture coverage remains deferred.
 
 **Objective:** mirror LiveKit's event/timer model without copying Go structure.
 
@@ -310,6 +310,8 @@ Use an actor-like reader command channel if it keeps ownership local and avoids 
 **Acceptance:** no periodic keyframe map scan in the media packet loop; Rust SDK quality switching remains reliable.
 
 ### Phase 4 — Packet ownership and write-path allocation audit
+
+**Status: implementation audit complete; no new packet pool was justified by the recorded profiles.**
 
 **Objective:** reduce allocation/copy pressure after state lookup is fixed.
 

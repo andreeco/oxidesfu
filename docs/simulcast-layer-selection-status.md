@@ -23,8 +23,7 @@ Reference revisions inspected:
 | Repository | Revision | Files | Derived behavior |
 |---|---|---|---|
 | LiveKit | `ae09b7d0ad94d764f0c97d183efd36476163e819` | `pkg/rtc/subscribedtrack.go`, `pkg/sfu/downtrack.go`, `pkg/sfu/forwarder.go`, `pkg/sfu/videolayerselector/{base.go,simulcast.go}` | Subscriber settings set max spatial/temporal bounds; forwarding retains max, target, current, and seen layers; spatial changes are decodable-boundary gated. |
-| WebRTC Rust fork (currently pinned by Oxide) | `24b69d02220ffdaf67af4550482d5986089a95aa` | `rtc-rtp/src/codec/{vp9,h264,av1}`, `rtc-media/src/io/ivf_writer` | VP9 frame-start/non-predicted, H264 IDR, and AV1 new-coded-sequence boundaries usable for source-switch detection. |
-| WebRTC Rust compatibility fork (published/pinned) | outer `3b0b2f0d8f0443deeab47fb83dada7eb4d7778ea`, nested RTC `56a36e408913475baeeb5672bd3e30036dea820f` | `rtc-rtp/src/extension/dependency_descriptor_extension/{mod.rs,dependency_descriptor_extension_test.rs}` | Exposes active-target packet metadata and distinguishes an active decode target with DTI `Switch`; a frame boundary by itself is not a safe source-switch point. |
+| WebRTC Rust compatibility fork (published/pinned) | outer `3b0b2f0d8f0443deeab47fb83dada7eb4d7778ea`, nested RTC `56a36e408913475baeeb5672bd3e30036dea820f` | `rtc-rtp/src/codec/{vp9,h264,av1}`, `rtc-rtp/src/extension/dependency_descriptor_extension/{mod.rs,dependency_descriptor_extension_test.rs}` | Provides codec switch-boundary parsing plus active-target packet metadata; a VP9/AV1 descriptor frame boundary requires an active DTI `Switch` target before it is a safe scalable source-switch point. |
 | OxideSFU | working tree following `3d6331078e8a2a2c0587fe5bb16da939efb89bd2` | `crates/oxidesfu-signaling/src/{media/video_ingress.rs,router/session.rs}` | Original first-eligible-SSRC latch was in the reader-owned forwarding target. |
 
 ## Completed work
@@ -86,7 +85,7 @@ The native SDK contract in `crates/oxidesfu-test/src/probes/media.rs` now additi
 
 ## Known missing work
 
-### 1. Allocation-policy plumbing is complete; bandwidth/layout producer remains
+### 1. Allocation policy and bandwidth/layout producer are complete; end-to-end transition coverage remains
 
 `TrackAllocationStore` is now an independent, private, target-scoped allocation input. It publishes semantic revisioned changes to the reader that owns each `ForwardTarget`; the reader merges its desired quality with `UpdateTrackSettings` maximum quality and clamps desired to that ceiling. Allocation changes therefore use the same keyframe-gated selector transition as subscription changes without mutating client permission/settings.
 
@@ -98,7 +97,7 @@ Remaining work:
 
 - add end-to-end allocation-driven downgrade/upgrade coverage.
 
-### 2. Temporal target state and allocator temporal intent are plumbed; producer remains
+### 2. Temporal target state and allocator temporal intent are complete; end-to-end transition coverage remains
 
 `SubscriberVideoTemporalController` is reader-local state in each `ForwardTarget`. For a requested FPS and receiver-observed temporal cadence it derives an explicit `TemporalLayerPolicy` with `max` and `desired`, admits only temporal IDs at or below that maximum, and records the highest currently forwarded temporal layer. A policy reduction clamps the current state without resetting spatial source selection or RTP rewrite history.
 
@@ -115,9 +114,10 @@ The native Rust SDK FPS-isolation contract also passes with the controller in th
 
 `TrackAllocationStore` now also carries a bounded target-local desired temporal layer (`T0`–`T2`). The reader merges it with the FPS-derived maximum, clamps it to that maximum, and drops only enhancement layers above the allocator target. The default remains `desired = max` when no allocation is present.
 
+The one-second receiver-bandwidth allocator supplies this temporal intent alongside spatial policy, with the same viewport-weighted per-subscription budget described above.
+
 Remaining work:
 
-- add layout-priority weighting beyond the current deterministic equal-share policy;
 - add end-to-end allocation-driven temporal downgrade/upgrade coverage.
 
 ### 3. Dependency-descriptor decode targets are used for VP9/AV1 switching; end-to-end stream coverage remains
@@ -144,7 +144,7 @@ The selector now ages observed SSRCs only from its 250 ms timer. A source with n
 Remaining limitation:
 
 - availability currently means recently observed RTP, not independently verified decoder usability;
-- dependency-descriptor decode targets are still needed for scalable VP9/AV1 availability semantics.
+- descriptor switch targets protect source transitions, but are not yet used to establish complete decoder-usability availability semantics.
 
 ### 5. Production observability is partially complete
 
@@ -188,16 +188,16 @@ cargo test -p oxidesfu-test \
   -- --nocapture
 ```
 
-The focused RTC suite passed with `36 passed`; the focused signaling suite passed with `509 passed, 3 ignored` after descriptor-aware VP9/AV1 source-switch gating. The focused native SDK quality-transition, concurrent spatial-isolation, and concurrent FPS-isolation contracts passed serially before the descriptor slice. Full workspace testing and clippy remain required after the remaining work above is implemented; known unrelated workspace flakes must be reported separately.
+The focused RTC suite passed with `36 passed`; the focused signaling suite most recently passed with `514 passed, 3 ignored`. Focused native SDK quality-transition, concurrent spatial-isolation, and concurrent FPS-isolation contracts passed serially. `cargo test --workspace` also passed (`115 passed, 7 ignored`, plus passing doctests). `cargo clippy --workspace --all-targets -- -D warnings` remains blocked by pre-existing diagnostics across `oxidesfu-api` and signaling test/support code; the forwarding-slice diagnostics fixed in commit `cb19ebf7` do not remove that broader baseline.
 
 ## Completion criteria
 
 This work should be called complete only when:
 
-1. allocation can set desired and maximum spatial/temporal targets independently;
-2. temporal allocator transitions have end-to-end delivery coverage in addition to the current FPS-derived controller tests;
-3. source switching is decodable for all supported scalable/simulcast codec paths, including dependency descriptors where applicable;
-4. source availability, fallback, and retry behavior are bounded and observable;
+1. allocation-driven spatial and temporal downgrade/upgrade transitions have end-to-end delivery coverage;
+2. source switching is proven decodable through real scalable VP9/AV1 descriptor packet sequences and native SDK fixtures where applicable;
+3. source availability, fallback, and retry behavior are bounded and observable, including decoder-usability semantics for scalable streams;
+4. observability exports selector suppression/receiver-feedback counts, wire-byte rates, and a machine-readable profiler snapshot;
 5. concurrent real subscribers prove independent low/high decoded dimensions and isolated updates;
 6. paired Go/Oxide runs capture comparable post-warm-up per-track delivery evidence; and
-7. focused tests, workspace tests, and clippy have documented outcomes.
+7. focused tests, workspace tests, and a clean or explicitly remediated workspace clippy baseline have documented outcomes.
