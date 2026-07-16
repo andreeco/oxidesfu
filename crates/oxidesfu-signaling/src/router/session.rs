@@ -1212,6 +1212,7 @@ struct ForwardTarget {
     rtp_window: ForwardingRtpWindow,
     target_primary_ssrc: Option<Option<u32>>,
     target_payload_type: Option<Option<u8>>,
+    target_dependency_descriptor_extension_id: Option<Option<u8>>,
 
     forwarded_once: bool,
     logged_video_rewrite_drop: bool,
@@ -1241,6 +1242,7 @@ impl ForwardTarget {
             rtp_window: ForwardingRtpWindow::default(),
             target_primary_ssrc: None,
             target_payload_type: None,
+            target_dependency_descriptor_extension_id: None,
 
             forwarded_once: false,
             logged_video_rewrite_drop: false,
@@ -1257,6 +1259,7 @@ impl ForwardTarget {
     ) {
         self.local_forward_track = local_forward_track;
         self.rtp_forwarder = rtp_forwarder;
+        self.target_dependency_descriptor_extension_id = None;
     }
 
     fn subscriber_identity(&self) -> &str {
@@ -1273,6 +1276,57 @@ fn dependency_descriptor_dti(
         rtc::rtp::extension::dependency_descriptor_extension::DependencyDescriptorDecodeTargetIndication::Switch => DependencyDescriptorDti::Switch,
         rtc::rtp::extension::dependency_descriptor_extension::DependencyDescriptorDecodeTargetIndication::Required => DependencyDescriptorDti::Required,
     }
+}
+
+fn rewrite_dependency_descriptor_for_target(
+    packet: &mut rtc::rtp::Packet,
+    snapshot: &oxidesfu_rtc::DependencyDescriptorMetadataSnapshot,
+    decision: DependencyDescriptorForwardingDecision,
+    destination_extension_id: Option<u8>,
+) -> bool {
+    let DependencyDescriptorForwardingDecision::Forward { target } = decision else {
+        return false;
+    };
+
+    let Some(source_payload) = packet
+        .header
+        .extensions
+        .iter()
+        .find(|extension| extension.id == snapshot.source_extension_id)
+        .map(|extension| extension.payload.clone())
+    else {
+        return false;
+    };
+
+    packet
+        .header
+        .extensions
+        .retain(|extension| extension.id != snapshot.source_extension_id);
+
+    let num_decode_targets = u8::try_from(snapshot.decode_target_indications.len()).ok();
+    let rewritten_payload = num_decode_targets.and_then(|num_decode_targets| {
+        (target < num_decode_targets).then(|| {
+            rtc::rtp::extension::dependency_descriptor_extension::replace_or_inject_active_decode_target_mask(
+                &source_payload,
+                num_decode_targets,
+                1_u32 << target,
+            )
+        })?
+    });
+    if let (Some(destination_extension_id), Some(rewritten_payload)) =
+        (destination_extension_id, rewritten_payload)
+    {
+        let _ = packet
+            .header
+            .set_extension(destination_extension_id, rewritten_payload.into());
+    }
+
+    if packet.header.extensions.is_empty() {
+        packet.header.extension = false;
+        packet.header.extension_profile = 0;
+        packet.header.extensions_padding = 0;
+    }
+    true
 }
 
 fn select_dependency_descriptor_frame(
@@ -7159,6 +7213,7 @@ async fn forward_publisher_remote_track(
                         packet_temporal_layer_hint,
                     );
                     for target in &mut cached_forward_targets {
+                        let mut packet_descriptor_forwarding_decision = None;
                         let settings_revision = target.settings_revision.unwrap_or_default();
                         let decision_revisions = ForwardingDecisionRevisions {
                             media_subscription: media_subscription_revision,
@@ -7301,6 +7356,7 @@ async fn forward_publisher_remote_track(
                                 target.video_layer_selector.policy(),
                                 target.video_temporal_controller.policy(),
                             );
+                            packet_descriptor_forwarding_decision = Some(descriptor_decision);
                             if !matches!(
                                 descriptor_decision,
                                 DependencyDescriptorForwardingDecision::Forward { .. }
@@ -7383,7 +7439,7 @@ async fn forward_publisher_remote_track(
                                 target_ssrc,
                                 negotiated_payload_type,
                             );
-                        let Some(rewritten_packet) = rewritten_packet else {
+                        let Some(mut rewritten_packet) = rewritten_packet else {
                             if is_video_track {
                                 if !target.logged_video_rewrite_drop {
                                     target.logged_video_rewrite_drop = true;
@@ -7414,6 +7470,35 @@ async fn forward_publisher_remote_track(
                             }
                             continue;
                         };
+
+                        if let (Some(snapshot), Some(descriptor_decision)) = (
+                            packet_descriptor_metadata.as_ref(),
+                            packet_descriptor_forwarding_decision,
+                        ) {
+                            let destination_extension_id =
+                                match target.target_dependency_descriptor_extension_id {
+                                    Some(extension_id) => extension_id,
+                                    None => {
+                                        let extension_id = target
+                                            .local_forward_track
+                                            .dependency_descriptor_extension_id()
+                                            .await;
+                                        target.target_dependency_descriptor_extension_id =
+                                            Some(extension_id);
+                                        extension_id
+                                    }
+                                };
+                            if rewrite_dependency_descriptor_for_target(
+                                &mut rewritten_packet,
+                                snapshot,
+                                descriptor_decision,
+                                destination_extension_id,
+                            ) {
+                                target
+                                    .rtp_forwarder
+                                    .replace_cached_retransmission_packet(&rewritten_packet);
+                            }
+                        }
 
                         let forwarded_payload_type = rewritten_packet.header.payload_type;
                         let rewritten_payload_bytes = rewritten_packet.payload.len() as u64;
@@ -8642,12 +8727,12 @@ mod tests {
     use prost::Message;
 
     use super::{
-        ForwardingDecisionRevisions, ForwardingRtpWindow, FpsForwardingState,
-        SubscriberVideoTemporalController, TemporalIngressDecision, TemporalLayer,
-        add_track_response, allocation_available_outgoing_bitrate_bps, allocation_layout_weight,
-        allocation_quality_for_budget, allocation_temporal_layer_for_budget,
-        apply_publisher_codec_preferences_to_answer, av1_is_keyframe_start,
-        cached_forwarding_decision_for_subscriber,
+        DependencyDescriptorForwardingDecision, ForwardingDecisionRevisions, ForwardingRtpWindow,
+        FpsForwardingState, SubscriberVideoTemporalController, TemporalIngressDecision,
+        TemporalLayer, add_track_response, allocation_available_outgoing_bitrate_bps,
+        allocation_layout_weight, allocation_quality_for_budget,
+        allocation_temporal_layer_for_budget, apply_publisher_codec_preferences_to_answer,
+        av1_is_keyframe_start, cached_forwarding_decision_for_subscriber,
         clear_publisher_subscription_active_if_no_remaining_tracks, data_channel_kind_for_label,
         desired_video_quality_from_allocation, filter_h264_from_publisher_answer_for_client,
         force_sendonly_sections_without_msid_recvonly, h264_is_keyframe_start,
@@ -8655,8 +8740,9 @@ mod tests {
         preferred_codec_mime_for_participant_track, relay_data_packet_after_channel_convergence,
         relay_data_track_packet, reliable_channel_label_rank,
         reorder_section_media_line_payloads_for_preferred_codec,
-        resolved_destination_identities_for_packet, selected_forwarding_mime_type_for_subscriber,
-        signal_track_subscribed_to_publisher, video_is_decodable_switch_point,
+        resolved_destination_identities_for_packet, rewrite_dependency_descriptor_for_target,
+        selected_forwarding_mime_type_for_subscriber, signal_track_subscribed_to_publisher,
+        video_is_decodable_switch_point,
         video_is_decodable_switch_point_with_dependency_descriptor, vp8_is_keyframe_start,
         vp9_is_keyframe_start,
     };
@@ -8666,7 +8752,97 @@ mod tests {
         stores::{DataTrackStore, DataTrackSubscriptionStore, SignalConnectionStore},
     };
     use oxidesfu_auth::{ApiKeyStore, TokenVerifier};
-    use oxidesfu_rtc::DataChannelKind;
+    use oxidesfu_rtc::{DataChannelKind, DependencyDescriptorMetadataSnapshot};
+
+    #[test]
+    fn dependency_descriptor_rewrite_is_target_local_and_strips_when_unnegotiated() {
+        let source_packet = rtc::rtp::Packet {
+            header: rtc::rtp::header::Header {
+                extension: true,
+                extension_profile: rtc::rtp::header::EXTENSION_PROFILE_ONE_BYTE,
+                extensions: vec![
+                    rtc::rtp::header::Extension {
+                        id: 1,
+                        payload: b"other".to_vec().into(),
+                    },
+                    rtc::rtp::header::Extension {
+                        id: 3,
+                        payload: vec![0, 0, 0, 0b0100_0110].into(),
+                    },
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let source_payload = source_packet
+            .header
+            .get_extension(3)
+            .expect("fixture packet should carry the source descriptor");
+        let snapshot = DependencyDescriptorMetadataSnapshot {
+            source_extension_id: 3,
+            frame_number: 1,
+            first_packet_in_frame: true,
+            active_decode_targets: 0b11,
+            target_layers: Vec::new(),
+            decode_target_indications: vec![
+                rtc::rtp::extension::dependency_descriptor_extension::DependencyDescriptorDecodeTargetIndication::Required,
+                rtc::rtp::extension::dependency_descriptor_extension::DependencyDescriptorDecodeTargetIndication::Switch,
+            ],
+            frame_diffs: Vec::new(),
+            chain_diffs: Vec::new(),
+            target_protected_by_chain: Vec::new(),
+        };
+
+        let mut target_packet = source_packet.clone();
+        rewrite_dependency_descriptor_for_target(
+            &mut target_packet,
+            &snapshot,
+            DependencyDescriptorForwardingDecision::Forward { target: 1 },
+            Some(9),
+        );
+        let expected_payload = rtc::rtp::extension::dependency_descriptor_extension::replace_or_inject_active_decode_target_mask(
+            &source_payload,
+            2,
+            0b10,
+        )
+        .expect("fixture descriptor should support a target mask rewrite");
+        assert_eq!(source_packet.header.extensions[1].payload, source_payload);
+        assert!(
+            target_packet
+                .header
+                .extensions
+                .iter()
+                .all(|extension| extension.id != 3)
+        );
+        assert_eq!(
+            target_packet.header.get_extension(9),
+            Some(expected_payload.into())
+        );
+        assert_eq!(
+            target_packet.header.get_extension(1),
+            Some(b"other".to_vec().into())
+        );
+
+        let mut unnegotiated_packet = source_packet.clone();
+        rewrite_dependency_descriptor_for_target(
+            &mut unnegotiated_packet,
+            &snapshot,
+            DependencyDescriptorForwardingDecision::Forward { target: 1 },
+            None,
+        );
+        assert!(
+            unnegotiated_packet
+                .header
+                .extensions
+                .iter()
+                .all(|extension| extension.id != 3),
+            "an unnegotiated destination must not leak the publisher extension ID"
+        );
+        assert_eq!(
+            unnegotiated_packet.header.get_extension(1),
+            Some(b"other".to_vec().into())
+        );
+    }
 
     #[test]
     fn forwarding_rtp_window_reports_wire_packet_rates_not_payload_totals() {

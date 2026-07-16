@@ -101,6 +101,8 @@ pub struct DependencyDescriptorTargetMetadata {
 /// the latest packet does not yield descriptor metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DependencyDescriptorMetadataSnapshot {
+    /// RTP header extension ID that carried the parsed source descriptor.
+    pub source_extension_id: u8,
     /// Frame number carried by the descriptor.
     pub frame_number: u64,
     /// Whether this packet starts its descriptor frame.
@@ -121,13 +123,13 @@ pub struct DependencyDescriptorMetadataSnapshot {
     pub target_protected_by_chain: Vec<u8>,
 }
 
-impl From<rtp::extension::dependency_descriptor_extension::DependencyDescriptorPacketMetadata>
-    for DependencyDescriptorMetadataSnapshot
-{
-    fn from(
+impl DependencyDescriptorMetadataSnapshot {
+    fn from_packet_metadata(
+        source_extension_id: u8,
         metadata: rtp::extension::dependency_descriptor_extension::DependencyDescriptorPacketMetadata,
     ) -> Self {
         Self {
+            source_extension_id,
             frame_number: u64::from(metadata.frame_number),
             first_packet_in_frame: metadata.first_packet_in_frame,
             active_decode_targets: metadata.active_decode_targets_mask,
@@ -176,24 +178,24 @@ impl RemoteTrackState {
         let metadata = if packet.header.extension {
             self.dd_parser_by_ssrc.lock().ok().and_then(|mut parsers| {
                 let parser = parsers.entry(ssrc).or_default();
-                packet
-                    .header
-                    .extensions
-                    .iter()
-                    .find_map(|extension| parser.parse_packet_metadata(&extension.payload))
+                packet.header.extensions.iter().find_map(|extension| {
+                    parser
+                        .parse_packet_metadata(&extension.payload)
+                        .map(|metadata| (extension.id, metadata))
+                })
             })
         } else {
             None
         };
 
-        let availability = metadata.as_ref().map(|metadata| {
+        let availability = metadata.as_ref().map(|(_, metadata)| {
             dependency_descriptor_is_switch_point(metadata)
                 .then_some(DependencyDescriptorLayerAvailability::DecoderUsable)
                 .unwrap_or(DependencyDescriptorLayerAvailability::RtpSeen)
         });
         if let Ok(mut switch_points) = self.last_dd_switch_point_by_ssrc.lock() {
             match metadata {
-                Some(ref metadata) => {
+                Some((_, ref metadata)) => {
                     switch_points.insert(ssrc, dependency_descriptor_is_switch_point(metadata));
                 }
                 None => {
@@ -213,15 +215,21 @@ impl RemoteTrackState {
         }
         if let Ok(mut metadata_by_ssrc) = self.last_dd_metadata_by_ssrc.lock() {
             match metadata.as_ref() {
-                Some(metadata) => {
-                    metadata_by_ssrc.insert(ssrc, metadata.clone().into());
+                Some((source_extension_id, metadata)) => {
+                    metadata_by_ssrc.insert(
+                        ssrc,
+                        DependencyDescriptorMetadataSnapshot::from_packet_metadata(
+                            *source_extension_id,
+                            metadata.clone(),
+                        ),
+                    );
                 }
                 None => {
                     metadata_by_ssrc.remove(&ssrc);
                 }
             }
         }
-        metadata
+        metadata.map(|(_, metadata)| metadata)
     }
 }
 
@@ -693,6 +701,7 @@ mod tests {
             .get(&ssrc)
             .cloned()
             .expect("descriptor packet should retain a metadata snapshot");
+        assert_eq!(snapshot.source_extension_id, 1);
         assert_eq!(snapshot.frame_number, 2);
         assert!(snapshot.first_packet_in_frame);
         assert_eq!(snapshot.active_decode_targets, 1);
@@ -768,6 +777,22 @@ impl LocalRtpTrack {
     /// Returns the negotiated MID this forwarding track is bound to, when known.
     pub fn forwarding_mid(&self) -> Option<&str> {
         self.forwarding_mid.as_deref()
+    }
+
+    /// Returns the negotiated dependency-descriptor RTP header extension ID, when available.
+    pub async fn dependency_descriptor_extension_id(&self) -> Option<u8> {
+        self.sender
+            .get_parameters()
+            .await
+            .ok()?
+            .rtp_parameters
+            .header_extensions
+            .iter()
+            .find(|extension| {
+                extension.uri
+                    == rtp::extension::dependency_descriptor_extension::DEPENDENCY_DESCRIPTOR_URI
+            })
+            .and_then(|extension| u8::try_from(extension.id).ok())
     }
 
     /// Returns the negotiated codec binding outcome for this forwarding track.

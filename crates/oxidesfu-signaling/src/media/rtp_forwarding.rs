@@ -526,6 +526,13 @@ pub(crate) struct SubscriberRtpForwarder {
 }
 
 impl SubscriberRtpForwarder {
+    /// Replaces the cached target packet after target-local RTP extension rewriting.
+    pub(crate) fn replace_cached_retransmission_packet(&self, packet: &rtc::rtp::Packet) {
+        if let Ok(mut state) = self.state.lock() {
+            state.cache_retransmission_packet(packet.clone());
+        }
+    }
+
     pub(crate) fn rewrite_packet_with_target_ssrc_and_payload_type(
         &self,
         packet: &rtc::rtp::Packet,
@@ -1196,6 +1203,41 @@ mod tests {
                 .get_retransmission_packet(&second_key, second.header.sequence_number)
                 .expect("second target rewrite should be cached"),
             second
+        );
+    }
+
+    #[test]
+    fn rewritten_packet_can_replace_its_cached_retransmission_representation() {
+        let store = RtpForwardingStore::default();
+        let key = forwarding_key("subscriber-a");
+        let forwarder = store
+            .forwarder_for(&key)
+            .expect("target should have forwarding state");
+
+        let mut rewritten = forwarder
+            .rewrite_packet_with_target_ssrc_and_payload_type(
+                &packet_with_seq(1234),
+                Some(0x1234_5678),
+                Some(111),
+            )
+            .expect("packet should rewrite");
+        rewritten
+            .header
+            .extensions
+            .push(rtc::rtp::header::Extension {
+                id: 9,
+                payload: vec![0xde, 0xad].into(),
+            });
+        rewritten.header.extension = true;
+        rewritten.payload = vec![0xbe, 0xef].into();
+
+        forwarder.replace_cached_retransmission_packet(&rewritten);
+
+        assert_eq!(
+            store
+                .get_retransmission_packet(&key, rewritten.header.sequence_number)
+                .expect("mutated rewritten packet should remain retransmittable"),
+            rewritten
         );
     }
 

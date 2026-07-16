@@ -142,8 +142,7 @@ Live Firefox validation now passes against a freshly built local OxideSFU server
 
 Remaining work:
 
-- rewrite outgoing dependency-descriptor active target masks consistently with frames filtered by the new reader-local descriptor-aware selector. The selector now uses target-layer mappings, frame/chain dependencies, chain protection, active masks, and DTIs to make bounded, fragment-consistent, target-local decisions; forwarding the unmodified source descriptor remains the final wire-level correctness gap;
-- add native SDK scalable-stream coverage when a deterministic dependency-descriptor publisher fixture is available.
+- add native SDK scalable-stream fixture coverage when a deterministic dependency-descriptor publisher fixture is available; the production selector and outbound target-mask rewrite are now implemented and tested.
 
 ### 4. Source liveness expiry is complete; decodability availability remains limited
 
