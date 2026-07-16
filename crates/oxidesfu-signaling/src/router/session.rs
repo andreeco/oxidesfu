@@ -5,7 +5,10 @@ use std::{
 
 use super::*;
 use crate::media::{
-    ForwardTrackKey, LayerAcquisitionState, LayerPacketMetadata, LayerPolicy, SpatialLayer,
+    DependencyDescriptorDti, DependencyDescriptorForwardingDecision,
+    DependencyDescriptorForwardingSelector, DependencyDescriptorFrame,
+    DependencyDescriptorLayerPolicy, DependencyDescriptorTargetLayer, ForwardTrackKey,
+    LayerAcquisitionState, LayerPacketMetadata, LayerPolicy, SpatialLayer,
     SubscriberVideoLayerSelector, VideoIngressDecision, VideoSourceKind,
 };
 use forwarding_snapshot::{
@@ -1199,6 +1202,10 @@ struct ForwardTarget {
     settings_revision: Option<u64>,
     allocation_revision: Option<u64>,
     video_layer_selector: SubscriberVideoLayerSelector,
+    dependency_descriptor_forwarding_selector: Option<(
+        DependencyDescriptorLayerPolicy,
+        DependencyDescriptorForwardingSelector,
+    )>,
     video_temporal_controller: SubscriberVideoTemporalController,
     video_counters: VideoForwardingCounters,
     downstream_feedback_counters: DownstreamFeedbackCounters,
@@ -1227,6 +1234,7 @@ impl ForwardTarget {
             settings_revision: None,
             allocation_revision: None,
             video_layer_selector: SubscriberVideoLayerSelector::default(),
+            dependency_descriptor_forwarding_selector: None,
             video_temporal_controller: SubscriberVideoTemporalController::default(),
             video_counters: VideoForwardingCounters::default(),
             downstream_feedback_counters: DownstreamFeedbackCounters::default(),
@@ -1254,6 +1262,74 @@ impl ForwardTarget {
     fn subscriber_identity(&self) -> &str {
         &self.key.3
     }
+}
+
+fn dependency_descriptor_dti(
+    indication: rtc::rtp::extension::dependency_descriptor_extension::DependencyDescriptorDecodeTargetIndication,
+) -> DependencyDescriptorDti {
+    match indication {
+        rtc::rtp::extension::dependency_descriptor_extension::DependencyDescriptorDecodeTargetIndication::NotPresent => DependencyDescriptorDti::NotPresent,
+        rtc::rtp::extension::dependency_descriptor_extension::DependencyDescriptorDecodeTargetIndication::Discardable => DependencyDescriptorDti::Discardable,
+        rtc::rtp::extension::dependency_descriptor_extension::DependencyDescriptorDecodeTargetIndication::Switch => DependencyDescriptorDti::Switch,
+        rtc::rtp::extension::dependency_descriptor_extension::DependencyDescriptorDecodeTargetIndication::Required => DependencyDescriptorDti::Required,
+    }
+}
+
+fn select_dependency_descriptor_frame(
+    target: &mut ForwardTarget,
+    snapshot: &oxidesfu_rtc::DependencyDescriptorMetadataSnapshot,
+    spatial_policy: LayerPolicy,
+    temporal_policy: Option<TemporalLayerPolicy>,
+) -> DependencyDescriptorForwardingDecision {
+    let temporal_policy = temporal_policy.unwrap_or(TemporalLayerPolicy {
+        max: TemporalLayer::T2,
+        desired: TemporalLayer::T2,
+    });
+    let policy = DependencyDescriptorLayerPolicy {
+        max_spatial: spatial_policy.max,
+        desired_spatial: spatial_policy.desired,
+        max_temporal: temporal_policy.max as u8,
+        desired_temporal: temporal_policy.desired as u8,
+    };
+    if target
+        .dependency_descriptor_forwarding_selector
+        .as_ref()
+        .is_none_or(|(current_policy, _)| *current_policy != policy)
+    {
+        target.dependency_descriptor_forwarding_selector =
+            Some((policy, DependencyDescriptorForwardingSelector::new(policy)));
+    }
+    let Some((_, selector)) = target.dependency_descriptor_forwarding_selector.as_mut() else {
+        return DependencyDescriptorForwardingDecision::DropInvalidMetadata;
+    };
+    let target_layers = snapshot
+        .target_layers
+        .iter()
+        .map(|layer| DependencyDescriptorTargetLayer {
+            target: layer.target,
+            spatial: match layer.spatial_id {
+                0 => SpatialLayer::Low,
+                1 => SpatialLayer::Medium,
+                _ => SpatialLayer::High,
+            },
+            temporal: layer.temporal_id,
+        })
+        .collect::<Vec<_>>();
+    let dtis = snapshot
+        .decode_target_indications
+        .iter()
+        .copied()
+        .map(dependency_descriptor_dti)
+        .collect::<Vec<_>>();
+    selector.select(DependencyDescriptorFrame {
+        frame_number: snapshot.frame_number,
+        active_decode_targets: snapshot.active_decode_targets,
+        target_layers: &target_layers,
+        dtis: &dtis,
+        frame_diffs: &snapshot.frame_diffs,
+        chain_diffs: &snapshot.chain_diffs,
+        target_protected_by_chain: &snapshot.target_protected_by_chain,
+    })
 }
 
 const FORWARDING_SNAPSHOT_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
@@ -7047,6 +7123,13 @@ async fn forward_publisher_remote_track(
                     } else {
                         None
                     };
+                    let packet_descriptor_metadata = if is_video_track {
+                        remote_track.last_observed_dependency_descriptor_metadata_for_ssrc(
+                            packet.header.ssrc,
+                        )
+                    } else {
+                        None
+                    };
                     let packet_spatial_layer = if is_video_track {
                         remote_track
                             .last_observed_spatial_layer_for_ssrc(packet.header.ssrc)
@@ -7196,6 +7279,34 @@ async fn forward_publisher_remote_track(
                                     filtered_out_targets += 1;
                                     continue;
                                 }
+                            }
+                        }
+
+                        if is_video_track
+                            && packet_source_kind == VideoSourceKind::SingleScalable
+                            && let Some(snapshot) = packet_descriptor_metadata.as_ref()
+                        {
+                            if let Some(requested_fps) = decision.requested_fps {
+                                target
+                                    .video_temporal_controller
+                                    .set_requested_fps_with_desired_temporal_layer(
+                                        requested_fps,
+                                        packet_receiver_temporal_layer_fps,
+                                        decision.desired_temporal_layer,
+                                    );
+                            }
+                            let descriptor_decision = select_dependency_descriptor_frame(
+                                target,
+                                snapshot,
+                                target.video_layer_selector.policy(),
+                                target.video_temporal_controller.policy(),
+                            );
+                            if !matches!(
+                                descriptor_decision,
+                                DependencyDescriptorForwardingDecision::Forward { .. }
+                            ) {
+                                filtered_out_targets += 1;
+                                continue;
                             }
                         }
 

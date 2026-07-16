@@ -136,13 +136,13 @@ Covered regressions:
 - `oxidesfu-rtc`: both descriptor frame start and `Switch` are required for the exposed result;
 - signaling: a descriptor `false` result blocks a VP9 payload-keyframe heuristic, a descriptor `true` result permits the transition, and absent metadata falls back to the payload detector.
 
-The RTC integration regression now feeds stateful real RTP header-extension sequences into `RemoteTrackState`: a non-`Switch` frame start blocks selection, an active `Switch` frame start permits it, and a following descriptor-free packet cannot inherit stale eligibility. Forwarding-facing VP9 and AV1 regressions compose that decision with the selector and `SubscriberRtpForwarder`, proving continuous outgoing sequence/timestamp translation across the permitted source switch.
+The RTC integration regression now feeds stateful real RTP header-extension sequences into `RemoteTrackState`: a non-`Switch` frame start blocks selection, an active `Switch` frame start permits it, and a following descriptor-free packet cannot inherit stale eligibility. `RemoteTrack` additionally retains an owned current descriptor snapshot per SSRC, including active targets, target-layer mapping, DTIs, frame/chain differences, and chain protection; it clears the snapshot for a descriptor-absent packet. Each forwarding target now owns a bounded descriptor frame selector that applies its own spatial/temporal policy before legacy temporal admission, preserves direct/chain dependencies, and makes one decision for all fragments in a frame. Forwarding-facing VP9 and AV1 regressions continue to prove continuous outgoing sequence/timestamp translation across permitted source switches.
 
 Live Firefox validation now passes against a freshly built local OxideSFU server: all three receiver-counter contracts pass, including `Firefox VP9 SVC receiver keeps decoding after adaptive quality churn`.
 
 Remaining work:
 
-- implement the reader-local descriptor-aware frame selector for one-SSRC VP9/AV1 scalable sources using the now-published target-layer mappings, frame/chain dependencies, chain protection, active masks, and DTIs; then rewrite outgoing descriptor target masks consistently with filtered frames;
+- rewrite outgoing dependency-descriptor active target masks consistently with frames filtered by the new reader-local descriptor-aware selector. The selector now uses target-layer mappings, frame/chain dependencies, chain protection, active masks, and DTIs to make bounded, fragment-consistent, target-local decisions; forwarding the unmodified source descriptor remains the final wire-level correctness gap;
 - add native SDK scalable-stream coverage when a deterministic dependency-descriptor publisher fixture is available.
 
 ### 4. Source liveness expiry is complete; decodability availability remains limited

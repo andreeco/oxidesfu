@@ -35,6 +35,239 @@ impl LayerPolicy {
     }
 }
 
+/// The spatial and temporal bounds for one descriptor-backed forwarding target.
+///
+/// This deliberately stays independent of the RTC parser's types so the reader can adapt parsed
+/// metadata at its boundary without coupling selector state to an RTC implementation.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DependencyDescriptorLayerPolicy {
+    pub(crate) max_spatial: SpatialLayer,
+    pub(crate) desired_spatial: SpatialLayer,
+    pub(crate) max_temporal: u8,
+    pub(crate) desired_temporal: u8,
+}
+
+/// Maps a dependency-descriptor decode target to its scalable layer.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DependencyDescriptorTargetLayer {
+    pub(crate) target: u8,
+    pub(crate) spatial: SpatialLayer,
+    pub(crate) temporal: u8,
+}
+
+/// A frame's indication for one decode target.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DependencyDescriptorDti {
+    NotPresent,
+    Discardable,
+    Switch,
+    Required,
+}
+
+/// Descriptor metadata that determines a whole-frame forwarding decision.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DependencyDescriptorFrame<'a> {
+    pub(crate) frame_number: u64,
+    pub(crate) active_decode_targets: u32,
+    pub(crate) target_layers: &'a [DependencyDescriptorTargetLayer],
+    pub(crate) dtis: &'a [DependencyDescriptorDti],
+    pub(crate) frame_diffs: &'a [u16],
+    pub(crate) chain_diffs: &'a [u16],
+    pub(crate) target_protected_by_chain: &'a [u8],
+}
+
+/// The cached forwarding result for one descriptor frame.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DependencyDescriptorForwardingDecision {
+    Forward { target: u8 },
+    DropNoAdmissibleTarget,
+    DropDependency,
+    DropBrokenChain,
+    DropInvalidMetadata,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, Default)]
+struct DescriptorChainState {
+    active: bool,
+    broken: bool,
+}
+
+/// Reader-local forwarding controller for one single-SSRC scalable target.
+///
+/// The controller caches a result by frame number so every RTP fragment of a frame receives the
+/// same result. It keeps only a bounded window; a dependency that has fallen out of that window is
+/// conservatively treated as unavailable.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub(crate) struct DependencyDescriptorForwardingSelector {
+    policy: DependencyDescriptorLayerPolicy,
+    decisions: std::collections::VecDeque<(u64, DependencyDescriptorForwardingDecision)>,
+    chains: Vec<DescriptorChainState>,
+}
+
+#[allow(dead_code)]
+impl DependencyDescriptorForwardingSelector {
+    const DECISION_CACHE_CAPACITY: usize = 256;
+
+    pub(crate) fn new(policy: DependencyDescriptorLayerPolicy) -> Self {
+        Self {
+            policy,
+            decisions: std::collections::VecDeque::with_capacity(Self::DECISION_CACHE_CAPACITY),
+            chains: Vec::new(),
+        }
+    }
+
+    /// Selects or drops a frame using only descriptor metadata supplied by the owning reader.
+    pub(crate) fn select(
+        &mut self,
+        frame: DependencyDescriptorFrame<'_>,
+    ) -> DependencyDescriptorForwardingDecision {
+        if let Some((_, decision)) = self
+            .decisions
+            .iter()
+            .find(|(frame_number, _)| *frame_number == frame.frame_number)
+        {
+            return *decision;
+        }
+
+        let decision = self.select_uncached(frame);
+        if self.decisions.len() == Self::DECISION_CACHE_CAPACITY {
+            let _ = self.decisions.pop_front();
+        }
+        self.decisions.push_back((frame.frame_number, decision));
+        decision
+    }
+
+    fn select_uncached(
+        &mut self,
+        frame: DependencyDescriptorFrame<'_>,
+    ) -> DependencyDescriptorForwardingDecision {
+        if !self.update_chains(frame) {
+            return DependencyDescriptorForwardingDecision::DropInvalidMetadata;
+        }
+
+        let Some(target) = self.select_target(frame) else {
+            return DependencyDescriptorForwardingDecision::DropNoAdmissibleTarget;
+        };
+        let Some(dti) = frame.dtis.get(target.target as usize) else {
+            return DependencyDescriptorForwardingDecision::DropInvalidMetadata;
+        };
+        if *dti == DependencyDescriptorDti::NotPresent {
+            return DependencyDescriptorForwardingDecision::DropNoAdmissibleTarget;
+        }
+
+        if frame.frame_diffs.iter().any(|diff| {
+            *diff != 0
+                && (frame.frame_number < u64::from(*diff)
+                    || !self.was_forwarded(frame.frame_number - u64::from(*diff)))
+        }) {
+            return DependencyDescriptorForwardingDecision::DropDependency;
+        }
+
+        if !frame.chain_diffs.is_empty() {
+            let Some(&chain) = frame.target_protected_by_chain.get(target.target as usize) else {
+                return DependencyDescriptorForwardingDecision::DropInvalidMetadata;
+            };
+            if self
+                .chains
+                .get(chain as usize)
+                .is_none_or(|state| state.broken)
+            {
+                return DependencyDescriptorForwardingDecision::DropBrokenChain;
+            }
+        }
+
+        DependencyDescriptorForwardingDecision::Forward {
+            target: target.target,
+        }
+    }
+
+    fn select_target(
+        &self,
+        frame: DependencyDescriptorFrame<'_>,
+    ) -> Option<DependencyDescriptorTargetLayer> {
+        frame
+            .target_layers
+            .iter()
+            .copied()
+            .filter(|target| {
+                target.target < 32
+                    && frame.active_decode_targets & (1_u32 << target.target) != 0
+                    && target.spatial <= self.policy.max_spatial
+                    && target.temporal <= self.policy.max_temporal
+                    && target.spatial <= self.policy.desired_spatial
+                    && target.temporal <= self.policy.desired_temporal
+            })
+            .max_by_key(|target| (target.spatial, target.temporal))
+    }
+
+    fn update_chains(&mut self, frame: DependencyDescriptorFrame<'_>) -> bool {
+        self.chains
+            .resize(frame.chain_diffs.len(), DescriptorChainState::default());
+
+        for (chain_index, state) in self.chains.iter_mut().enumerate() {
+            let active = frame.target_layers.iter().any(|target| {
+                target.target < 32
+                    && frame.active_decode_targets & (1_u32 << target.target) != 0
+                    && frame
+                        .target_protected_by_chain
+                        .get(target.target as usize)
+                        .is_some_and(|chain| usize::from(*chain) == chain_index)
+            });
+            if active && !state.active {
+                state.broken = true;
+            }
+            state.active = active;
+        }
+
+        for (chain_index, state) in self.chains.iter_mut().enumerate() {
+            if !state.active {
+                continue;
+            }
+            let diff = frame.chain_diffs[chain_index];
+            if diff == 0 {
+                state.broken = false;
+            } else if state.broken
+                || frame.frame_number < u64::from(diff)
+                || !Self::was_forwarded_in(&self.decisions, frame.frame_number - u64::from(diff))
+            {
+                state.broken = true;
+            }
+        }
+
+        frame.chain_diffs.is_empty()
+            || frame.target_layers.iter().all(|target| {
+                frame
+                    .target_protected_by_chain
+                    .get(target.target as usize)
+                    .is_some_and(|chain| usize::from(*chain) < frame.chain_diffs.len())
+            })
+    }
+
+    fn was_forwarded(&self, frame_number: u64) -> bool {
+        Self::was_forwarded_in(&self.decisions, frame_number)
+    }
+
+    fn was_forwarded_in(
+        decisions: &std::collections::VecDeque<(u64, DependencyDescriptorForwardingDecision)>,
+        frame_number: u64,
+    ) -> bool {
+        decisions.iter().any(|(cached_frame, decision)| {
+            *cached_frame == frame_number
+                && matches!(
+                    decision,
+                    DependencyDescriptorForwardingDecision::Forward { .. }
+                )
+        })
+    }
+}
+
 /// Identifies whether spatial layers are separate source streams or packets inside one scalable
 /// source stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -460,7 +693,10 @@ impl SubscriberVideoLayerSelector {
 #[cfg(test)]
 mod tests {
     use super::{
-        KeyframeRequest, LayerAcquisitionState, LayerPacketMetadata, LayerPolicy, SpatialLayer,
+        DependencyDescriptorDti, DependencyDescriptorForwardingDecision,
+        DependencyDescriptorForwardingSelector, DependencyDescriptorFrame,
+        DependencyDescriptorLayerPolicy, DependencyDescriptorTargetLayer, KeyframeRequest,
+        LayerAcquisitionState, LayerPacketMetadata, LayerPolicy, SpatialLayer,
         SubscriberVideoLayerSelector, VideoIngressDecision, VideoSourceKind,
     };
 
@@ -470,6 +706,37 @@ mod tests {
             spatial: Some(spatial),
             source_kind: VideoSourceKind::Simulcast,
             is_decodable_switch_point: keyframe,
+        }
+    }
+
+    fn descriptor_selector(
+        spatial: SpatialLayer,
+        temporal: u8,
+    ) -> DependencyDescriptorForwardingSelector {
+        DependencyDescriptorForwardingSelector::new(DependencyDescriptorLayerPolicy {
+            max_spatial: spatial,
+            desired_spatial: spatial,
+            max_temporal: temporal,
+            desired_temporal: temporal,
+        })
+    }
+
+    fn descriptor_frame<'a>(
+        frame_number: u64,
+        target_layers: &'a [DependencyDescriptorTargetLayer],
+        dtis: &'a [DependencyDescriptorDti],
+        frame_diffs: &'a [u16],
+        chain_diffs: &'a [u16],
+        target_protected_by_chain: &'a [u8],
+    ) -> DependencyDescriptorFrame<'a> {
+        DependencyDescriptorFrame {
+            frame_number,
+            active_decode_targets: u32::MAX,
+            target_layers,
+            dtis,
+            frame_diffs,
+            chain_diffs,
+            target_protected_by_chain,
         }
     }
 
@@ -828,5 +1095,212 @@ mod tests {
         }
         assert_eq!(high.current_spatial(), Some(SpatialLayer::High));
         assert_eq!(low.current_spatial(), Some(SpatialLayer::Low));
+    }
+
+    #[test]
+    fn descriptor_selector_admits_the_highest_active_target_within_policy() {
+        let mut selector =
+            DependencyDescriptorForwardingSelector::new(DependencyDescriptorLayerPolicy {
+                max_spatial: SpatialLayer::High,
+                desired_spatial: SpatialLayer::Medium,
+                max_temporal: 2,
+                desired_temporal: 1,
+            });
+        let layers = [
+            DependencyDescriptorTargetLayer {
+                target: 0,
+                spatial: SpatialLayer::Low,
+                temporal: 0,
+            },
+            DependencyDescriptorTargetLayer {
+                target: 1,
+                spatial: SpatialLayer::Medium,
+                temporal: 1,
+            },
+            DependencyDescriptorTargetLayer {
+                target: 2,
+                spatial: SpatialLayer::High,
+                temporal: 2,
+            },
+        ];
+        let dtis = [
+            DependencyDescriptorDti::Discardable,
+            DependencyDescriptorDti::Switch,
+            DependencyDescriptorDti::Required,
+        ];
+        assert_eq!(
+            selector.select(DependencyDescriptorFrame {
+                frame_number: 10,
+                active_decode_targets: 0b111,
+                target_layers: &layers,
+                dtis: &dtis,
+                frame_diffs: &[],
+                chain_diffs: &[],
+                target_protected_by_chain: &[],
+            }),
+            DependencyDescriptorForwardingDecision::Forward { target: 1 }
+        );
+    }
+
+    #[test]
+    fn descriptor_selector_propagates_dropped_direct_dependencies() {
+        let mut selector = descriptor_selector(SpatialLayer::Low, 0);
+        let layers = [DependencyDescriptorTargetLayer {
+            target: 0,
+            spatial: SpatialLayer::Low,
+            temporal: 0,
+        }];
+        let absent = [DependencyDescriptorDti::NotPresent];
+        let required = [DependencyDescriptorDti::Required];
+        assert_eq!(
+            selector.select(descriptor_frame(1, &layers, &absent, &[], &[], &[])),
+            DependencyDescriptorForwardingDecision::DropNoAdmissibleTarget
+        );
+        assert_eq!(
+            selector.select(descriptor_frame(2, &layers, &required, &[1], &[], &[])),
+            DependencyDescriptorForwardingDecision::DropDependency
+        );
+    }
+
+    #[test]
+    fn descriptor_selector_drops_a_broken_chain_until_a_switch_boundary_repairs_it() {
+        let mut selector = descriptor_selector(SpatialLayer::Low, 0);
+        let layers = [DependencyDescriptorTargetLayer {
+            target: 0,
+            spatial: SpatialLayer::Low,
+            temporal: 0,
+        }];
+        let required = [DependencyDescriptorDti::Required];
+        let protected_by = [0];
+        assert_eq!(
+            selector.select(descriptor_frame(
+                1,
+                &layers,
+                &required,
+                &[],
+                &[1],
+                &protected_by
+            )),
+            DependencyDescriptorForwardingDecision::DropBrokenChain
+        );
+        assert_eq!(
+            selector.select(descriptor_frame(
+                2,
+                &layers,
+                &required,
+                &[],
+                &[0],
+                &protected_by
+            )),
+            DependencyDescriptorForwardingDecision::Forward { target: 0 }
+        );
+        assert_eq!(
+            selector.select(descriptor_frame(
+                3,
+                &layers,
+                &[DependencyDescriptorDti::NotPresent],
+                &[],
+                &[1],
+                &protected_by,
+            )),
+            DependencyDescriptorForwardingDecision::DropNoAdmissibleTarget
+        );
+        assert_eq!(
+            selector.select(descriptor_frame(
+                4,
+                &layers,
+                &required,
+                &[],
+                &[1],
+                &protected_by
+            )),
+            DependencyDescriptorForwardingDecision::DropBrokenChain
+        );
+    }
+
+    #[test]
+    fn descriptor_selector_bounds_its_decision_cache() {
+        let mut selector = descriptor_selector(SpatialLayer::Low, 0);
+        let layers = [DependencyDescriptorTargetLayer {
+            target: 0,
+            spatial: SpatialLayer::Low,
+            temporal: 0,
+        }];
+        let required = [DependencyDescriptorDti::Required];
+        for frame_number in 1..=DependencyDescriptorForwardingSelector::DECISION_CACHE_CAPACITY {
+            assert_eq!(
+                selector.select(descriptor_frame(
+                    frame_number as u64,
+                    &layers,
+                    &required,
+                    &[],
+                    &[],
+                    &[],
+                )),
+                DependencyDescriptorForwardingDecision::Forward { target: 0 }
+            );
+        }
+        assert_eq!(
+            selector.select(descriptor_frame(257, &layers, &required, &[256], &[], &[])),
+            DependencyDescriptorForwardingDecision::Forward { target: 0 }
+        );
+        assert_eq!(
+            selector.select(descriptor_frame(258, &layers, &required, &[257], &[], &[])),
+            DependencyDescriptorForwardingDecision::DropDependency
+        );
+    }
+
+    #[test]
+    fn descriptor_selector_keeps_one_decision_for_all_frame_fragments() {
+        let mut selector = descriptor_selector(SpatialLayer::Low, 0);
+        let layers = [DependencyDescriptorTargetLayer {
+            target: 0,
+            spatial: SpatialLayer::Low,
+            temporal: 0,
+        }];
+        let required = [DependencyDescriptorDti::Required];
+        let first = descriptor_frame(12, &layers, &required, &[], &[], &[]);
+        assert_eq!(
+            selector.select(first),
+            DependencyDescriptorForwardingDecision::Forward { target: 0 }
+        );
+        assert_eq!(
+            selector.select(DependencyDescriptorFrame {
+                dtis: &[DependencyDescriptorDti::NotPresent],
+                ..first
+            }),
+            DependencyDescriptorForwardingDecision::Forward { target: 0 }
+        );
+    }
+
+    #[test]
+    fn descriptor_selectors_are_isolated_for_interleaved_targets() {
+        let mut low = descriptor_selector(SpatialLayer::Low, 0);
+        let mut high = descriptor_selector(SpatialLayer::High, 1);
+        let layers = [
+            DependencyDescriptorTargetLayer {
+                target: 0,
+                spatial: SpatialLayer::Low,
+                temporal: 0,
+            },
+            DependencyDescriptorTargetLayer {
+                target: 1,
+                spatial: SpatialLayer::High,
+                temporal: 1,
+            },
+        ];
+        let dtis = [
+            DependencyDescriptorDti::Required,
+            DependencyDescriptorDti::Required,
+        ];
+        let frame = descriptor_frame(20, &layers, &dtis, &[], &[], &[]);
+        assert_eq!(
+            low.select(frame),
+            DependencyDescriptorForwardingDecision::Forward { target: 0 }
+        );
+        assert_eq!(
+            high.select(frame),
+            DependencyDescriptorForwardingDecision::Forward { target: 1 }
+        );
     }
 }

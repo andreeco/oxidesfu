@@ -84,6 +84,75 @@ pub enum DependencyDescriptorLayerAvailability {
     DecoderUsable,
 }
 
+/// Owned dependency-descriptor target metadata retained for the latest RTP packet on an SSRC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DependencyDescriptorTargetMetadata {
+    /// Decode-target index in the descriptor structure.
+    pub target: u8,
+    /// Maximum temporal layer for this decode target.
+    pub temporal_id: u8,
+    /// Maximum spatial layer for this decode target.
+    pub spatial_id: u8,
+}
+
+/// Owned dependency-descriptor metadata retained for the latest RTP packet on an SSRC.
+///
+/// The snapshot deliberately avoids exposing the RTC parser's mutable state. It is cleared when
+/// the latest packet does not yield descriptor metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DependencyDescriptorMetadataSnapshot {
+    /// Frame number carried by the descriptor.
+    pub frame_number: u64,
+    /// Whether this packet starts its descriptor frame.
+    pub first_packet_in_frame: bool,
+    /// Effective active decode-target mask.
+    pub active_decode_targets: u32,
+    /// Layer bounds for each decode target.
+    pub target_layers: Vec<DependencyDescriptorTargetMetadata>,
+    /// Per-target decode target indications in wire target order.
+    pub decode_target_indications: Vec<
+        rtp::extension::dependency_descriptor_extension::DependencyDescriptorDecodeTargetIndication,
+    >,
+    /// Frame-number differences to required frames.
+    pub frame_diffs: Vec<u16>,
+    /// Per-chain frame-number differences.
+    pub chain_diffs: Vec<u16>,
+    /// Chain protecting each decode target.
+    pub target_protected_by_chain: Vec<u8>,
+}
+
+impl From<rtp::extension::dependency_descriptor_extension::DependencyDescriptorPacketMetadata>
+    for DependencyDescriptorMetadataSnapshot
+{
+    fn from(
+        metadata: rtp::extension::dependency_descriptor_extension::DependencyDescriptorPacketMetadata,
+    ) -> Self {
+        Self {
+            frame_number: u64::from(metadata.frame_number),
+            first_packet_in_frame: metadata.first_packet_in_frame,
+            active_decode_targets: metadata.active_decode_targets_mask,
+            target_layers: metadata
+                .decode_target_layers
+                .into_iter()
+                .enumerate()
+                .filter_map(|(target, layer)| {
+                    u8::try_from(target)
+                        .ok()
+                        .map(|target| DependencyDescriptorTargetMetadata {
+                            target,
+                            temporal_id: layer.temporal_id,
+                            spatial_id: layer.spatial_id,
+                        })
+                })
+                .collect(),
+            decode_target_indications: metadata.decode_target_indications,
+            frame_diffs: metadata.frame_diffs,
+            chain_diffs: metadata.chain_diffs.into_iter().map(u16::from).collect(),
+            target_protected_by_chain: metadata.decode_target_protected_by_chain,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct RemoteTrackState {
     codec_mime_by_ssrc: Mutex<HashMap<u32, Option<String>>>,
@@ -93,6 +162,7 @@ struct RemoteTrackState {
     >,
     last_dd_switch_point_by_ssrc: Mutex<HashMap<u32, bool>>,
     last_dd_availability_by_ssrc: Mutex<HashMap<u32, DependencyDescriptorLayerAvailability>>,
+    last_dd_metadata_by_ssrc: Mutex<HashMap<u32, DependencyDescriptorMetadataSnapshot>>,
     last_observed_layer_by_ssrc: Mutex<HashMap<u32, ObservedLayerIds>>,
 }
 
@@ -138,6 +208,16 @@ impl RemoteTrackState {
                 }
                 None => {
                     availability_by_ssrc.remove(&ssrc);
+                }
+            }
+        }
+        if let Ok(mut metadata_by_ssrc) = self.last_dd_metadata_by_ssrc.lock() {
+            match metadata.as_ref() {
+                Some(metadata) => {
+                    metadata_by_ssrc.insert(ssrc, metadata.clone().into());
+                }
+                None => {
+                    metadata_by_ssrc.remove(&ssrc);
                 }
             }
         }
@@ -295,6 +375,20 @@ impl RemoteTrack {
             .lock()
             .ok()
             .and_then(|availability| availability.get(&ssrc).copied())
+    }
+
+    /// Returns the dependency-descriptor metadata for the latest packet on an incoming SSRC.
+    ///
+    /// `None` means the latest packet did not produce dependency-descriptor metadata.
+    pub fn last_observed_dependency_descriptor_metadata_for_ssrc(
+        &self,
+        ssrc: u32,
+    ) -> Option<DependencyDescriptorMetadataSnapshot> {
+        self.state
+            .last_dd_metadata_by_ssrc
+            .lock()
+            .ok()
+            .and_then(|metadata| metadata.get(&ssrc).cloned())
     }
 
     /// Returns the most recently observed temporal layer for an incoming SSRC.
@@ -514,6 +608,13 @@ mod tests {
             decode_target_indications: vec![
                 rtc::rtp::extension::dependency_descriptor_extension::DependencyDescriptorDecodeTargetIndication::Switch
             ],
+            decode_target_layers: vec![DependencyDescriptorLayerIds {
+                temporal_id: 0,
+                spatial_id: 2,
+            }],
+            frame_diffs: vec![],
+            chain_diffs: vec![],
+            decode_target_protected_by_chain: vec![],
             has_switching_decode_target: true,
         };
         assert!(dependency_descriptor_is_switch_point(&metadata));
@@ -585,6 +686,18 @@ mod tests {
                 .get(&ssrc),
             Some(&DependencyDescriptorLayerAvailability::DecoderUsable)
         );
+        let snapshot = state
+            .last_dd_metadata_by_ssrc
+            .lock()
+            .expect("dependency descriptor metadata lock should not be poisoned")
+            .get(&ssrc)
+            .cloned()
+            .expect("descriptor packet should retain a metadata snapshot");
+        assert_eq!(snapshot.frame_number, 2);
+        assert!(snapshot.first_packet_in_frame);
+        assert_eq!(snapshot.active_decode_targets, 1);
+        assert_eq!(snapshot.target_layers.len(), 1);
+        assert_eq!(snapshot.decode_target_indications.len(), 1);
 
         let without_descriptor = Packet {
             header: Header {
@@ -614,6 +727,14 @@ mod tests {
                 .expect("dependency descriptor availability lock should not be poisoned")
                 .contains_key(&ssrc),
             "a packet without descriptor metadata must not inherit prior availability"
+        );
+        assert!(
+            !state
+                .last_dd_metadata_by_ssrc
+                .lock()
+                .expect("dependency descriptor metadata lock should not be poisoned")
+                .contains_key(&ssrc),
+            "a packet without descriptor metadata must not inherit prior metadata"
         );
     }
 
