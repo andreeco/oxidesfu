@@ -1217,12 +1217,83 @@ fn rust_sdk_svc_dependency_descriptor_supports_a_three_spatial_layer_switch_fram
         .expect("pinned SDK should accept a three-spatial-layer switch descriptor");
 }
 
-// The pinned native SDK can now serialize dependency-descriptor metadata when it packetizes an
-// encoded VP9/AV1 access unit. A passing end-to-end SVC transition still needs a small, valid,
-// deterministic multi-spatial-layer encoded access-unit corpus; descriptor metadata cannot turn
-// a single-layer payload into decodable scalable video.
+const VP9_SVC_LOW_KEYFRAME: &[u8] =
+    include_bytes!("../../fixtures/vp9-svc/low-keyframe.vp9");
+const VP9_SVC_HIGH_KEYFRAME: &[u8] =
+    include_bytes!("../../fixtures/vp9-svc/high-keyframe.vp9");
+
+fn vp9_svc_switch_descriptor(spatial_id: u8) -> livekit::webrtc::video_frame::DependencyDescriptor {
+    use livekit::webrtc::video_frame::{
+        DecodeTargetIndication, DependencyDescriptor, DependencyDescriptorStructure,
+        DependencyDescriptorTemplate,
+    };
+
+    let low = vec![
+        DecodeTargetIndication::Switch,
+        DecodeTargetIndication::NotPresent,
+        DecodeTargetIndication::NotPresent,
+    ];
+    let medium = vec![
+        DecodeTargetIndication::Required,
+        DecodeTargetIndication::Switch,
+        DecodeTargetIndication::NotPresent,
+    ];
+    let high = vec![
+        DecodeTargetIndication::Required,
+        DecodeTargetIndication::Required,
+        DecodeTargetIndication::Switch,
+    ];
+    let decode_target_indications = match spatial_id {
+        0 => low.clone(),
+        2 => high.clone(),
+        _ => panic!("fixture only provides low and high spatial keyframes"),
+    };
+
+    DependencyDescriptor {
+        spatial_id,
+        temporal_id: 0,
+        decode_target_indications,
+        frame_diffs: Vec::new(),
+        chain_diffs: Vec::new(),
+        active_decode_targets: if spatial_id == 0 { 0b001 } else { 0b111 },
+        structure: Some(DependencyDescriptorStructure {
+            structure_id: 0,
+            num_decode_targets: 3,
+            num_chains: 0,
+            decode_target_protected_by_chain: Vec::new(),
+            templates: vec![
+                DependencyDescriptorTemplate {
+                    spatial_id: 0,
+                    temporal_id: 0,
+                    decode_target_indications: low,
+                    frame_diffs: Vec::new(),
+                    chain_diffs: Vec::new(),
+                },
+                DependencyDescriptorTemplate {
+                    spatial_id: 1,
+                    temporal_id: 0,
+                    decode_target_indications: medium,
+                    frame_diffs: Vec::new(),
+                    chain_diffs: Vec::new(),
+                },
+                DependencyDescriptorTemplate {
+                    spatial_id: 2,
+                    temporal_id: 0,
+                    decode_target_indications: high,
+                    frame_diffs: Vec::new(),
+                    chain_diffs: Vec::new(),
+                },
+            ],
+        }),
+    }
+}
+
+// The fixture validates and is accepted by NativeVideoSource, but the current
+// SDK/libwebrtc pre-encoded descriptor path does not deliver a decoded frame to
+// the remote NativeVideoStream. Keep the complete contract ready to promote
+// once that upstream bridge delivery defect is resolved.
 #[tokio::test]
-#[ignore = "requires a deterministic valid layered VP9 access-unit fixture"]
+#[ignore = "descriptor-aware pre-encoded VP9 frames are accepted but not delivered by the pinned SDK bridge"]
 async fn rust_sdk_room_vp9_svc_quality_low_to_high_preserves_delivery_contract() {
     let _media_probe_guard = NATIVE_MEDIA_PROBE_LOCK.lock().await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1303,26 +1374,51 @@ async fn rust_sdk_room_vp9_svc_quality_low_to_high_preserves_delivery_contract()
         "the SDK SVC publication should advertise switchable spatial layers"
     );
 
+    let (stage_tx, stage_rx) = tokio::sync::watch::channel(0_u8);
     let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
     let frame_pump_source = source.clone();
     let frame_pump = tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(Duration::from_millis(33));
-        let mut luma = 96_u8;
+        use livekit::webrtc::video_frame::{
+            EncodedFrameType, EncodedVideoCodec, EncodedVideoFrame, SvcEncodedVideoFrame,
+        };
+
+        let mut ticker = tokio::time::interval(Duration::from_millis(100));
+        let mut timestamp_us = 1_000_000_i64;
         loop {
             tokio::select! {
                 _ = &mut stop_rx => break,
                 _ = ticker.tick() => {
-                    let mut buffer = livekit::webrtc::prelude::I420Buffer::new(1280, 720);
-                    let (y, u, v) = buffer.data_mut();
-                    y.fill(luma);
-                    u.fill(128);
-                    v.fill(128);
-                    luma = luma.wrapping_add(1);
-                    let frame = livekit::webrtc::prelude::VideoFrame::new(
-                        livekit::webrtc::prelude::VideoRotation::VideoRotation0,
-                        buffer,
+                    let (payload, resolution, spatial_id) = if *stage_rx.borrow() == 0 {
+                        (
+                            VP9_SVC_LOW_KEYFRAME,
+                            VideoResolution { width: 320, height: 180 },
+                            0,
+                        )
+                    } else {
+                        (
+                            VP9_SVC_HIGH_KEYFRAME,
+                            VideoResolution { width: 1280, height: 720 },
+                            2,
+                        )
+                    };
+                    let frame = SvcEncodedVideoFrame {
+                        frame: EncodedVideoFrame {
+                            codec: EncodedVideoCodec::VP9,
+                            payload,
+                            timestamp_us,
+                            frame_type: EncodedFrameType::Key,
+                            resolution,
+                            frame_metadata: None,
+                        },
+                        dependency_descriptor: vp9_svc_switch_descriptor(spatial_id),
+                    };
+                    assert!(
+                        frame_pump_source
+                            .capture_svc_encoded_frame(&frame)
+                            .expect("fixture dependency descriptor should validate"),
+                        "native source should accept a valid VP9 SVC fixture frame"
                     );
-                    frame_pump_source.capture_frame(&frame);
+                    timestamp_us += 100_000;
                 }
             }
         }
@@ -1345,6 +1441,7 @@ async fn rust_sdk_room_vp9_svc_quality_low_to_high_preserves_delivery_contract()
     );
 
     remote_publication.set_video_quality(livekit::track::VideoQuality::High);
+    stage_tx.send(2).expect("fixture pump should remain active");
     tokio::time::sleep(Duration::from_secs(2)).await;
     drain_video_frames_for_duration(&mut video_stream, Duration::from_secs(1)).await;
     let high_pixels = collect_video_frame_pixels(&mut video_stream, 12, Duration::from_secs(3)).await;
