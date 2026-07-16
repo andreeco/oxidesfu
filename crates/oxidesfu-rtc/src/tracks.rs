@@ -70,7 +70,7 @@ struct ObservedLayerIds {
 }
 
 fn dependency_descriptor_is_switch_point(
-    metadata: rtp::extension::dependency_descriptor_extension::DependencyDescriptorPacketMetadata,
+    metadata: &rtp::extension::dependency_descriptor_extension::DependencyDescriptorPacketMetadata,
 ) -> bool {
     metadata.first_packet_in_frame && metadata.has_switching_decode_target
 }
@@ -116,14 +116,14 @@ impl RemoteTrackState {
             None
         };
 
-        let availability = metadata.map(|metadata| {
+        let availability = metadata.as_ref().map(|metadata| {
             dependency_descriptor_is_switch_point(metadata)
                 .then_some(DependencyDescriptorLayerAvailability::DecoderUsable)
                 .unwrap_or(DependencyDescriptorLayerAvailability::RtpSeen)
         });
         if let Ok(mut switch_points) = self.last_dd_switch_point_by_ssrc.lock() {
             match metadata {
-                Some(metadata) => {
+                Some(ref metadata) => {
                     switch_points.insert(ssrc, dependency_descriptor_is_switch_point(metadata));
                 }
                 None => {
@@ -503,24 +503,29 @@ mod tests {
     #[test]
     fn dependency_descriptor_switch_requires_frame_start_and_switch_target() {
         let metadata = DependencyDescriptorPacketMetadata {
+            frame_number: 1,
             layer_ids: DependencyDescriptorLayerIds {
                 temporal_id: 0,
                 spatial_id: 2,
             },
             first_packet_in_frame: true,
             last_packet_in_frame: false,
+            active_decode_targets_mask: 1,
+            decode_target_indications: vec![
+                rtc::rtp::extension::dependency_descriptor_extension::DependencyDescriptorDecodeTargetIndication::Switch
+            ],
             has_switching_decode_target: true,
         };
-        assert!(dependency_descriptor_is_switch_point(metadata));
+        assert!(dependency_descriptor_is_switch_point(&metadata));
 
         assert!(!dependency_descriptor_is_switch_point(
-            DependencyDescriptorPacketMetadata {
+            &DependencyDescriptorPacketMetadata {
                 has_switching_decode_target: false,
-                ..metadata
+                ..metadata.clone()
             }
         ));
         assert!(!dependency_descriptor_is_switch_point(
-            DependencyDescriptorPacketMetadata {
+            &DependencyDescriptorPacketMetadata {
                 first_packet_in_frame: false,
                 ..metadata
             }

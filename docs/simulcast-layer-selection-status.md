@@ -23,7 +23,7 @@ Reference revisions inspected:
 | Repository | Revision | Files | Derived behavior |
 |---|---|---|---|
 | LiveKit | `ae09b7d0ad94d764f0c97d183efd36476163e819` | `pkg/rtc/subscribedtrack.go`, `pkg/sfu/downtrack.go`, `pkg/sfu/forwarder.go`, `pkg/sfu/videolayerselector/{base.go,simulcast.go}` | Subscriber settings set max spatial/temporal bounds; forwarding retains max, target, current, and seen layers; spatial changes are decodable-boundary gated. |
-| WebRTC Rust compatibility fork (published/pinned) | outer `3b0b2f0d8f0443deeab47fb83dada7eb4d7778ea`, nested RTC `56a36e408913475baeeb5672bd3e30036dea820f` | `rtc-rtp/src/codec/{vp9,h264,av1}`, `rtc-rtp/src/extension/dependency_descriptor_extension/{mod.rs,dependency_descriptor_extension_test.rs}` | Provides codec switch-boundary parsing plus active-target packet metadata; a VP9/AV1 descriptor frame boundary requires an active DTI `Switch` target before it is a safe scalable source-switch point. |
+| WebRTC Rust compatibility fork (published/pinned) | outer `39e82efbee6265dceed6edcf525376ea842416bc`, nested RTC `2425a7f66a0536757656a5f50b6f583aca0c156f` | `rtc-rtp/src/codec/{vp9,h264,av1}`, `rtc-rtp/src/extension/dependency_descriptor_extension/{mod.rs,dependency_descriptor_extension_test.rs}` | Provides codec switch-boundary parsing plus a stateful active-target mask and typed per-frame DTI metadata; a VP9/AV1 descriptor frame boundary requires an active DTI `Switch` target before it is a safe scalable source-switch point. |
 | OxideSFU | working tree following `3d6331078e8a2a2c0587fe5bb16da939efb89bd2` | `crates/oxidesfu-signaling/src/{media/video_ingress.rs,router/session.rs}` | Original first-eligible-SSRC latch was in the reader-owned forwarding target. |
 
 ## Completed work
@@ -142,7 +142,7 @@ Live Firefox validation now passes against a freshly built local OxideSFU server
 
 Remaining work:
 
-- implement descriptor-aware decode-target forwarding for one-SSRC VP9/AV1 scalable sources; the source selector now intentionally forwards the selected source rather than pretending packet spatial IDs are alternate simulcast sources;
+- retain parser-level frame-difference, chain-difference, and decode-target-to-layer mapping metadata, then implement descriptor-aware decode-target forwarding for one-SSRC VP9/AV1 scalable sources; the new stateful active mask and typed DTI vector are the published prerequisite, but are not enough to retain frame dependencies safely;
 - add native SDK scalable-stream coverage when a deterministic dependency-descriptor publisher fixture is available.
 
 ### 4. Source liveness expiry is complete; decodability availability remains limited
