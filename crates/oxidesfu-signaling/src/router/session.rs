@@ -547,6 +547,20 @@ pub(crate) async fn activate_tracks_with_compatible_bind_results(
             .await
         {
             Some(oxidesfu_rtc::ForwardTrackBindResult::Compatible { .. }) => {
+                let _ = state.rooms.set_media_track_subscribed(
+                    room_name,
+                    publisher_identity,
+                    &track.sid,
+                    subscriber_identity,
+                    true,
+                );
+                emit_aggregate_subscribed_quality_update_for_track(
+                    state,
+                    room_name,
+                    publisher_identity,
+                    track,
+                    false,
+                );
                 compatible_track_sids.insert(track.sid.clone());
             }
             Some(oxidesfu_rtc::ForwardTrackBindResult::UnsupportedCodec)
@@ -2686,6 +2700,41 @@ fn requested_video_fps_from_settings(settings: Option<&proto::UpdateTrackSetting
 }
 
 #[allow(deprecated)]
+fn has_active_media_subscriber_for_track(
+    state: &SignalState,
+    room_name: &str,
+    publisher_identity: &str,
+    track_sid: &str,
+) -> bool {
+    let Ok(participants) = state.rooms.list_participants(room_name) else {
+        return false;
+    };
+
+    participants.into_iter().any(|participant| {
+        let subscriber_identity = participant.identity;
+        let explicit_subscription = state.media_subscriptions.explicit_subscription(
+            room_name,
+            publisher_identity,
+            track_sid,
+            &subscriber_identity,
+        );
+
+        subscriber_identity != publisher_identity
+            && explicit_subscription != Some(false)
+            && (explicit_subscription.is_some()
+                || state
+                    .signal_connections
+                    .get(room_name, &subscriber_identity)
+                    .is_some())
+            && state.rooms.is_media_track_subscribed(
+                room_name,
+                publisher_identity,
+                track_sid,
+                &subscriber_identity,
+            )
+    })
+}
+
 pub(crate) fn aggregate_requested_quality_for_track(
     state: &SignalState,
     room_name: &str,
@@ -2773,6 +2822,7 @@ pub(crate) fn emit_aggregate_subscribed_quality_update_for_track(
     room_name: &str,
     publisher_identity: &str,
     track: &proto::TrackInfo,
+    emit_when_no_active_receiver: bool,
 ) {
     if track.r#type != proto::TrackType::Video as i32 {
         return;
@@ -2802,6 +2852,12 @@ pub(crate) fn emit_aggregate_subscribed_quality_update_for_track(
     else {
         return;
     };
+
+    let has_active_receiver =
+        has_active_media_subscriber_for_track(state, room_name, publisher_identity, &track.sid);
+    if !has_active_receiver && !emit_when_no_active_receiver {
+        return;
+    }
 
     let codec_mime_types = crate::media::codec_mime_types_for_track(track);
     let aggregate_max_quality =
@@ -3565,6 +3621,7 @@ pub(crate) async fn handle_media_subscription_request(
                     room_name,
                     &publisher_identity,
                     &prior_track,
+                    true,
                 );
             }
 
@@ -3587,6 +3644,7 @@ pub(crate) async fn handle_media_subscription_request(
                 room_name,
                 &publisher_identity,
                 &track,
+                false,
             );
             continue;
         }
@@ -3628,6 +3686,7 @@ pub(crate) async fn handle_media_subscription_request(
                 room_name,
                 &publisher_identity,
                 &track,
+                true,
             );
             continue;
         }

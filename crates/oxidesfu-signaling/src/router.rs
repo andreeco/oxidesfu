@@ -1968,6 +1968,7 @@ pub(crate) async fn cleanup_participant_runtime_state(
                 room_name,
                 &publisher_identity,
                 &track,
+                true,
             );
         }
     }

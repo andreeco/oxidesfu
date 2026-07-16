@@ -32,6 +32,7 @@ fn emit_track_setting_quality_update(state: &SignalState, room_name: &str, track
         room_name,
         &publisher_identity,
         &track,
+        false,
     );
 }
 

@@ -4477,11 +4477,75 @@ fn subscribed_quality_update_skips_track_removed_before_emission() {
         room,
         publisher,
         &stale_track,
+        false,
     );
 
     assert!(
         publisher_outbound_rx.try_recv().is_err(),
         "a removed track must not send quality control to a later same-identity connection"
+    );
+}
+
+#[test]
+#[allow(deprecated)]
+fn subscribed_quality_update_waits_for_active_media_receiver_then_emits_demand() {
+    let state = state();
+    let room = "quality-demand-activation-room";
+    let publisher = "publisher";
+    let subscriber = "subscriber";
+    let track = proto::TrackInfo {
+        sid: "TR_quality_activation".to_string(),
+        r#type: proto::TrackType::Video as i32,
+        mime_type: "video/vp8".to_string(),
+        ..Default::default()
+    };
+
+    join_participant_for_data_track_test(&state, room, publisher);
+    join_participant_for_data_track_test(&state, room, subscriber);
+    state
+        .rooms
+        .add_participant_track(room, publisher, track.clone())
+        .expect("publisher track should be added");
+    state
+        .media_subscriptions
+        .set_subscribed(room, publisher, &track.sid, subscriber, true);
+    let _ = state
+        .rooms
+        .set_media_track_subscribed(room, publisher, &track.sid, subscriber, false);
+
+    let (publisher_outbound_tx, mut publisher_outbound_rx) = tokio::sync::mpsc::unbounded_channel();
+    state
+        .signal_connections
+        .insert(room, publisher, publisher_outbound_tx);
+
+    super::session::emit_aggregate_subscribed_quality_update_for_track(
+        &state, room, publisher, &track, false,
+    );
+    assert!(
+        publisher_outbound_rx.try_recv().is_err(),
+        "a requested but unbound subscription must not send an all-off publisher demand"
+    );
+
+    let _ = state
+        .rooms
+        .set_media_track_subscribed(room, publisher, &track.sid, subscriber, true);
+    super::session::emit_aggregate_subscribed_quality_update_for_track(
+        &state, room, publisher, &track, false,
+    );
+
+    let update = publisher_outbound_rx
+        .try_recv()
+        .expect("an active receiver should emit publisher quality demand");
+    let Some(proto::signal_response::Message::SubscribedQualityUpdate(update)) = update.message
+    else {
+        panic!("expected SubscribedQualityUpdate");
+    };
+    assert!(
+        update
+            .subscribed_qualities
+            .iter()
+            .all(|quality| quality.enabled),
+        "an active default-quality receiver should request every spatial layer"
     );
 }
 
@@ -4513,6 +4577,15 @@ async fn track_setting_request_updates_dynacast_control_plane_state() {
                 },
             )
             .expect("publisher track should be added");
+    }
+    for track_sid in ["TR_dynacast_a", "TR_dynacast_b"] {
+        state
+            .media_subscriptions
+            .set_subscribed(room, publisher, track_sid, participant, true);
+        let _ =
+            state
+                .rooms
+                .set_media_track_subscribed(room, publisher, track_sid, participant, true);
     }
     let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::unbounded_channel();
     let (publisher_outbound_tx, mut publisher_outbound_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -4800,10 +4873,9 @@ async fn aggregate_requested_quality_uses_default_subscription_when_no_explicit_
 
     // No explicit MediaSubscriptionStore entry is set here. The active signal
     // session makes this participant a default subscriber rather than a retained leaver.
-    let _ =
-        state
-            .rooms
-            .set_media_track_subscribed(room, publisher, track_sid, subscriber, true);
+    let _ = state
+        .rooms
+        .set_media_track_subscribed(room, publisher, track_sid, subscriber, true);
     let (subscriber_signal_tx, _subscriber_signal_rx) = tokio::sync::mpsc::unbounded_channel();
     state
         .signal_connections
@@ -6282,6 +6354,20 @@ async fn relayed_signal_request_bytes_captures_outbound_only_responses() {
     state
         .signal_connections
         .insert(room, publisher, publisher_outbound_tx);
+    state.media_subscriptions.set_subscribed(
+        room,
+        publisher,
+        "TR_relayed_dynacast",
+        participant,
+        true,
+    );
+    let _ = state.rooms.set_media_track_subscribed(
+        room,
+        publisher,
+        "TR_relayed_dynacast",
+        participant,
+        true,
+    );
 
     let request = proto::SignalRequest {
         message: Some(proto::signal_request::Message::TrackSetting(

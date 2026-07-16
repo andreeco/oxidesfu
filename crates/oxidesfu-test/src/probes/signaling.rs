@@ -78,7 +78,12 @@ use super::*;
         flags
     }
 
+    // TEST_LIFECYCLE: SUPERSEDED
+    // REPLACED_BY: oxidesfu-signaling/router/tests.rs::subscribed_quality_update_waits_for_active_media_receiver_then_emits_demand
+    // REASON: Upstream LiveKit emits dynacast demand from SubscribedTrack.OnCodecNegotiated,
+    // not from a signal-only Subscription request with no negotiated receiver.
     #[tokio::test]
+    #[ignore = "signal-only clients do not create an active media receiver; covered by direct activation regression"]
     async fn signal_track_setting_quality_aggregate_unsubscribe_and_leave_contract() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
