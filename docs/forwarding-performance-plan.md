@@ -112,8 +112,8 @@ This is an important compatibility slice, **not the completed simulcast-layer-se
 
 | Status | Missing behavior / evidence | Required implementation and test |
 |---|---|---|
-| Partial | Allocator-driven policy | `TrackAllocationStore` now supplies a revisioned, target-scoped desired quality to forwarding readers; it is merged with and clamped by the `UpdateTrackSettings` maximum before keyframe-gated selection. A real bandwidth/layout allocator producer and end-to-end allocation transitions remain. |
-| Partial | Temporal target state | `SubscriberVideoTemporalController` now owns FPS-derived maximum/desired/current temporal state and timestamp fallback per target. Allocator output still cannot set an independent desired temporal target; add allocation-driven temporal transitions. |
+| Partial | Allocator-driven policy | `TrackAllocationStore` now supplies revisioned, target-scoped desired spatial quality and desired temporal layer inputs to forwarding readers. Spatial desired quality is merged with and clamped by `UpdateTrackSettings` maximum quality before keyframe-gated selection; temporal desired is clamped by the FPS-derived temporal maximum. `oxidesfu-rtc::PeerConnection` now exposes candidate-pair congestion-feedback `available_outgoing_bitrate` for producer input. A real bandwidth/layout allocator producer and end-to-end allocation transitions remain. |
+| Partial | Temporal target state | `SubscriberVideoTemporalController` now owns FPS-derived maximum/desired/current temporal state and timestamp fallback per target. The reader accepts an independent allocator temporal target and enforces `DropAboveDesired` for enhancement layers above that target. Bandwidth/layout producer input and end-to-end allocation-driven temporal transitions remain. |
 | Partial | Dependency-descriptor switching | Oxide is pinned to published outer WebRTC `3b0b2f0d8f0443deeab47fb83dada7eb4d7778ea`, nested RTC `56a36e408913475baeeb5672bd3e30036dea820f`. `RemoteTrack` now exposes the current-packet descriptor result and the forwarding reader uses it for VP9/AV1 source switching: frame start plus active DTI `Switch` is required when metadata is present, while absent metadata retains the codec-keyframe fallback. Parser, RTC-wrapper, and signaling policy regressions pass. Add real scalable RTP packet-sequence/source-continuity and native SDK fixture coverage. |
 | Partial | Availability and fallback liveness | The reader-local 250 ms timer now expires sources after two seconds and reacquires a live fallback once; the selector regression proves no retry storm/oscillation. Availability is still recently observed RTP rather than descriptor-verified decoder usability. |
 | Partial | Reader-local observability | The three-second target heartbeat now exports maximum/desired/current spatial and temporal layers, RID/SSRC, transitions, categorized spatial/temporal drops, selector PLIs, rewrite drops, successful RTP packet count/payload bytes, and write errors without hot-path locks, allocation, formatting, or clock reads. PLI suppression/feedback counters, wire-byte rate windows, and a machine-readable profiler snapshot remain. |
@@ -344,7 +344,7 @@ No `ip netns` client namespace was configured. As a fallback, the profile bound 
 
 This fallback verifies the workload through a non-loopback address but does **not** isolate client kernel wakeups from server work, because clients and server still share a host network namespace. Provision a routed namespace or run `lk` on another host before attributing the epoll/kernel entries to OxideSFU's transport design.
 
-The WebRTC fork now reuses the driver-owned core-output `Vec<TaggedBytesMut>` batch. The current OxideSFU pin is `24b69d02220ffdaf67af4550482d5986089a95aa`, whose RTC submodule is `6d436970b437bb8c7572e4ab8d970333496a1edb`. It retains ring-backed in-place AEAD AES-GCM, lossless `poll_write` backpressure ownership, cached bind-time SDES MID IDs, and a bounded 64-datagram driver-visible core write batch with a coalesced continuation wake. RTC tests cover retry identity, `A/B/C` FIFO order, bounded output ordering, downstream-stage exclusion until retry success, non-backpressure drops, and RTP/RTCP/data-channel variants; outer-WebRTC tests cover MID output/ownership and continuation coalescing.
+The WebRTC fork now reuses the driver-owned core-output `Vec<TaggedBytesMut>` batch. The current OxideSFU pin is `3b0b2f0d8f0443deeab47fb83dada7eb4d7778ea`, whose RTC submodule is `56a36e408913475baeeb5672bd3e30036dea820f`. It retains ring-backed in-place AEAD AES-GCM, lossless `poll_write` backpressure ownership, cached bind-time SDES MID IDs, bounded 64-datagram driver-visible core write batches with coalesced continuation wake, and dependency-descriptor packet metadata with active DTI `Switch` semantics for scalable VP9/AV1 source-switch gating. RTC tests cover retry identity, `A/B/C` FIFO order, bounded output ordering, downstream-stage exclusion until retry success, non-backpressure drops, RTP/RTCP/data-channel variants, and dependency-descriptor parser `Switch` semantics; outer-WebRTC tests cover MID output/ownership and continuation coalescing.
 
 ### Completed and remaining opportunities, in priority order
 
@@ -365,10 +365,11 @@ The WebRTC fork now reuses the driver-owned core-output `Vec<TaggedBytesMut>` ba
   - `track_local_static.go` uses a pooled shallow RTP packet and target-bound writers.
   - `rtpsender.go` binds the interceptor/SRTP writer once.
   - `interceptor.go` dispatches through the bound writer without a peer-connection driver event queue.
-- OxideSFU WebRTC fork `24b69d02220ffdaf67af4550482d5986089a95aa` (RTC `6d436970b437bb8c7572e4ab8d970333496a1edb`):
+- OxideSFU WebRTC fork `3b0b2f0d8f0443deeab47fb83dada7eb4d7778ea` (RTC `56a36e408913475baeeb5672bd3e30036dea820f`):
   - `src/media_stream/track_local/static_rtp.rs` has cached-MID injection and a driver event enqueue.
   - `src/peer_connection/driver.rs` owns event delivery, bounded output draining, continuation wake coalescing, core locking, and socket writes.
   - `rtc/rtc/src/peer_connection/handler/mod.rs` owns bounded core `poll_write_batch`, lossless retry ownership, and temporary queues.
+  - `rtc/rtc-rtp/src/extension/dependency_descriptor_extension/mod.rs` exposes packet-level descriptor metadata, including active `Switch` decode-target indications used by Oxide's VP9/AV1 source-switch policy.
   - `rtc-srtp/src/context/srtp.rs` and `cipher/cipher_aead_aes_gcm.rs` retain in-place ring-backed AEAD RTP encryption.
 
 ### Final two-round comparison and current limit
@@ -487,7 +488,7 @@ This work is complete only when all conditions are true:
 3. Rust SDK spatial-quality, quality-switch, and per-subscriber FPS contracts pass.
 4. Browser adaptive quality churn passes when the browser environment is available.
 5. `cargo test -p oxidesfu-signaling` passes.
-6. Temporal allocator intent and descriptor-aware VP9/AV1 switching are implemented or explicitly documented as unsupported compatibility gaps.
+6. Temporal allocator intent and descriptor-aware VP9/AV1 switching are implemented, with any remaining end-to-end fixture limitations explicitly documented.
 7. A Go/Oxide per-track post-warm-up report establishes comparable selected media before CPU conclusions.
 8. A five-run large simulcast comparison is within the configured CPU regression gate, or an explicit measured compatibility/performance delta is documented and accepted.
 9. A before/after flamegraph and benchmark artifact demonstrate the dominant target hotspot was removed rather than merely displaced.
