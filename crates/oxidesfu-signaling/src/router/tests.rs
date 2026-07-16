@@ -5625,6 +5625,36 @@ fn vp9_temporal_layer_id_from_payload_rejects_out_of_range_tid() {
 }
 
 #[test]
+fn inferred_scalable_packet_quality_uses_known_codec_spatial_metadata() {
+    assert_eq!(
+        super::session::inferred_scalable_packet_quality(Some("video/vp9"), Some(0), false),
+        Some(proto::VideoQuality::Low)
+    );
+    assert_eq!(
+        super::session::inferred_scalable_packet_quality(Some("video/AV1"), Some(1), false),
+        Some(proto::VideoQuality::Medium)
+    );
+    assert_eq!(
+        super::session::inferred_scalable_packet_quality(Some("video/vp9"), Some(2), false),
+        Some(proto::VideoQuality::High)
+    );
+    assert_eq!(
+        super::session::inferred_scalable_packet_quality(Some("video/vp9"), None, false),
+        Some(proto::VideoQuality::High),
+        "a known single scalable source must not be dropped as unknown simulcast input"
+    );
+    assert_eq!(
+        super::session::inferred_scalable_packet_quality(Some("video/vp8"), Some(0), false),
+        None
+    );
+    assert_eq!(
+        super::session::inferred_scalable_packet_quality(Some("video/vp9"), Some(0), true),
+        None,
+        "advertised simulcast mappings remain authoritative"
+    );
+}
+
+#[test]
 fn vp9_spatial_layer_id_from_payload_extracts_sid_when_present() {
     // L bit set, layer info byte with SID=3 (bits 4..1) and TID=2.
     let payload = [0x20, 0x46, 0x00];

@@ -49,6 +49,26 @@ async function waitForHarnessReady(page: import('@playwright/test').Page, label:
   );
 }
 
+async function waitForReceiverSample(
+  page: import('@playwright/test').Page,
+  label: string,
+  timeoutMs = 10_000,
+): Promise<ReceiverSample> {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = '';
+
+  while (Date.now() < deadline) {
+    try {
+      return await page.evaluate(() => window.oxidesfuReceiverSample()) as ReceiverSample;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+      await page.waitForTimeout(250);
+    }
+  }
+
+  throw new Error(`${label} did not produce inbound video RTP within ${timeoutMs}ms: ${lastError}`);
+}
+
 test('final adaptive low request keeps the active Firefox receiver advancing', async ({ browser }) => {
   const serverUrl = process.env.OXIDESFU_URL;
 
@@ -127,9 +147,9 @@ test('Firefox VP9 SVC receiver keeps decoding after adaptive quality churn', asy
     });
     await subscriber.waitForTimeout(250);
 
-    const first = await subscriber.evaluate(() => window.oxidesfuReceiverSample()) as ReceiverSample;
+    const first = await waitForReceiverSample(subscriber, 'VP9 subscriber');
     await subscriber.waitForTimeout(5_000);
-    const second = await subscriber.evaluate(() => window.oxidesfuReceiverSample()) as ReceiverSample;
+    const second = await waitForReceiverSample(subscriber, 'VP9 subscriber');
 
     expect(second.pcId).toBe(first.pcId);
     expect(second.trackId).toBe(first.trackId);

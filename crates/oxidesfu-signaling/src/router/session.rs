@@ -2020,6 +2020,35 @@ pub(crate) fn packet_video_quality_for_track(
     None
 }
 
+/// Resolves a quality identity for a known scalable codec when signaling did not advertise a
+/// simulcast SSRC/RID catalog. This is deliberately not a generic unknown-layer fallback.
+///
+/// VP9/AV1 scalable streams can carry multiple spatial layers on one primary SSRC. Their parsed
+/// spatial IDs are ordered base-to-enhancement (`0`, `1`, `2+`). A stream without a layer ID is a
+/// single known source and is treated as high rather than being silently black-holed as ambiguous
+/// simulcast input.
+#[allow(deprecated)]
+pub(crate) fn inferred_scalable_packet_quality(
+    codec_mime: Option<&str>,
+    spatial_id: Option<u8>,
+    has_advertised_layer_mapping: bool,
+) -> Option<proto::VideoQuality> {
+    if has_advertised_layer_mapping {
+        return None;
+    }
+
+    let codec_mime = codec_mime?.trim().to_ascii_lowercase();
+    if !codec_mime.contains("vp9") && !codec_mime.contains("av1") {
+        return None;
+    }
+
+    Some(match spatial_id {
+        Some(0) => proto::VideoQuality::Low,
+        Some(1) => proto::VideoQuality::Medium,
+        Some(_) | None => proto::VideoQuality::High,
+    })
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct FpsForwardingState {
     current_timestamp: Option<u32>,
@@ -6899,6 +6928,19 @@ async fn forward_publisher_remote_track(
                                 incoming_ssrc
                             };
 
+                        let incoming_codec_mime = video_ssrc_codec_mime
+                            .get(&incoming_ssrc)
+                            .and_then(|mime| mime.as_deref());
+                        let packet_spatial_layer_hint = remote_track
+                            .last_observed_spatial_layer_for_ssrc(incoming_ssrc)
+                            .or_else(|| {
+                                incoming_codec_mime.and_then(|mime| {
+                                    mime.to_ascii_lowercase()
+                                        .contains("vp9")
+                                        .then(|| vp9_spatial_layer_id_from_payload(&packet.payload))
+                                        .flatten()
+                                })
+                            });
                         packet_video_quality = packet_video_quality_for_track(
                             incoming_ssrc,
                             video_ssrc_rids
@@ -6906,7 +6948,15 @@ async fn forward_publisher_remote_track(
                                 .and_then(|rid| rid.as_deref()),
                             &layer_quality_by_ssrc,
                             &layer_quality_by_rid,
-                        );
+                        )
+                        .or_else(|| {
+                            inferred_scalable_packet_quality(
+                                incoming_codec_mime,
+                                packet_spatial_layer_hint,
+                                !layer_quality_by_ssrc.is_empty()
+                                    || !layer_quality_by_rid.is_empty(),
+                            )
+                        });
                     }
 
                     if !logged_first_rtp {

@@ -59,6 +59,8 @@ A browser publisher can initially register a generic video track before the firs
 
 `oxidesfu-rtc::PeerConnection` now treats `video/vp9` as a first-class forwarding codec: it uses the pinned RTC's VP9 profile 0 (`PT 98`, `profile-id=0`) and constrains both dual-PC and single-PC forwarding transceivers to VP9 when the resolved track requires it. The browser harness explicitly requests `VP9` with `L3T3_KEY` for the scalable-video contract.
 
+The first fresh-server Firefox run exposed one further reader integration issue: a one-SSRC VP9 SVC source has no simulcast SSRC/RID quality catalog, so every packet was counted as `drop_unknown_layer`. The reader now derives an explicit quality from known VP9/AV1 scalable spatial metadata (`0` low, `1` medium, `2+` high); a known single scalable source with no spatial ID is explicitly high. This fallback is limited to VP9/AV1 without advertised layer mappings, so ordinary ambiguous simulcast input remains observable and is not silently selected.
+
 ### Decodable source-switch boundaries
 
 The reader currently recognizes the following RTP-level source-switch starts:
@@ -134,9 +136,10 @@ Covered regressions:
 
 The RTC integration regression now feeds stateful real RTP header-extension sequences into `RemoteTrackState`: a non-`Switch` frame start blocks selection, an active `Switch` frame start permits it, and a following descriptor-free packet cannot inherit stale eligibility. Forwarding-facing VP9 and AV1 regressions compose that decision with the selector and `SubscriberRtpForwarder`, proving continuous outgoing sequence/timestamp translation across the permitted source switch.
 
+Live Firefox validation now passes against a freshly built local OxideSFU server: all three receiver-counter contracts pass, including `Firefox VP9 SVC receiver keeps decoding after adaptive quality churn`.
+
 Remaining work:
 
-- run the Firefox VP9 SVC browser contract against a freshly started OxideSFU process after the runtime codec reconciliation change; the harness build and in-process VP9 sender SDP regression pass, but this session had no running server for a live browser result;
 - add native SDK scalable-stream coverage when a deterministic dependency-descriptor publisher fixture is available.
 
 ### 4. Source liveness expiry is complete; decodability availability remains limited
@@ -191,13 +194,13 @@ cargo test -p oxidesfu-test \
   -- --nocapture
 ```
 
-The focused RTC suite passed with `38 passed`, including the VP9-only forwarding SDP regression; the focused signaling suite passed with `522 passed, 3 ignored`. The browser harness production build passes. Focused native SDK quality-transition, concurrent spatial-isolation, and concurrent FPS-isolation contracts passed serially. `cargo test --workspace` also passed earlier (`115 passed, 7 ignored`, plus passing doctests). `cargo clippy --workspace --all-targets -- -D warnings` remains blocked by pre-existing diagnostics across signaling test/support code; this slice does not change that broader baseline.
+The focused RTC suite passed with `38 passed`, including the VP9-only forwarding SDP regression; the focused signaling suite passed with `523 passed, 3 ignored`, including scalable quality inference. The browser harness production build passes, and a fresh-server Firefox run passed all three receiver-counter contracts, including the VP9 SVC quality-churn contract. Focused native SDK quality-transition, concurrent spatial-isolation, and concurrent FPS-isolation contracts passed serially. `cargo test --workspace` also passed earlier (`115 passed, 7 ignored`, plus passing doctests). `cargo clippy --workspace --all-targets -- -D warnings` remains blocked by pre-existing diagnostics across signaling test/support code; this slice does not change that broader baseline.
 
 ## Completion criteria
 
 This work should be called complete only when:
 
-1. source switching is proven decodable through a native SDK scalable VP9/AV1 fixture where applicable, and the Firefox VP9 SVC browser contract is rerun against a fresh server build;
+1. source switching is proven decodable through a native SDK scalable VP9/AV1 fixture where applicable; the Firefox VP9 SVC browser contract now passes against a fresh server build;
 2. source availability, fallback, and retry behavior are bounded and observable, including decoder-usability semantics for scalable streams;
 3. observability exports selector suppression/receiver-feedback counts, wire-byte rates, and a machine-readable profiler snapshot;
 4. concurrent real subscribers prove independent low/high decoded dimensions and isolated updates;
