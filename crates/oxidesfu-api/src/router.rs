@@ -1150,14 +1150,14 @@ async fn perform_rpc(State(state): State<ApiState>, headers: HeaderMap, body: By
             "destination identity is required",
         );
     }
-    if request.method.as_bytes().len() > MAX_RPC_METHOD_BYTES {
+    if request.method.len() > MAX_RPC_METHOD_BYTES {
         return twirp_error(
             StatusCode::BAD_REQUEST,
             "invalid_argument",
             "rpc method must be at most 64 bytes",
         );
     }
-    if request.payload.as_bytes().len() > MAX_RPC_PAYLOAD_BYTES {
+    if request.payload.len() > MAX_RPC_PAYLOAD_BYTES {
         return twirp_error(
             StatusCode::BAD_REQUEST,
             "invalid_argument",

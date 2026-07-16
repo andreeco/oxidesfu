@@ -3894,7 +3894,6 @@ mod tests {
                     can_publish: true,
                     ..Default::default()
                 }),
-                ..Default::default()
             },
         )
         .await;

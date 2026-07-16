@@ -1,8 +1,11 @@
 use axum::{
-    extract::{Request, State},
     http::{HeaderMap, StatusCode, header},
-    middleware::Next,
     response::Response,
+};
+#[cfg(test)]
+use axum::{
+    extract::{Request, State},
+    middleware::Next,
 };
 use oxidesfu_auth::{AuthContext, AuthError};
 use oxidesfu_room::RoomStoreError;
@@ -20,6 +23,7 @@ pub(crate) fn authenticate(
     state.auth.verify_authorization_header(header)
 }
 
+#[cfg(test)]
 pub(crate) async fn optional_auth_middleware(
     State(state): State<ApiState>,
     mut request: Request,

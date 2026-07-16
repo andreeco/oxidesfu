@@ -72,10 +72,6 @@ where
     }
 }
 
-pub(crate) fn protobuf(message: impl Message) -> Response {
-    protobuf_bytes(message.encode_to_vec())
-}
-
 pub(crate) fn protobuf_bytes(bytes: Vec<u8>) -> Response {
     (
         StatusCode::OK,
