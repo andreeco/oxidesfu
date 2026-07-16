@@ -2137,18 +2137,26 @@ pub(crate) fn packet_video_quality_for_track(
 ///
 /// Spatial packets within this source are decoder targets, not alternate source streams. Their
 /// filtering therefore belongs to scalable decode-target policy, not the simulcast source selector.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn is_single_scalable_source(
     codec_mime: Option<&str>,
+    has_advertised_layer_mapping: bool,
+) -> bool {
+    is_single_scalable_source_for_codec_class(
+        video_codec_class_from_mime(codec_mime),
+        has_advertised_layer_mapping,
+    )
+}
+
+fn is_single_scalable_source_for_codec_class(
+    codec_class: VideoCodecClass,
     has_advertised_layer_mapping: bool,
 ) -> bool {
     if has_advertised_layer_mapping {
         return false;
     }
 
-    codec_mime.is_some_and(|mime| {
-        let mime = mime.trim().to_ascii_lowercase();
-        mime.contains("vp9") || mime.contains("av1")
-    })
+    matches!(codec_class, VideoCodecClass::Vp9 | VideoCodecClass::Av1)
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -2482,40 +2490,50 @@ pub(crate) fn av1_is_keyframe_start(payload: &[u8]) -> bool {
 /// Determines whether a packet may start a decodable spatial simulcast source after a switch.
 /// Codec formats without a verified detector deliberately return false rather than allowing an
 /// arbitrary delta frame to become the new source.
-pub(crate) fn video_is_decodable_switch_point(codec_mime: Option<&str>, payload: &[u8]) -> bool {
-    let Some(codec_mime) = codec_mime else {
-        return false;
-    };
-    let mime = codec_mime.to_ascii_lowercase();
-    if mime.contains("vp8") {
-        vp8_is_keyframe_start(payload)
-    } else if mime.contains("vp9") {
-        vp9_is_keyframe_start(payload)
-    } else if mime.contains("h264") {
-        h264_is_keyframe_start(payload)
-    } else if mime.contains("av1") {
-        av1_is_keyframe_start(payload)
-    } else {
-        false
+fn video_is_decodable_switch_point_for_codec_class(
+    codec_class: VideoCodecClass,
+    payload: &[u8],
+) -> bool {
+    match codec_class {
+        VideoCodecClass::Vp8 => vp8_is_keyframe_start(payload),
+        VideoCodecClass::Vp9 => vp9_is_keyframe_start(payload),
+        VideoCodecClass::H264 => h264_is_keyframe_start(payload),
+        VideoCodecClass::Av1 => av1_is_keyframe_start(payload),
+        _ => false,
     }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn video_is_decodable_switch_point(codec_mime: Option<&str>, payload: &[u8]) -> bool {
+    video_is_decodable_switch_point_for_codec_class(video_codec_class_from_mime(codec_mime), payload)
 }
 
 /// Applies dependency-descriptor source-switch semantics for scalable VP9/AV1 when available.
 /// A parsed descriptor that is not a switch point must not fall back to a payload heuristic.
+fn video_is_decodable_switch_point_with_dependency_descriptor_for_codec_class(
+    codec_class: VideoCodecClass,
+    payload: &[u8],
+    descriptor_switch_point: Option<bool>,
+) -> bool {
+    if matches!(codec_class, VideoCodecClass::Vp9 | VideoCodecClass::Av1) {
+        return descriptor_switch_point
+            .unwrap_or_else(|| video_is_decodable_switch_point_for_codec_class(codec_class, payload));
+    }
+
+    video_is_decodable_switch_point_for_codec_class(codec_class, payload)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn video_is_decodable_switch_point_with_dependency_descriptor(
     codec_mime: Option<&str>,
     payload: &[u8],
     descriptor_switch_point: Option<bool>,
 ) -> bool {
-    let descriptor_codec = codec_mime.is_some_and(|mime| {
-        mime.eq_ignore_ascii_case("video/vp9") || mime.eq_ignore_ascii_case("video/av1")
-    });
-    if descriptor_codec {
-        return descriptor_switch_point
-            .unwrap_or_else(|| video_is_decodable_switch_point(codec_mime, payload));
-    }
-
-    video_is_decodable_switch_point(codec_mime, payload)
+    video_is_decodable_switch_point_with_dependency_descriptor_for_codec_class(
+        video_codec_class_from_mime(codec_mime),
+        payload,
+        descriptor_switch_point,
+    )
 }
 
 pub(crate) fn vp9_temporal_layer_id_from_payload(payload: &[u8]) -> Option<u8> {
@@ -2531,6 +2549,43 @@ pub(crate) fn h265_temporal_layer_id_from_payload(payload: &[u8]) -> Option<u8> 
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VideoCodecClass {
+    Unknown,
+    Vp8,
+    Vp9,
+    H264,
+    H265,
+    Av1,
+    Rtx,
+    Other,
+}
+
+fn video_codec_class_from_mime(codec_mime: Option<&str>) -> VideoCodecClass {
+    let Some(codec_mime) = codec_mime else {
+        return VideoCodecClass::Unknown;
+    };
+
+    let mime = codec_mime.trim().to_ascii_lowercase();
+    if mime.is_empty() {
+        VideoCodecClass::Unknown
+    } else if mime.contains("rtx") {
+        VideoCodecClass::Rtx
+    } else if mime.contains("vp8") {
+        VideoCodecClass::Vp8
+    } else if mime.contains("vp9") {
+        VideoCodecClass::Vp9
+    } else if mime.contains("h264") {
+        VideoCodecClass::H264
+    } else if mime.contains("h265") {
+        VideoCodecClass::H265
+    } else if mime.contains("av1") {
+        VideoCodecClass::Av1
+    } else {
+        VideoCodecClass::Other
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VideoTemporalCodecHint {
     Vp8,
     Vp9,
@@ -2538,22 +2593,20 @@ pub(crate) enum VideoTemporalCodecHint {
     Unknown,
 }
 
+fn video_temporal_codec_hint_from_class(codec_class: VideoCodecClass) -> VideoTemporalCodecHint {
+    match codec_class {
+        VideoCodecClass::Vp8 => VideoTemporalCodecHint::Vp8,
+        VideoCodecClass::Vp9 => VideoTemporalCodecHint::Vp9,
+        VideoCodecClass::H265 => VideoTemporalCodecHint::H265,
+        _ => VideoTemporalCodecHint::Unknown,
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn video_temporal_codec_hint_from_mime(
     codec_mime: Option<&str>,
 ) -> VideoTemporalCodecHint {
-    let Some(codec_mime) = codec_mime else {
-        return VideoTemporalCodecHint::Unknown;
-    };
-    let mime = codec_mime.to_ascii_lowercase();
-    if mime.contains("vp8") {
-        VideoTemporalCodecHint::Vp8
-    } else if mime.contains("vp9") {
-        VideoTemporalCodecHint::Vp9
-    } else if mime.contains("h265") {
-        VideoTemporalCodecHint::H265
-    } else {
-        VideoTemporalCodecHint::Unknown
-    }
+    video_temporal_codec_hint_from_class(video_codec_class_from_mime(codec_mime))
 }
 
 #[cfg(test)]
@@ -6584,7 +6637,7 @@ async fn forward_publisher_remote_track(
 
         let mut video_ssrc_rids = HashMap::<u32, Option<String>>::new();
         let mut video_ssrc_codec_mime = HashMap::<u32, Option<String>>::new();
-        let mut video_ssrc_is_repair = HashMap::<u32, bool>::new();
+        let mut video_ssrc_codec_class = HashMap::<u32, VideoCodecClass>::new();
         let mut video_rid_primary_ssrc = HashMap::<String, u32>::new();
         let mut dropped_repair_video_ssrc_count: u64 = 0;
         let mut had_forward_targets: Option<bool> = None;
@@ -7056,6 +7109,10 @@ async fn forward_publisher_remote_track(
                                                 incoming_ssrc,
                                                 Some(codec_mime.to_string()),
                                             );
+                                            video_ssrc_codec_class.insert(
+                                                incoming_ssrc,
+                                                video_codec_class_from_mime(Some(codec_mime)),
+                                            );
                                             continue;
                                         }
                                         Err(error) => tracing::warn!(
@@ -7069,23 +7126,20 @@ async fn forward_publisher_remote_track(
                                     }
                                 }
                             }
+                            video_ssrc_codec_class.insert(
+                                incoming_ssrc,
+                                video_codec_class_from_mime(codec_mime.as_deref()),
+                            );
                             video_ssrc_codec_mime.insert(incoming_ssrc, codec_mime);
                         }
-                        video_ssrc_is_repair
-                            .entry(incoming_ssrc)
-                            .or_insert_with(|| {
-                                video_ssrc_codec_mime
-                                    .get(&incoming_ssrc)
-                                    .and_then(|mime| mime.as_deref())
-                                    .map(|mime| mime.to_ascii_lowercase().contains("rtx"))
-                                    .unwrap_or(false)
-                            });
 
-                        if video_ssrc_is_repair
-                            .get(&incoming_ssrc)
-                            .copied()
-                            .unwrap_or(false)
-                        {
+                        if matches!(
+                            video_ssrc_codec_class
+                                .get(&incoming_ssrc)
+                                .copied()
+                                .unwrap_or(VideoCodecClass::Unknown),
+                            VideoCodecClass::Rtx
+                        ) {
                             dropped_repair_video_ssrc_count =
                                 dropped_repair_video_ssrc_count.saturating_add(1);
                             if dropped_repair_video_ssrc_count.is_multiple_of(300) {
@@ -7114,8 +7168,12 @@ async fn forward_publisher_remote_track(
                         let incoming_codec_mime = video_ssrc_codec_mime
                             .get(&incoming_ssrc)
                             .and_then(|mime| mime.as_deref());
-                        packet_source_kind = if is_single_scalable_source(
-                            incoming_codec_mime,
+                        let incoming_codec_class = video_ssrc_codec_class
+                            .get(&incoming_ssrc)
+                            .copied()
+                            .unwrap_or_else(|| video_codec_class_from_mime(incoming_codec_mime));
+                        packet_source_kind = if is_single_scalable_source_for_codec_class(
+                            incoming_codec_class,
                             !layer_quality_by_ssrc.is_empty() || !layer_quality_by_rid.is_empty(),
                         ) {
                             VideoSourceKind::SingleScalable
@@ -7219,8 +7277,12 @@ async fn forward_publisher_remote_track(
                     let packet_codec_mime = video_ssrc_codec_mime
                         .get(&packet.header.ssrc)
                         .and_then(|mime| mime.as_deref());
+                    let packet_codec_class = video_ssrc_codec_class
+                        .get(&packet.header.ssrc)
+                        .copied()
+                        .unwrap_or_else(|| video_codec_class_from_mime(packet_codec_mime));
                     let packet_temporal_codec_hint =
-                        video_temporal_codec_hint_from_mime(packet_codec_mime);
+                        video_temporal_codec_hint_from_class(packet_codec_class);
                     let packet_temporal_layer_hint = if is_video_track {
                         remote_track.last_observed_temporal_layer_for_ssrc(packet.header.ssrc)
                     } else {
@@ -7244,12 +7306,9 @@ async fn forward_publisher_remote_track(
                         remote_track
                             .last_observed_spatial_layer_for_ssrc(packet.header.ssrc)
                             .or_else(|| {
-                                packet_codec_mime.and_then(|mime| {
-                                    mime.to_ascii_lowercase()
-                                        .contains("vp9")
-                                        .then(|| vp9_spatial_layer_id_from_payload(&packet.payload))
-                                        .flatten()
-                                })
+                                matches!(packet_codec_class, VideoCodecClass::Vp9)
+                                    .then(|| vp9_spatial_layer_id_from_payload(&packet.payload))
+                                    .flatten()
                             })
                             .unwrap_or(0)
                     } else {
@@ -7336,8 +7395,8 @@ async fn forward_publisher_remote_track(
                                     spatial: packet_video_quality.map(SpatialLayer::from_quality),
                                     source_kind: packet_source_kind,
                                     is_decodable_switch_point:
-                                        video_is_decodable_switch_point_with_dependency_descriptor(
-                                            packet_codec_mime,
+                                        video_is_decodable_switch_point_with_dependency_descriptor_for_codec_class(
+                                            packet_codec_class,
                                             &packet.payload,
                                             packet_descriptor_switch_point,
                                         ),
