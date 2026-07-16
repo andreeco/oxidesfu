@@ -1346,13 +1346,10 @@ async fn rust_sdk_room_vp9_svc_quality_low_to_high_preserves_delivery_contract()
     wait_for_room_connected(&mut publisher_events).await;
     wait_for_room_connected(&mut subscriber_events).await;
 
-    let source = NativeVideoSource::new(
-        VideoResolution {
-            width: 1280,
-            height: 720,
-        },
-        false,
-    );
+    let source = NativeVideoSource::new_encoded(VideoResolution {
+        width: 1280,
+        height: 720,
+    });
     let track = LocalVideoTrack::create_video_track("svc-cam", RtcVideoSource::Native(source.clone()));
     let _publication = publisher_room
         .local_participant()
@@ -1361,6 +1358,7 @@ async fn rust_sdk_room_vp9_svc_quality_low_to_high_preserves_delivery_contract()
             TrackPublishOptions {
                 simulcast: false,
                 video_codec: livekit::options::VideoCodec::VP9,
+                video_encoder: livekit::options::VideoEncoderBackend::PreEncoded,
                 scalability_mode: Some("L3T3_KEY".to_string()),
                 ..Default::default()
             },
