@@ -1237,6 +1237,93 @@ fn refresh_forward_targets_for_track(
     }
 }
 
+#[allow(deprecated)]
+fn advertised_video_bitrate_for_quality(
+    track: &proto::TrackInfo,
+    quality: proto::VideoQuality,
+) -> Option<u64> {
+    track
+        .layers
+        .iter()
+        .chain(track.codecs.iter().flat_map(|codec| codec.layers.iter()))
+        .filter(|layer| {
+            normalized_video_quality_from_i32(layer.quality) == quality && layer.bitrate > 0
+        })
+        .map(|layer| layer.bitrate as u64)
+        .min()
+}
+
+#[allow(deprecated)]
+fn allocation_quality_for_budget(
+    track: &proto::TrackInfo,
+    per_track_budget_bps: u64,
+) -> Option<proto::VideoQuality> {
+    [
+        proto::VideoQuality::High,
+        proto::VideoQuality::Medium,
+        proto::VideoQuality::Low,
+    ]
+    .into_iter()
+    .find(|quality| {
+        advertised_video_bitrate_for_quality(track, *quality)
+            .is_some_and(|bitrate| bitrate <= per_track_budget_bps)
+    })
+    .or_else(|| {
+        advertised_video_bitrate_for_quality(track, proto::VideoQuality::Low)
+            .map(|_| proto::VideoQuality::Low)
+    })
+}
+
+#[allow(deprecated)]
+fn allocation_temporal_layer_for_budget(
+    track: &proto::TrackInfo,
+    quality: proto::VideoQuality,
+    per_track_budget_bps: u64,
+) -> Option<u8> {
+    let bitrate = advertised_video_bitrate_for_quality(track, quality)?;
+    Some(
+        if per_track_budget_bps.saturating_mul(100) >= bitrate.saturating_mul(90) {
+            2
+        } else if per_track_budget_bps.saturating_mul(100) >= bitrate.saturating_mul(60) {
+            1
+        } else {
+            0
+        },
+    )
+}
+
+fn eligible_video_track_count_for_subscriber(
+    rooms: &RoomStore,
+    media_subscriptions: &MediaSubscriptionStore,
+    room_name: &str,
+    subscriber_identity: &str,
+) -> usize {
+    rooms
+        .list_participants(room_name)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|publisher| publisher.identity != subscriber_identity)
+        .flat_map(|publisher| {
+            publisher.tracks.into_iter().filter(move |track| {
+                track.r#type == proto::TrackType::Video as i32
+                    && media_subscriptions.is_subscribed(
+                        room_name,
+                        &publisher.identity,
+                        &track.sid,
+                        subscriber_identity,
+                    )
+                    && rooms.can_subscribe_to_media_track(
+                        room_name,
+                        &publisher.identity,
+                        &track.sid,
+                        subscriber_identity,
+                    )
+            })
+        })
+        .count()
+        .max(1)
+}
+
 fn cached_forwarding_decision_for_subscriber(
     cache: &mut HashMap<(String, String, String, String), CachedForwardingDecision>,
     revisions: ForwardingDecisionRevisions,
@@ -5995,6 +6082,7 @@ async fn forward_publisher_remote_track(
     let forward_tracks = forward_tracks.clone();
     let media_forwarding = media_forwarding.clone();
     let media_subscriptions = media_subscriptions.clone();
+    let peer_connections = peer_connections.clone();
     let auto_subscribe_preferences = auto_subscribe_preferences.clone();
     let track_settings = track_settings.clone();
     let track_allocations = track_allocations.clone();
@@ -6025,6 +6113,11 @@ async fn forward_publisher_remote_track(
             std::time::Duration::from_secs(3),
         );
         forwarding_debug_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut allocation_tick = tokio::time::interval_at(
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+        );
+        allocation_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         let mut video_ssrc_rids = HashMap::<u32, Option<String>>::new();
         let mut video_ssrc_codec_mime = HashMap::<u32, Option<String>>::new();
@@ -6096,6 +6189,59 @@ async fn forward_publisher_remote_track(
                             .collect::<Vec<_>>();
                         if !keyframe_requests.is_empty() {
                             let _ = remote_track.write_rtcp_packets(keyframe_requests).await;
+                        }
+                        continue;
+                    }
+                    _ = allocation_tick.tick() => {
+                        for target in &cached_forward_targets {
+                            let subscriber_identity = target.subscriber_identity();
+                            let Some((receiver, _)) = peer_connections
+                                .media_receiver_for_identity(&room_name, subscriber_identity)
+                            else {
+                                track_allocations.remove_for_track(
+                                    &room_name,
+                                    subscriber_identity,
+                                    &track_sid,
+                                );
+                                continue;
+                            };
+                            let Some(available_bitrate_bps) =
+                                receiver.available_outgoing_bitrate_bps().await
+                            else {
+                                track_allocations.remove_for_track(
+                                    &room_name,
+                                    subscriber_identity,
+                                    &track_sid,
+                                );
+                                continue;
+                            };
+                            let track_count = eligible_video_track_count_for_subscriber(
+                                &rooms,
+                                &media_subscriptions,
+                                &room_name,
+                                subscriber_identity,
+                            ) as u64;
+                            let budget_bps = available_bitrate_bps / track_count;
+                            let quality = allocation_quality_for_budget(&track_info, budget_bps);
+                            let temporal = quality.and_then(|quality| {
+                                allocation_temporal_layer_for_budget(
+                                    &track_info,
+                                    quality,
+                                    budget_bps,
+                                )
+                            });
+                            track_allocations.set_desired_quality_for_track(
+                                &room_name,
+                                subscriber_identity,
+                                &track_sid,
+                                quality,
+                            );
+                            track_allocations.set_desired_temporal_layer_for_track(
+                                &room_name,
+                                subscriber_identity,
+                                &track_sid,
+                                temporal,
+                            );
                         }
                         continue;
                     }
@@ -7886,9 +8032,9 @@ mod tests {
 
     use super::{
         ForwardingDecisionRevisions, FpsForwardingState, SubscriberVideoTemporalController,
-        TemporalIngressDecision, TemporalLayer, add_track_response,
-        apply_publisher_codec_preferences_to_answer, av1_is_keyframe_start,
-        cached_forwarding_decision_for_subscriber,
+        TemporalIngressDecision, TemporalLayer, add_track_response, allocation_quality_for_budget,
+        allocation_temporal_layer_for_budget, apply_publisher_codec_preferences_to_answer,
+        av1_is_keyframe_start, cached_forwarding_decision_for_subscriber,
         clear_publisher_subscription_active_if_no_remaining_tracks, data_channel_kind_for_label,
         desired_video_quality_from_allocation, filter_h264_from_publisher_answer_for_client,
         force_sendonly_sections_without_msid_recvonly, h264_is_keyframe_start,
@@ -11190,6 +11336,42 @@ mod tests {
             "a nominal 33 ms frame interval must not be dropped for a 30 FPS request"
         );
         assert!(state.should_forward_packet(5_940, 30));
+    }
+
+    #[test]
+    fn allocation_budget_selects_highest_advertised_layer_and_temporal_target() {
+        let track = proto::TrackInfo {
+            layers: vec![
+                proto::VideoLayer {
+                    quality: proto::VideoQuality::Low as i32,
+                    bitrate: 150_000,
+                    ..Default::default()
+                },
+                proto::VideoLayer {
+                    quality: proto::VideoQuality::Medium as i32,
+                    bitrate: 600_000,
+                    ..Default::default()
+                },
+                proto::VideoLayer {
+                    quality: proto::VideoQuality::High as i32,
+                    bitrate: 1_800_000,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            allocation_quality_for_budget(&track, 700_000),
+            Some(proto::VideoQuality::Medium)
+        );
+        assert_eq!(
+            allocation_temporal_layer_for_budget(&track, proto::VideoQuality::Medium, 700_000),
+            Some(2)
+        );
+        assert_eq!(
+            allocation_quality_for_budget(&track, 300_000),
+            Some(proto::VideoQuality::Low)
+        );
     }
 
     #[test]
