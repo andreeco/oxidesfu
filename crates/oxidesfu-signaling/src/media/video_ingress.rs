@@ -53,6 +53,15 @@ pub(crate) enum VideoIngressDecision {
     DropUnknownLayer,
 }
 
+/// Observable reader-local acquisition state for one subscriber target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LayerAcquisitionState {
+    Stable,
+    WaitingForDesired,
+    WaitingForFallback,
+    FallbackLocked,
+}
+
 /// Result of a timer-driven target-layer acquisition retry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct KeyframeRequest {
@@ -121,6 +130,33 @@ impl SubscriberVideoLayerSelector {
 
     pub(crate) const fn policy(&self) -> LayerPolicy {
         self.policy
+    }
+
+    pub(crate) const fn waiting_for(&self) -> SpatialLayer {
+        self.waiting_for
+    }
+
+    pub(crate) const fn acquisition_ticks(&self) -> u8 {
+        self.acquisition_ticks
+    }
+
+    pub(crate) const fn remaining_pli_requests(&self) -> u8 {
+        self.remaining_pli_requests
+    }
+
+    pub(crate) fn acquisition_state(&self) -> LayerAcquisitionState {
+        if self.fallback_locked {
+            LayerAcquisitionState::FallbackLocked
+        } else if self.fallback_started {
+            LayerAcquisitionState::WaitingForFallback
+        } else if self
+            .current
+            .is_some_and(|(_, spatial)| spatial == self.policy.desired)
+        {
+            LayerAcquisitionState::Stable
+        } else {
+            LayerAcquisitionState::WaitingForDesired
+        }
     }
 
     /// Applies a policy update without disrupting the current decodable layer. A later switch is
@@ -281,7 +317,7 @@ impl SubscriberVideoLayerSelector {
 #[cfg(test)]
 mod tests {
     use super::{
-        KeyframeRequest, LayerPacketMetadata, LayerPolicy, SpatialLayer,
+        KeyframeRequest, LayerAcquisitionState, LayerPacketMetadata, LayerPolicy, SpatialLayer,
         SubscriberVideoLayerSelector, VideoIngressDecision,
     };
 
@@ -291,6 +327,35 @@ mod tests {
             spatial: Some(spatial),
             is_decodable_switch_point: keyframe,
         }
+    }
+
+    #[test]
+    fn acquisition_state_exposes_waiting_and_fallback_lock() {
+        let mut selector =
+            SubscriberVideoLayerSelector::new(LayerPolicy::fixed(SpatialLayer::High));
+        assert_eq!(
+            selector.acquisition_state(),
+            LayerAcquisitionState::WaitingForDesired
+        );
+        let _ = selector.observe_packet(packet(10, SpatialLayer::Low, false));
+        for _ in 0..SubscriberVideoLayerSelector::ACQUISITION_GRACE_TICKS {
+            let _ = selector.on_timer();
+        }
+        assert_eq!(
+            selector.acquisition_state(),
+            LayerAcquisitionState::WaitingForFallback
+        );
+        assert_eq!(selector.waiting_for(), SpatialLayer::Low);
+        assert_eq!(
+            selector.observe_packet(packet(10, SpatialLayer::Low, true)),
+            VideoIngressDecision::Forward {
+                selected_ssrc_changed: true
+            }
+        );
+        assert_eq!(
+            selector.acquisition_state(),
+            LayerAcquisitionState::FallbackLocked
+        );
     }
 
     #[test]

@@ -148,7 +148,7 @@ Remaining limitation:
 
 ### 5. Production observability is partially complete
 
-The existing three-second target heartbeat now reports reader-local maximum/desired/current spatial layers, maximum/desired/current temporal layers, selected RID/SSRC, layer transitions, categorized spatial and temporal drops, selector PLI requests, rewrite drops, successful RTP packet count, successful rewritten payload bytes, and write errors. Counters update without locks, allocation, formatting, or clock reads in the RTP path.
+The existing three-second target heartbeat now reports reader-local maximum/desired/current spatial layers, maximum/desired/current temporal layers, selector acquisition state, waiting layer, acquisition age, remaining selector PLI budget, selected RID/SSRC, layer transitions, categorized spatial and temporal drops, selector PLI requests, rewrite drops, successful RTP packet count, successful rewritten payload bytes, and write errors. Counters update without locks, allocation, formatting, or clock reads in the RTP path.
 
 Still required:
 
