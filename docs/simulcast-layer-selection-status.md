@@ -92,11 +92,10 @@ The native SDK contract in `crates/oxidesfu-test/src/probes/media.rs` now additi
 
 The store defaults to no allocation, making `desired = max` and preserving current behavior. Its store and pure policy tests prove target isolation, semantic change notification, downgrade, and maximum clamping.
 
-A one-second timer-driven producer now reads each subscriber receiver's congestion-feedback `available_outgoing_bitrate`, divides it equally across that subscriber's eligible video subscriptions, and selects the highest advertised `VideoLayer.bitrate` that fits. It writes semantic spatial and temporal targets through `TrackAllocationStore`; no RTP packet performs BWE lookup or allocation work.
+A one-second timer-driven producer now reads each subscriber receiver's congestion-feedback `available_outgoing_bitrate`, divides it across eligible video subscriptions according to layout weight, and selects the highest advertised `VideoLayer.bitrate` that fits. A subscriber `UpdateTrackSettings` viewport area takes precedence for weight; otherwise the largest advertised layer dimensions are used. It writes semantic spatial and temporal targets through `TrackAllocationStore`; no RTP packet performs BWE lookup or allocation work.
 
 Remaining work:
 
-- add layout-priority weighting beyond the current deterministic equal-share policy;
 - add end-to-end allocation-driven downgrade/upgrade coverage.
 
 ### 2. Temporal target state and allocator temporal intent are plumbed; producer remains
