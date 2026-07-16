@@ -9,6 +9,37 @@ type ReceiverSample = {
   pcId: string;
 };
 
+type DataChannelSample = {
+  pcId: string;
+  origin: 'local' | 'remote';
+  label: string;
+  readyState: string;
+  bufferedAmount: number;
+  ordered: boolean;
+};
+
+type PeerConnectionSample = {
+  pcId: string;
+  connectionState: string;
+  iceConnectionState: string;
+};
+
+type SessionDescriptionSample = {
+  pcId: string;
+  direction: 'local' | 'remote';
+  type: string | null;
+  sections: Array<{
+    media: string;
+    mid?: string;
+    direction?: string;
+    setup?: string;
+    hasIceCredentials: boolean;
+    candidateCount: number;
+    hasEndOfCandidates: boolean;
+    hasSctpPort: boolean;
+  }>;
+};
+
 function token(identity: string, room: string): string {
   const key = process.env.OXIDESFU_API_KEY;
   const secret = process.env.OXIDESFU_API_SECRET;
@@ -47,6 +78,47 @@ async function waitForHarnessReady(page: import('@playwright/test').Page, label:
   throw new Error(
     `${label} harness did not become ready within ${timeoutMs}ms (last status: ${lastStatus || 'empty'})`,
   );
+}
+
+async function waitForReliableDataChannelOpen(
+  page: import('@playwright/test').Page,
+  label: string,
+  timeoutMs = 10_000,
+  origin: 'local' | 'remote' = 'local',
+) {
+  const deadline = Date.now() + timeoutMs;
+  let latest: DataChannelSample[] = [];
+
+  while (Date.now() < deadline) {
+    latest = await page.evaluate(() => window.oxidesfuDataChannelSample()) as DataChannelSample[];
+    if (latest.some((channel) => channel.origin === origin && channel.label === '_reliable' && channel.readyState === 'open')) {
+      return;
+    }
+    await page.waitForTimeout(250);
+  }
+
+  const descriptions = await page.evaluate(() => window.oxidesfuSessionDescriptionSample()) as SessionDescriptionSample[];
+  throw new Error(`${label} did not open ${origin} _reliable within ${timeoutMs}ms: channels=${JSON.stringify(latest)}, descriptions=${JSON.stringify(descriptions)}`);
+}
+
+async function waitForPeerConnectionCount(
+  page: import('@playwright/test').Page,
+  label: string,
+  expectedCount: number,
+  timeoutMs = 10_000,
+) {
+  const deadline = Date.now() + timeoutMs;
+  let latest: PeerConnectionSample[] = [];
+
+  while (Date.now() < deadline) {
+    latest = await page.evaluate(() => window.oxidesfuPeerConnectionSample()) as PeerConnectionSample[];
+    if (latest.length >= expectedCount) {
+      return;
+    }
+    await page.waitForTimeout(250);
+  }
+
+  throw new Error(`${label} did not create ${expectedCount} peer connections within ${timeoutMs}ms: ${JSON.stringify(latest)}`);
 }
 
 async function waitForReceiverSample(
@@ -180,6 +252,8 @@ test('Meet-style chat delivery keeps the active Firefox video receiver advancing
   await expect.poll(
     () => subscriber.evaluate(() => document.querySelector('video[data-testid="remote-video"]')?.srcObject !== null),
   ).toBe(true);
+  await waitForReliableDataChannelOpen(publisher, 'publisher');
+  await waitForReliableDataChannelOpen(subscriber, 'subscriber');
 
   const before = await subscriber.evaluate(() => window.oxidesfuReceiverSample()) as ReceiverSample;
   await publisher.evaluate((message) => window.oxidesfuSendChatMessage(message), message);
@@ -187,16 +261,68 @@ test('Meet-style chat delivery keeps the active Firefox video receiver advancing
     () => subscriber.evaluate(() => window.oxidesfuReceivedChatMessages()),
   ).toContain(message);
 
-  await subscriber.waitForTimeout(5_000);
-  const after = await subscriber.evaluate(() => window.oxidesfuReceiverSample()) as ReceiverSample;
+  let previous = before;
+  for (const delayMs of [1_000, 2_000, 2_000]) {
+    await subscriber.waitForTimeout(delayMs);
+    const after = await subscriber.evaluate(() => window.oxidesfuReceiverSample()) as ReceiverSample;
 
-  expect(after.pcId).toBe(before.pcId);
-  expect(after.trackId).toBe(before.trackId);
-  expect(after.packetsReceived).toBeGreaterThan(before.packetsReceived);
-  expect(after.framesDecoded).toBeGreaterThan(before.framesDecoded);
+    expect(after.pcId).toBe(before.pcId);
+    expect(after.trackId).toBe(before.trackId);
+    expect(after.packetsReceived).toBeGreaterThan(previous.packetsReceived);
+    expect(after.framesDecoded).toBeGreaterThan(previous.framesDecoded);
+    previous = after;
+  }
 
   await publisher.evaluate(() => window.oxidesfuClose());
   await subscriber.evaluate(() => window.oxidesfuClose());
   await publisherContext.close();
   await subscriberContext.close();
+});
+
+test('dual-PC chat delivery keeps the active Firefox video receiver advancing', async ({ browser }) => {
+  const serverUrl = process.env.OXIDESFU_URL;
+  const room = `browser-dual-pc-chat-video-${randomUUID()}`;
+  const publisherContext = await browser.newContext();
+  const subscriberContext = await browser.newContext();
+  const publisher = await publisherContext.newPage();
+  const subscriber = await subscriberContext.newPage();
+  const publisherUrl = `/?role=publisher&singlePeerConnection=false&url=${encodeURIComponent(serverUrl!)}&token=${encodeURIComponent(token('browser-dual-pc-publisher', room))}`;
+  const subscriberUrl = `/?role=publisher&singlePeerConnection=false&url=${encodeURIComponent(serverUrl!)}&token=${encodeURIComponent(token('browser-dual-pc-subscriber', room))}`;
+  const message = `dual-pc-chat-${randomUUID()}`;
+
+  try {
+    await publisher.goto(publisherUrl);
+    await waitForHarnessReady(publisher, 'dual-PC publisher');
+    await subscriber.goto(subscriberUrl);
+    await waitForHarnessReady(subscriber, 'dual-PC subscriber');
+    await waitForPeerConnectionCount(publisher, 'dual-PC publisher', 2);
+    await waitForPeerConnectionCount(subscriber, 'dual-PC subscriber', 2);
+    await expect.poll(
+      () => subscriber.evaluate(() => document.querySelector('video[data-testid="remote-video"]')?.srcObject !== null),
+    ).toBe(true);
+    await waitForReliableDataChannelOpen(subscriber, 'dual-PC subscriber', 10_000, 'remote');
+
+    const before = await waitForReceiverSample(subscriber, 'dual-PC subscriber');
+    const sendChat = publisher.evaluate((message) => window.oxidesfuSendChatMessage(message), message);
+    await waitForReliableDataChannelOpen(publisher, 'dual-PC publisher');
+    await sendChat;
+    await expect.poll(
+      () => subscriber.evaluate(() => window.oxidesfuReceivedChatMessages()),
+    ).toContain(message);
+
+    let previous = before;
+    for (const delayMs of [1_000, 2_000, 2_000]) {
+      await subscriber.waitForTimeout(delayMs);
+      const after = await subscriber.evaluate(() => window.oxidesfuReceiverSample()) as ReceiverSample;
+
+      expect(after.pcId).toBe(before.pcId);
+      expect(after.trackId).toBe(before.trackId);
+      expect(after.packetsReceived).toBeGreaterThan(previous.packetsReceived);
+      expect(after.framesDecoded).toBeGreaterThan(previous.framesDecoded);
+      previous = after;
+    }
+  } finally {
+    await publisherContext.close();
+    await subscriberContext.close();
+  }
 });

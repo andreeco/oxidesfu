@@ -1246,6 +1246,111 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn client_created_data_channel_opens_after_media_only_offer_is_renegotiated_with_sctp() {
+        let (offerer, offerer_events) = create_peer_connection_with_events()
+            .await
+            .expect("offerer peer connection should create");
+        let (answerer, answerer_events) = create_peer_connection_with_events()
+            .await
+            .expect("answerer peer connection should create");
+        let PeerConnectionEvents {
+            ice_candidates: mut offerer_ice_candidates,
+            data_channels: _,
+            remote_tracks: _,
+        } = offerer_events;
+        let PeerConnectionEvents {
+            ice_candidates: mut answerer_ice_candidates,
+            data_channels: mut answerer_data_channels,
+            remote_tracks: _,
+        } = answerer_events;
+
+        let media_only_offer = offerer
+            .create_audio_offer()
+            .await
+            .expect("media-only offer should create");
+        let media_only_answer = answerer
+            .create_answer_for_offer(media_only_offer)
+            .await
+            .expect("media-only answer should create");
+        offerer
+            .set_remote_answer(media_only_answer)
+            .await
+            .expect("media-only answer should apply");
+
+        let reliable = offerer
+            .create_data_channel("_reliable")
+            .await
+            .expect("reliable channel should create after media negotiation");
+        let data_offer = offerer
+            .create_offer()
+            .await
+            .expect("data-channel renegotiation offer should create");
+        assert!(data_offer.contains("m=application"));
+        let data_answer = answerer
+            .create_answer_for_offer(data_offer)
+            .await
+            .expect("data-channel renegotiation answer should create");
+        assert!(data_answer.contains("m=application"));
+        offerer
+            .set_remote_answer(data_answer)
+            .await
+            .expect("data-channel renegotiation answer should apply");
+
+        let reliable_for_open = reliable.clone();
+        let open_task = tokio::spawn(async move { reliable_for_open.wait_open().await });
+        let receive_task = tokio::spawn(async move {
+            answerer_data_channels
+                .recv()
+                .await
+                .ok_or_else(|| std::io::Error::other("answerer data channel stream ended"))
+        });
+        tokio::pin!(open_task);
+        tokio::pin!(receive_task);
+
+        let received = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                tokio::select! {
+                    candidate = offerer_ice_candidates.recv() => {
+                        if let Some(candidate) = candidate {
+                            answerer
+                                .add_ice_candidate_json(&candidate.candidate_init_json)
+                                .await
+                                .expect("offerer candidate should add to answerer");
+                        }
+                    }
+                    candidate = answerer_ice_candidates.recv() => {
+                        if let Some(candidate) = candidate {
+                            offerer
+                                .add_ice_candidate_json(&candidate.candidate_init_json)
+                                .await
+                                .expect("answerer candidate should add to offerer");
+                        }
+                    }
+                    result = &mut open_task => {
+                        result
+                            .expect("open task should not panic")
+                            .expect("late-negotiated data channel should open");
+                    }
+                    result = &mut receive_task => {
+                        break result
+                            .expect("receive task should not panic")
+                            .expect("answerer should receive the late-negotiated data channel");
+                    }
+                }
+            }
+        })
+        .await
+        .expect("late-negotiated data channel should connect before timeout");
+
+        assert_eq!(
+            received.label().await.expect("received label should read"),
+            "_reliable"
+        );
+        offerer.close().await.expect("offerer should close");
+        answerer.close().await.expect("answerer should close");
+    }
+
+    #[tokio::test]
     async fn data_channel_sends_text_between_in_process_peers() {
         let (offerer, offerer_events) = create_peer_connection_with_events()
             .await

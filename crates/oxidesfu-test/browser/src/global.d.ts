@@ -14,6 +14,34 @@ declare global {
       codec: string;
       requestedScalabilityMode?: 'L3T3_KEY';
     }>;
+    oxidesfuDataChannelSample: () => Array<{
+      pcId: string;
+      origin: 'local' | 'remote';
+      label: string;
+      readyState: RTCDataChannelState;
+      bufferedAmount: number;
+      ordered: boolean;
+    }>;
+    oxidesfuPeerConnectionSample: () => Array<{
+      pcId: string;
+      connectionState: RTCPeerConnectionState;
+      iceConnectionState: RTCIceConnectionState;
+    }>;
+    oxidesfuSessionDescriptionSample: () => Array<{
+      pcId: string;
+      direction: 'local' | 'remote';
+      type: RTCSdpType | null;
+      sections: Array<{
+        media: string;
+        mid?: string;
+        direction?: string;
+        setup?: string;
+        hasIceCredentials: boolean;
+        candidateCount: number;
+        hasEndOfCandidates: boolean;
+        hasSctpPort: boolean;
+      }>;
+    }>;
     oxidesfuSendChatMessage: (message: string) => Promise<void>;
     oxidesfuReceivedChatMessages: () => string[];
     oxidesfuClose: () => void;

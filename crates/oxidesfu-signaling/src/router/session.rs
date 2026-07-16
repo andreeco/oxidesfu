@@ -5288,6 +5288,19 @@ pub(crate) async fn answer_publisher_offer(
     let offer_mid_to_track_id_for_codec_preferences =
         effective_offer_mid_to_track_id(&offer.sdp, &offer_proto_mid_to_track_id);
     let offered_media_kinds = single_pc_offer_media_kinds(&offer.sdp);
+    let offer_has_sctp = offer
+        .sdp
+        .lines()
+        .any(|line| line.trim_start().starts_with("m=application "));
+    tracing::debug!(
+        room = %room_name,
+        identity = %identity,
+        offer_id,
+        single_pc_mode,
+        offer_has_sctp,
+        offer_sdp_len = offer.sdp.len(),
+        "publisher_offer_received"
+    );
     state.remember_participant_subscribe_video_mime_types(
         room_name,
         identity,
@@ -5378,7 +5391,6 @@ pub(crate) async fn answer_publisher_offer(
             .create_answer()
             .await
             .map_err(|err| prost::DecodeError::new(err.to_string()))?;
-
         let attached_mids = attached_mid_to_track_id
             .keys()
             .map(String::as_str)
@@ -5459,8 +5471,10 @@ pub(crate) async fn answer_publisher_offer(
             room = %room_name,
             identity = %identity,
             offer_id,
+            offer_has_sctp,
+            answer_has_sctp = sdp.lines().any(|line| line.trim_start().starts_with("m=application ")),
             answer_sdp = %sdp,
-            "single_pc_existing_pc_answer_sdp"
+            "publisher_existing_pc_answer_created"
         );
         tracing::info!(
             room = %room_name,
@@ -5661,8 +5675,10 @@ pub(crate) async fn answer_publisher_offer(
         room = %room_name,
         identity = %identity,
         offer_id,
+        offer_has_sctp,
+        answer_has_sctp = sdp.lines().any(|line| line.trim_start().starts_with("m=application ")),
         answer_sdp = %sdp,
-        "single_pc_answer_sdp"
+        "publisher_new_pc_answer_created"
     );
     tracing::info!(
         room = %room_name,
@@ -5827,6 +5843,14 @@ fn forward_peer_connection_events(
                     };
                     let label = data_channel.label().await.unwrap_or_default();
                     let channel_kind = data_channel_kind_for_label(label.as_str());
+                    tracing::debug!(
+                        room = %room_name,
+                        identity = %identity,
+                        target = ?target,
+                        label = %label,
+                        channel_kind = ?channel_kind,
+                        "peer_connection_data_channel_received"
+                    );
                     if let Some(kind) = channel_kind {
                         if kind == DataChannelKind::Reliable
                             && let Some(threshold) = state.datachannel_slow_threshold_bytes()

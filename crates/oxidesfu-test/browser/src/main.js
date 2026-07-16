@@ -2,6 +2,9 @@ const parameters = new URLSearchParams(window.location.search);
 const forceVp9 = parameters.get('codec') === 'vp9';
 const nativePeerConnection = window.RTCPeerConnection;
 const peerConnections = [];
+const peerConnectionIds = new Map();
+const observedDataChannels = [];
+const observedSessionDescriptions = [];
 const peerConnectionStateHistory = [];
 const remoteIceCandidateHistory = [];
 let descriptionError;
@@ -58,10 +61,45 @@ nativePeerConnection.prototype.addIceCandidate = async function (candidate) {
   }
 };
 
+function observeDataChannel(peerConnection, dataChannel, origin) {
+  if (observedDataChannels.some((entry) => entry.peerConnection === peerConnection && entry.dataChannel === dataChannel)) {
+    return;
+  }
+  observedDataChannels.push({ peerConnection, dataChannel, origin });
+}
+
+function describeSdp(sdp) {
+  const sections = [];
+  for (const section of sdp.split(/\r?\n(?=m=)/)) {
+    const lines = section.split(/\r?\n/);
+    const media = lines.find((line) => line.startsWith('m='))?.slice(2).split(' ')[0];
+    if (!media) continue;
+    const attribute = (prefix) => lines.find((line) => line.startsWith(prefix))?.slice(prefix.length);
+    sections.push({
+      media,
+      mid: attribute('a=mid:'),
+      direction: ['sendrecv', 'sendonly', 'recvonly', 'inactive'].find((value) => lines.includes(`a=${value}`)),
+      setup: attribute('a=setup:'),
+      hasIceCredentials: lines.some((line) => line.startsWith('a=ice-ufrag:')) && lines.some((line) => line.startsWith('a=ice-pwd:')),
+      candidateCount: lines.filter((line) => line.startsWith('a=candidate:')).length,
+      hasEndOfCandidates: lines.includes('a=end-of-candidates'),
+      hasSctpPort: lines.some((line) => line.startsWith('a=sctp-port:')),
+    });
+  }
+  return sections;
+}
+
+function observeSessionDescription(peerConnection, direction, description) {
+  if (!description?.sdp) return;
+  observedSessionDescriptions.push({ peerConnection, direction, type: description.type, sections: describeSdp(description.sdp) });
+}
+
 window.RTCPeerConnection = class extends nativePeerConnection {
   constructor(...args) {
     super(...args);
     peerConnections.push(this);
+    peerConnectionIds.set(this, `pc-${peerConnections.length}`);
+    this.addEventListener('datachannel', ({ channel }) => observeDataChannel(this, channel, 'remote'));
     const recordState = () => {
       peerConnectionStateHistory.push(
         `connection=${this.connectionState},ice=${this.iceConnectionState},gathering=${this.iceGatheringState}`,
@@ -71,6 +109,22 @@ window.RTCPeerConnection = class extends nativePeerConnection {
     this.addEventListener('iceconnectionstatechange', recordState);
     recordState();
   }
+
+  createDataChannel(...args) {
+    const dataChannel = super.createDataChannel(...args);
+    observeDataChannel(this, dataChannel, 'local');
+    return dataChannel;
+  }
+
+  async setLocalDescription(...args) {
+    await super.setLocalDescription(...args);
+    observeSessionDescription(this, 'local', this.localDescription);
+  }
+
+  async setRemoteDescription(...args) {
+    await super.setRemoteDescription(...args);
+    observeSessionDescription(this, 'remote', this.remoteDescription);
+  }
 };
 
 const role = parameters.get('role');
@@ -78,6 +132,7 @@ const url = parameters.get('url');
 const token = parameters.get('token');
 const codec = parameters.get('codec');
 const scalabilityMode = parameters.get('scalabilityMode');
+const singlePeerConnection = parameters.get('singlePeerConnection') !== 'false';
 const ready = document.querySelector('[data-testid="browser-harness-ready"]');
 const video = document.querySelector('[data-testid="remote-video"]');
 
@@ -89,8 +144,9 @@ if (!role || !url || !token) {
 try {
   const { LocalVideoTrack, Room, RoomEvent, Track, VideoQuality } =
     await import('livekit-client');
-  const room = new Room(
-    codec === 'vp9' && scalabilityMode === 'L3T3_KEY'
+  const room = new Room({
+    singlePeerConnection,
+    ...(codec === 'vp9' && scalabilityMode === 'L3T3_KEY'
       ? {
           publishDefaults: {
             simulcast: false,
@@ -98,8 +154,8 @@ try {
             scalabilityMode: 'L3T3_KEY',
           },
         }
-      : undefined,
-  );
+      : {}),
+  });
   let publication;
   let publishedMediaTrack;
   const receivedChatMessages = [];
@@ -211,6 +267,25 @@ try {
     throw new Error('No outbound video RTP report belongs to the published track');
   };
 
+  window.oxidesfuDataChannelSample = () => observedDataChannels.map(({ peerConnection, dataChannel, origin }) => ({
+    pcId: peerConnectionIds.get(peerConnection) ?? 'unknown',
+    origin,
+    label: dataChannel.label,
+    readyState: dataChannel.readyState,
+    bufferedAmount: dataChannel.bufferedAmount,
+    ordered: dataChannel.ordered,
+  }));
+  window.oxidesfuPeerConnectionSample = () => peerConnections.map((peerConnection) => ({
+    pcId: peerConnectionIds.get(peerConnection) ?? 'unknown',
+    connectionState: peerConnection.connectionState,
+    iceConnectionState: peerConnection.iceConnectionState,
+  }));
+  window.oxidesfuSessionDescriptionSample = () => observedSessionDescriptions.map(({ peerConnection, direction, type, sections }) => ({
+    pcId: peerConnectionIds.get(peerConnection) ?? 'unknown',
+    direction,
+    type,
+    sections,
+  }));
   window.oxidesfuSendChatMessage = async (message) => {
     await room.localParticipant.sendText(message, { topic: 'lk.chat' });
   };

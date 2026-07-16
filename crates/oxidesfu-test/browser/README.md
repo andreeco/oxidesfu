@@ -27,7 +27,22 @@ window.oxidesfuReceiverSample(): Promise<{
 }>
 ```
 
-It must return stats for the `RTCRtpReceiver` currently attached to the rendered remote video element, not an old peer connection. The page must expose an element with:
+It must return stats for the `RTCRtpReceiver` currently attached to the rendered remote video element, not an old peer connection. The page also exposes:
+
+```ts
+window.oxidesfuDataChannelSample(): Array<{
+  pcId: string;
+  origin: 'local' | 'remote';
+  label: string;
+  readyState: RTCDataChannelState;
+  bufferedAmount: number;
+  ordered: boolean;
+}>
+```
+
+The single-PC chat regression requires `_reliable` to be open on both Firefox clients before it sends. In legacy dual-PC mode, the server-created subscriber `_reliable` is remote and opens first; `sendText()` then creates and negotiates the publisher's local channels. Failures include the observed channel labels, origins, ready states, buffered amounts, and redacted SDP section shapes (media/MID/direction/candidate counts only), distinguishing an unopened SCTP channel from a post-send media stall without exposing credentials or candidate addresses.
+
+The page must expose an element with:
 
 ```html
 <div data-testid="browser-harness-ready"></div>
@@ -37,7 +52,9 @@ The harness should install its `RTCPeerConnection` observer before loading LiveK
 
 ```text
 HIGH -> LOW -> HIGH -> LOW
-reliable data packet delivered -> same video receiver continues decoding
+single-PC: both `_reliable` channels open -> reliable data packet delivered
+legacy dual-PC: remote subscriber `_reliable` opens -> chat creates and opens local publisher `_reliable` -> reliable data packet delivered
+same video receiver continues decoding at repeated post-send samples
 ```
 
 For Meet-specific coverage it should additionally drive the visibility sequence:

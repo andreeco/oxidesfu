@@ -77,9 +77,9 @@ function spawnOxideServer() {
   );
 }
 
-async function runPlaywright() {
+function runPlaywright() {
   return new Promise((resolve) => {
-    const child = spawn('npx', ['playwright', 'test', '--project=firefox'], {
+    const child = spawn('npx', ['playwright', 'test', '--project=firefox', ...process.argv.slice(2)], {
       cwd: browserRoot,
       stdio: 'inherit',
       env: process.env,
