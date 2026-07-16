@@ -4,10 +4,13 @@ mod active_speakers;
 mod audio_level;
 #[cfg(test)]
 mod buffer_contracts;
+#[allow(dead_code)]
 mod codecs;
+#[allow(dead_code)]
 mod connection_quality;
 #[cfg(test)]
 mod dependency_descriptor_extension;
+#[allow(dead_code)]
 mod dynacast_manager;
 #[cfg(test)]
 mod forwarder;
@@ -17,6 +20,7 @@ mod frame_integrity;
 mod frame_rate;
 mod offer;
 mod packet_trailer;
+#[allow(dead_code)]
 mod playout_delay;
 mod playout_delay_controller;
 mod range_map;
@@ -24,19 +28,26 @@ mod range_map;
 mod redreceiver_contracts;
 mod rtcp;
 mod rtp_forwarding;
+#[allow(dead_code)]
 mod rtp_munger;
 mod rtp_stats_receiver_restart;
 mod rtp_stats_receiver_update;
 mod rtp_stats_sender;
+#[allow(dead_code, clippy::too_many_arguments)]
 mod sequencer;
+#[allow(dead_code, clippy::type_complexity)]
 mod stream_tracker;
 mod subscriptions;
+#[allow(dead_code)]
 mod track_allocation;
+#[allow(dead_code)]
 mod track_settings;
 mod trickle;
 mod video_ingress;
+#[allow(dead_code, clippy::collapsible_if)]
 mod video_layer_selector;
 mod video_layer_utils;
+#[allow(dead_code)]
 mod vp8_munger;
 
 pub(crate) use offer::*;

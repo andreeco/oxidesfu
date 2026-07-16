@@ -103,6 +103,7 @@ impl ForwardTrackStore {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn insert(
         &self,
         room: &str,
@@ -188,6 +189,7 @@ impl ForwardTrackStore {
         self.bump_revision();
     }
 
+    #[allow(dead_code)]
     pub(crate) fn activate_subscriber(&self, room: &str, subscriber_identity: &str) {
         let Ok(tracks) = self.tracks.lock() else {
             tracing::warn!(
@@ -621,14 +623,16 @@ impl ForwardTrackStore {
     ) -> Option<u64> {
         let key = Self::reader_key(room, publisher_identity, track_sid);
         let lease = self.next_reader_lease.fetch_add(1, Ordering::Relaxed);
-        self.started.lock().ok().and_then(|mut started| {
-            if started.contains_key(&key) {
-                None
-            } else {
-                started.insert(key, lease);
-                Some(lease)
-            }
-        })
+        self.started
+            .lock()
+            .ok()
+            .and_then(|mut started| match started.entry(key) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(lease);
+                    Some(lease)
+                }
+                std::collections::hash_map::Entry::Occupied(_) => None,
+            })
     }
 
     /// Returns whether an inbound reader still owns its lease.
@@ -679,6 +683,7 @@ impl ForwardTrackStore {
             .is_some()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn clear_track_readers_for_publisher(&self, room: &str, publisher_identity: &str) {
         if let Ok(mut started) = self.started.lock() {
             started.retain(

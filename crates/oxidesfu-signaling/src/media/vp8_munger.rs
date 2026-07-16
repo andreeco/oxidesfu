@@ -101,15 +101,7 @@ impl Vp8PictureIdWrapHandler {
             wrap = 1 << 7;
         }
 
-        let mut total_wrap = self.total_wrap + wrap;
-        if wrap != 0 {
-            // mirrors upstream behavior where this is retained for out-of-order checks
-            let _last_wrap = wrap;
-        }
-
-        new_picture_id += total_wrap;
-        // keep compiler from warning about mut solely for parity expression shape
-        total_wrap -= wrap;
+        new_picture_id += self.total_wrap + wrap;
         new_picture_id
     }
 

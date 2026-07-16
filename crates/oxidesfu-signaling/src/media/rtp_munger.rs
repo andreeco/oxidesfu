@@ -401,14 +401,13 @@ impl RtpMunger {
         for i in 0..num {
             ext_last_sn = ext_last_sn.wrapping_add(1);
 
-            let ext_timestamp = if frame_rate != 0 {
+            let ext_timestamp = if let Some(frame_rate) = std::num::NonZeroU32::new(frame_rate) {
                 if use_last_ts_for_first && i == 0 {
                     self.ext_last_ts
                 } else {
                     let i_term = (i as u32).wrapping_add(1).wrapping_sub(ts_offset);
-                    let mut ets = ext_rtp_timestamp.wrapping_add(
-                        (((i_term * clock_rate) + frame_rate - 1) / frame_rate) as u64,
-                    );
+                    let mut ets = ext_rtp_timestamp
+                        .wrapping_add((i_term * clock_rate).div_ceil(frame_rate.get()) as u64);
                     if ets <= ext_last_ts {
                         ets = ext_last_ts.wrapping_add(1);
                     }
@@ -462,6 +461,7 @@ impl RtpMunger {
 }
 
 #[cfg(test)]
+#[allow(clippy::manual_div_ceil)]
 mod tests {
     use super::{
         RangeMapError, RtpMunger, RtpMungerError, RtpMungerInputPacket, SequenceNumberOrdering,

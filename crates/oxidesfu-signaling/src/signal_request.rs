@@ -429,7 +429,6 @@ fn update_metadata_response(
                     request: Some(proto::request_response::Request::UpdateMetadata(
                         request_for_response,
                     )),
-                    ..Default::default()
                 },
             )),
         };

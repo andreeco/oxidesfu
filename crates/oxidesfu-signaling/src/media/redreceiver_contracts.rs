@@ -1,4 +1,5 @@
 #[cfg(test)]
+#[allow(clippy::iter_overeager_cloned)]
 mod tests {
     use std::array;
 

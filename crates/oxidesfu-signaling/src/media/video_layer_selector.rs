@@ -25,7 +25,7 @@ struct SelectorDecisionCache {
 
 impl SelectorDecisionCache {
     fn new(max_num_elements: u64, num_nack_entries: u64) -> Self {
-        let num_elements = ((max_num_elements * 2) + 63) / 64;
+        let num_elements = (max_num_elements * 2).div_ceil(64);
         Self {
             initialized: false,
             base: 0,

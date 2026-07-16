@@ -1,4 +1,5 @@
 mod channels;
+#[allow(dead_code)]
 mod packets;
 mod tracks;
 

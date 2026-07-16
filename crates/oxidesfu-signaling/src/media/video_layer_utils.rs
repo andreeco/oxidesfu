@@ -413,6 +413,7 @@ pub(crate) fn normalize_video_layers_rid(rids: &VideoLayersRid) -> VideoLayersRi
 }
 
 #[cfg(test)]
+#[allow(clippy::type_complexity)]
 mod tests {
     use std::collections::HashMap;
 

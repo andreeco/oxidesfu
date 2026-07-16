@@ -138,6 +138,7 @@ impl DataTrackSubscriptionStore {
             .unwrap_or_default()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn subscribers_for_packet(
         &self,
         room: &str,
@@ -180,6 +181,7 @@ impl DataTrackSubscriptionStore {
         })
     }
 
+    #[allow(dead_code)]
     pub(crate) fn revoke_disallowed_subscribers(
         &self,
         room: &str,

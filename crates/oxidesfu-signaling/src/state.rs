@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity)]
+
 use std::{
     collections::{HashMap, HashSet},
     sync::{
@@ -731,6 +733,7 @@ impl SignalState {
         })
     }
 
+    #[allow(dead_code)]
     pub(crate) fn participant_data_blob_entries(
         &self,
         room_name: &str,
@@ -754,6 +757,7 @@ impl SignalState {
             .unwrap_or_default()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn delete_participant_data_blob(
         &self,
         room_name: &str,
@@ -924,12 +928,12 @@ impl SignalState {
         self.rooms
             .get_participant(room_name, destination_identity)?;
 
-        if method.as_bytes().len() > MAX_RPC_METHOD_BYTES {
+        if method.len() > MAX_RPC_METHOD_BYTES {
             return Err(RoomStoreError::InvalidArgument(
                 "rpc method must be at most 64 bytes".to_string(),
             ));
         }
-        if payload.as_bytes().len() > MAX_RPC_PAYLOAD_BYTES {
+        if payload.len() > MAX_RPC_PAYLOAD_BYTES {
             return Err(RoomStoreError::InvalidArgument(
                 "rpc payload must be at most 15KiB".to_string(),
             ));
@@ -959,6 +963,7 @@ impl SignalState {
             .map_err(|_| RoomStoreError::LockPoisoned)?
             .insert(request_id.clone(), response_tx);
 
+        #[allow(deprecated)]
         let request_packet = proto::DataPacket {
             kind: proto::data_packet::Kind::Reliable as i32,
             participant_identity: request_id.clone(),

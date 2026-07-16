@@ -1,4 +1,5 @@
 #[cfg(test)]
+#[allow(clippy::needless_range_loop, clippy::type_complexity)]
 mod tests {
     const CLOCK_RATE: u32 = 90_000;
     const MAX_SPATIAL: usize = 2;

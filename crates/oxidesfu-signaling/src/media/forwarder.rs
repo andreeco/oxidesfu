@@ -1,4 +1,5 @@
 #[cfg(test)]
+#[allow(dead_code, clippy::collapsible_if, clippy::if_same_then_else)]
 mod tests {
     use std::collections::HashMap;
 

@@ -1,4 +1,5 @@
 #[cfg(test)]
+#[allow(clippy::collapsible_if)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 

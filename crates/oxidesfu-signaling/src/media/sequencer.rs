@@ -234,7 +234,7 @@ impl Sequencer {
             sn_offset: 0,
             ext_highest_ts: 0,
             meta: vec![PacketMeta::invalid(); size],
-            sn_range_map: maybe_sparse.then(|| RangeMapU64::new((size + 1) / 2)),
+            sn_range_map: maybe_sparse.then(|| RangeMapU64::new(size.div_ceil(2))),
             rtt_ms: DEFAULT_RTT_MS,
         })
     }
@@ -276,13 +276,13 @@ impl Sequencer {
         let ext_highest_adjusted = self.ext_highest_sn.saturating_sub(self.sn_offset);
         let mut ext_modified_adjusted = ext_modified_sn.saturating_sub(self.sn_offset);
 
-        if ext_modified_sn < self.ext_highest_sn {
-            if let Some(range_map) = &self.sn_range_map {
-                let Ok(offset) = range_map.get_value(ext_modified_sn) else {
-                    return;
-                };
-                ext_modified_adjusted = ext_modified_sn.saturating_sub(offset);
-            }
+        if ext_modified_sn < self.ext_highest_sn
+            && let Some(range_map) = &self.sn_range_map
+        {
+            let Ok(offset) = range_map.get_value(ext_modified_sn) else {
+                return;
+            };
+            ext_modified_adjusted = ext_modified_sn.saturating_sub(offset);
         }
 
         if (ext_highest_adjusted as i128 - ext_modified_adjusted as i128) >= self.size as i128 {

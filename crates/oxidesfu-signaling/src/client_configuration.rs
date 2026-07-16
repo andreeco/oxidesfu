@@ -566,7 +566,7 @@ fn tokenize(input: &str) -> Vec<Token> {
             '"' => {
                 chars.next();
                 let mut value = String::new();
-                while let Some(next) = chars.next() {
+                for next in chars.by_ref() {
                     if next == '"' {
                         break;
                     }
@@ -687,7 +687,6 @@ mod tests {
             configuration: proto::ClientConfiguration {
                 video: Some(proto::VideoConfiguration {
                     hardware_encoder: proto::ClientConfigSetting::Disabled as i32,
-                    ..Default::default()
                 }),
                 ..Default::default()
             },

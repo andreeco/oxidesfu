@@ -178,7 +178,7 @@ impl DataTrackHeader {
         }
 
         let extension_block_size = DATA_TRACK_EXTENSIONS_SIZE_FIELD_LENGTH + extension_payload_size;
-        let padded_extension_block_size = (extension_block_size + 3) / 4 * 4;
+        let padded_extension_block_size = extension_block_size.div_ceil(4) * 4;
 
         DATA_TRACK_HEADER_LENGTH + padded_extension_block_size
     }
@@ -224,7 +224,7 @@ impl DataTrackHeader {
             })
             .sum::<usize>();
         let extension_block_size = DATA_TRACK_EXTENSIONS_SIZE_FIELD_LENGTH + extension_payload_size;
-        let padded_extension_block_size = (extension_block_size + 3) / 4 * 4;
+        let padded_extension_block_size = extension_block_size.div_ceil(4) * 4;
 
         let extensions_size_words_minus_one = (padded_extension_block_size / 4).saturating_sub(1);
         buf[12..14].copy_from_slice(&(extensions_size_words_minus_one as u16).to_be_bytes());

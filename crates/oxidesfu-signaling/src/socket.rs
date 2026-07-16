@@ -48,6 +48,7 @@ pub(crate) async fn drain_relay_outbound_responses(
     responses
 }
 
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum SocketSignalResponse {
     Typed(proto::SignalResponse),
     // TODO(protocol-upgrade): remove this raw response escape hatch once the

@@ -217,10 +217,10 @@ impl TrackSettingsStore {
             .map(|settings| {
                 settings
                     .keys()
-                    .filter_map(|(key_room, key_identity, key_track_sid)| {
-                        (key_room == room && key_identity == identity)
-                            .then(|| key_track_sid.clone())
+                    .filter(|(key_room, key_identity, _)| {
+                        key_room == room && key_identity == identity
                     })
+                    .map(|(_, _, key_track_sid)| key_track_sid.clone())
                     .collect::<std::collections::HashSet<_>>()
                     .into_iter()
                     .collect()
@@ -285,10 +285,10 @@ impl TrackSettingsStore {
             .map(|settings| {
                 settings
                     .iter()
-                    .filter_map(|((key_room, key_identity, key_track_sid), setting)| {
-                        (key_room == room && key_track_sid == track_sid)
-                            .then(|| (key_identity.clone(), setting.clone()))
+                    .filter(|((key_room, _, key_track_sid), _)| {
+                        key_room == room && key_track_sid == track_sid
                     })
+                    .map(|((_, key_identity, _), setting)| (key_identity.clone(), setting.clone()))
                     .collect()
             })
             .unwrap_or_default()
