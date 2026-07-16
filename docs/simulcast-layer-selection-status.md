@@ -184,6 +184,20 @@ Remaining work:
 - run multiple paired rounds on an idle host and compare the retained artifacts before making CPU conclusions;
 - use separately scoped Go instrumentation only if client-observed evidence is insufficient.
 
+## Final wire-correctness slice (2026-07-16)
+
+Commit `2daecd11` completes target-local dependency-descriptor rewriting. For descriptor-backed one-SSRC VP9/AV1 forwarding, Oxide now removes the publisher descriptor extension, rewrites/injects the selected active decode-target mask using the published RTC helper, installs it at the subscriber-negotiated dependency-descriptor extension ID, strips it when the subscriber did not negotiate the extension, and replaces the retransmission-cache representation with the final target-local packet. Source packets remain unchanged and different subscribers receive independent descriptor state.
+
+Validation for this slice:
+
+- `cargo test -p oxidesfu-rtc --lib`: 38 passed;
+- `cargo test -p oxidesfu-signaling --lib`: 533 passed, 3 ignored;
+- descriptor rewrite and retransmission focused regressions passed;
+- fresh-server Firefox receiver suite: 3/3 passed, including VP9 `L3T3_KEY` SVC;
+- `cargo check -p oxidesfu-rtc -p oxidesfu-signaling` and `git diff --check` passed.
+
+The remaining implementation-side work is complete for this compatibility slice. Native SDK scalable-fixture coverage and repeated performance sweeps remain evidence improvements, not known forwarding correctness gaps.
+
 ## Validation completed for the current slice
 
 ```sh

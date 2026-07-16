@@ -8,6 +8,12 @@ _This document serves as a kind of memory for an LLM on how to continue with per
 
 This plan records the evidence, reference behavior, target architecture, staged implementation plan, and compatibility gates for normalizing delivered simulcast media before attributing or closing the remaining CPU gap.
 
+## Final implementation status (2026-07-16)
+
+The target-aware simulcast and one-SSRC scalable forwarding slice is implemented through wire output: descriptor-backed frames are selected per `ForwardTarget`, direct/chain dependencies are preserved, fragments share frame decisions, outgoing dependency-descriptor active-target masks are rewritten per subscriber, negotiated extension IDs are honored, unnegotiated descriptors are stripped, and retransmission caches retain the final rewritten packet. Final implementation commit: `2daecd11`.
+
+Validation: RTC 38 tests passed; signaling 533 passed with 3 ignored; fresh Firefox receiver suite 3/3 passed including VP9 SVC; focused descriptor rewrite/retransmission tests passed. Remaining work is repeated performance evidence and deterministic native SDK scalable-fixture coverage, not a known forwarding-path correctness gap.
+
 ## Problem statement
 
 The benchmark suite compares an upstream Go LiveKit server with OxideSFU under `lk perf load-test`. The current generated overview has one real CPU outlier:
