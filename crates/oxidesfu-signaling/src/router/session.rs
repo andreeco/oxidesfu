@@ -20,6 +20,10 @@ use forwarding_snapshot::{
 #[path = "../media/forwarding_snapshot.rs"]
 mod forwarding_snapshot;
 
+type PublisherSubscriptionActiveKey = (String, String, String);
+type PublisherSubscriptionActivePairs =
+    std::sync::Arc<std::sync::Mutex<HashSet<PublisherSubscriptionActiveKey>>>;
+
 static NEXT_TRACK_SID_COUNTER: AtomicU64 = AtomicU64::new(0);
 static NEXT_FORWARDING_SNAPSHOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const RTCP_EFFECTS_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
@@ -235,53 +239,17 @@ fn retry_pending_remote_tracks_after_track_published(
     );
 
     for pending_remote_track in pending_remote_tracks {
-        let remote_track = pending_remote_track.remote_track;
-        let remote_mid = pending_remote_track.remote_mid;
-        let publisher_sid = pending_remote_track.publisher_sid;
         let state = state.clone();
-        let peer_connections = state.peer_connections.clone();
-        let rooms = state.rooms.clone();
-        let media_forwarding = state.media_forwarding.clone();
-        let pending_media_section_requests = state.pending_media_section_requests.clone();
-        let media_subscriptions = state.media_subscriptions.clone();
-        let subscribe_permissions = state.subscribe_permissions.clone();
-        let auto_subscribe_preferences = state.auto_subscribe_preferences.clone();
-        let track_settings = state.track_settings.clone();
-        let track_allocations = state.track_allocations.clone();
-        let media_track_cids = state.media_track_cids.clone();
-        let pending_remote_tracks = state.pending_remote_tracks.clone();
-        let subscriber_offer_ids = state.subscriber_offer_ids.clone();
-        let forward_tracks = state.forward_tracks.clone();
-        let rtp_forwarding = state.rtp_forwarding.clone();
-        let signal_connections = state.signal_connections.clone();
-        let room_name = room_name.to_string();
-        let publisher_identity = publisher_identity.to_string();
+        let event = PublisherRemoteTrackEvent {
+            remote_track: pending_remote_track.remote_track,
+            remote_mid: pending_remote_track.remote_mid,
+            room_name: room_name.to_string(),
+            publisher_identity: publisher_identity.to_string(),
+            publisher_sid: pending_remote_track.publisher_sid,
+        };
 
         tokio::spawn(async move {
-            let _ = forward_publisher_remote_track(
-                &state,
-                remote_track,
-                remote_mid,
-                &peer_connections,
-                &rooms,
-                &media_forwarding,
-                &pending_media_section_requests,
-                &media_subscriptions,
-                &subscribe_permissions,
-                &auto_subscribe_preferences,
-                &track_settings,
-                &track_allocations,
-                &media_track_cids,
-                &pending_remote_tracks,
-                &subscriber_offer_ids,
-                &forward_tracks,
-                &rtp_forwarding,
-                &signal_connections,
-                &room_name,
-                &publisher_identity,
-                &publisher_sid,
-            )
-            .await;
+            let _ = forward_publisher_remote_track(state, event).await;
         });
     }
 }
@@ -858,9 +826,7 @@ pub(crate) async fn reject_unaccepted_video_tracks_from_subscriber_answer(
 }
 
 fn signal_track_subscribed_to_publisher(
-    publisher_subscription_active_pairs: &std::sync::Arc<
-        std::sync::Mutex<std::collections::HashSet<(String, String, String)>>,
-    >,
+    publisher_subscription_active_pairs: &PublisherSubscriptionActivePairs,
     signal_connections: &SignalConnectionStore,
     room_name: &str,
     publisher_identity: &str,
@@ -986,6 +952,30 @@ pub(crate) fn should_forward_media_for_subscriber(
     )
 }
 
+#[derive(Clone, Copy)]
+struct SubscriptionLimits {
+    audio: Option<usize>,
+    video: Option<usize>,
+}
+
+struct ForwardingDecisionContext<'a> {
+    media_subscriptions: &'a MediaSubscriptionStore,
+    auto_subscribe_preferences: &'a crate::stores::AutoSubscribePreferenceStore,
+    track_settings: &'a crate::media::TrackSettingsStore,
+    track_allocations: &'a crate::media::TrackAllocationStore,
+    rooms: &'a RoomStore,
+    subscription_limits: SubscriptionLimits,
+}
+
+impl ForwardingDecisionContext<'_> {
+    fn settings_for(&self, key: &ForwardTrackKey) -> Option<proto::UpdateTrackSettings> {
+        let (room_name, _, track_sid, subscriber_identity) = key;
+        self.track_settings
+            .get_for_track(room_name, subscriber_identity, track_sid)
+    }
+}
+
+#[allow(clippy::too_many_arguments, dead_code)]
 pub(crate) fn should_forward_media_for_subscriber_with_track_settings(
     media_subscriptions: &MediaSubscriptionStore,
     auto_subscribe_preferences: &crate::stores::AutoSubscribePreferenceStore,
@@ -996,42 +986,55 @@ pub(crate) fn should_forward_media_for_subscriber_with_track_settings(
     track_sid: &str,
     subscriber_identity: &str,
 ) -> bool {
-    let settings = track_settings.get_for_track(room_name, subscriber_identity, track_sid);
-    should_forward_media_for_subscriber_with_settings_value(
+    let track_allocations = crate::media::TrackAllocationStore::default();
+    let context = ForwardingDecisionContext {
         media_subscriptions,
         auto_subscribe_preferences,
+        track_settings,
+        track_allocations: &track_allocations,
         rooms,
-        room_name,
-        publisher_identity,
-        track_sid,
-        subscriber_identity,
-        settings.as_ref(),
-    )
+        subscription_limits: SubscriptionLimits {
+            audio: None,
+            video: None,
+        },
+    };
+    let key = (
+        room_name.to_string(),
+        publisher_identity.to_string(),
+        track_sid.to_string(),
+        subscriber_identity.to_string(),
+    );
+    should_forward_media_for_subscriber_with_track_settings_in(&context, &key)
+}
+
+fn should_forward_media_for_subscriber_with_track_settings_in(
+    context: &ForwardingDecisionContext<'_>,
+    key: &ForwardTrackKey,
+) -> bool {
+    let settings = context.settings_for(key);
+    should_forward_media_for_subscriber_with_settings_value(context, key, settings.as_ref())
 }
 
 fn should_forward_media_for_subscriber_with_settings_value(
-    media_subscriptions: &MediaSubscriptionStore,
-    auto_subscribe_preferences: &crate::stores::AutoSubscribePreferenceStore,
-    rooms: &RoomStore,
-    room_name: &str,
-    publisher_identity: &str,
-    track_sid: &str,
-    subscriber_identity: &str,
+    context: &ForwardingDecisionContext<'_>,
+    key: &ForwardTrackKey,
     settings: Option<&proto::UpdateTrackSettings>,
 ) -> bool {
     if settings.is_some_and(|settings| settings.disabled) {
         return false;
     }
 
-    let default_subscribed =
-        auto_subscribe_preferences.auto_subscribe_enabled(room_name, subscriber_identity);
-    media_subscriptions.is_subscribed_with_default(
+    let (room_name, publisher_identity, track_sid, subscriber_identity) = key;
+    let default_subscribed = context
+        .auto_subscribe_preferences
+        .auto_subscribe_enabled(room_name, subscriber_identity);
+    context.media_subscriptions.is_subscribed_with_default(
         room_name,
         publisher_identity,
         track_sid,
         subscriber_identity,
         default_subscribed,
-    ) && rooms.can_subscribe_to_media_track(
+    ) && context.rooms.can_subscribe_to_media_track(
         room_name,
         publisher_identity,
         track_sid,
@@ -1040,25 +1043,18 @@ fn should_forward_media_for_subscriber_with_settings_value(
 }
 
 fn subscriber_within_track_type_subscription_limit(
-    media_subscriptions: &MediaSubscriptionStore,
-    auto_subscribe_preferences: &crate::stores::AutoSubscribePreferenceStore,
-    rooms: &RoomStore,
-    room_name: &str,
-    publisher_identity: &str,
-    track_sid: &str,
-    subscriber_identity: &str,
+    context: &ForwardingDecisionContext<'_>,
+    key: &ForwardTrackKey,
     track_info: Option<&proto::TrackInfo>,
-    audio_subscription_limit: Option<usize>,
-    video_subscription_limit: Option<usize>,
 ) -> bool {
     let Some(track_info) = track_info else {
         return true;
     };
 
     let limit = if track_info.r#type == proto::TrackType::Audio as i32 {
-        audio_subscription_limit
+        context.subscription_limits.audio
     } else if track_info.r#type == proto::TrackType::Video as i32 {
-        video_subscription_limit
+        context.subscription_limits.video
     } else {
         None
     };
@@ -1071,13 +1067,16 @@ fn subscriber_within_track_type_subscription_limit(
         return false;
     }
 
-    let default_subscribed =
-        auto_subscribe_preferences.auto_subscribe_enabled(room_name, subscriber_identity);
-    let mut candidates = rooms
+    let (room_name, publisher_identity, track_sid, subscriber_identity) = key;
+    let default_subscribed = context
+        .auto_subscribe_preferences
+        .auto_subscribe_enabled(room_name, subscriber_identity);
+    let mut candidates = context
+        .rooms
         .list_participants(room_name)
         .unwrap_or_default()
         .into_iter()
-        .filter(|participant| participant.identity != subscriber_identity)
+        .filter(|participant| participant.identity != *subscriber_identity)
         .flat_map(|participant| {
             let publisher = participant.identity;
             participant
@@ -1087,13 +1086,13 @@ fn subscriber_within_track_type_subscription_limit(
                 .map(move |track| (publisher.clone(), track.sid))
         })
         .filter(|(candidate_publisher, candidate_track_sid)| {
-            media_subscriptions.is_subscribed_with_default(
+            context.media_subscriptions.is_subscribed_with_default(
                 room_name,
                 candidate_publisher,
                 candidate_track_sid,
                 subscriber_identity,
                 default_subscribed,
-            ) && rooms.can_subscribe_to_media_track(
+            ) && context.rooms.can_subscribe_to_media_track(
                 room_name,
                 candidate_publisher,
                 candidate_track_sid,
@@ -1101,7 +1100,7 @@ fn subscriber_within_track_type_subscription_limit(
             )
         })
         .map(|(candidate_publisher, candidate_track_sid)| {
-            let currently_forwarded = rooms.is_media_track_subscribed(
+            let currently_forwarded = context.rooms.is_media_track_subscribed(
                 room_name,
                 &candidate_publisher,
                 &candidate_track_sid,
@@ -1125,7 +1124,7 @@ fn subscriber_within_track_type_subscription_limit(
         .into_iter()
         .take(limit)
         .any(|(candidate_publisher, candidate_track_sid, _)| {
-            candidate_publisher == publisher_identity && candidate_track_sid == track_sid
+            candidate_publisher == *publisher_identity && candidate_track_sid == *track_sid
         })
 }
 
@@ -1709,18 +1708,13 @@ fn eligible_video_layout_weight_for_subscriber(
         .max(1)
 }
 
+#[cfg(test)]
 fn cached_forwarding_decision_for_subscriber(
-    cache: &mut HashMap<(String, String, String, String), CachedForwardingDecision>,
+    cache: &mut HashMap<ForwardTrackKey, CachedForwardingDecision>,
     revisions: ForwardingDecisionRevisions,
-    media_subscriptions: &MediaSubscriptionStore,
-    auto_subscribe_preferences: &crate::stores::AutoSubscribePreferenceStore,
-    track_settings: &crate::media::TrackSettingsStore,
-    track_allocations: &crate::media::TrackAllocationStore,
-    rooms: &RoomStore,
+    context: &ForwardingDecisionContext<'_>,
     track_info: Option<&proto::TrackInfo>,
-    audio_subscription_limit: Option<usize>,
-    video_subscription_limit: Option<usize>,
-    key: &(String, String, String, String),
+    key: &ForwardTrackKey,
 ) -> CachedForwardingDecision {
     if let Some(cached) = cache.get(key)
         && cached.revisions == revisions
@@ -1728,38 +1722,21 @@ fn cached_forwarding_decision_for_subscriber(
         return *cached;
     }
 
-    let (room_name, publisher_identity, track_sid, subscriber_identity) = key;
-    let settings = track_settings.get_for_track(room_name, subscriber_identity, track_sid);
+    let (room_name, _, track_sid, subscriber_identity) = key;
+    let settings = context.settings_for(key);
     let requested_max_quality =
         requested_video_quality_from_settings(settings.as_ref(), track_info);
-    let allocated_desired_quality =
-        track_allocations.get_desired_quality_for_track(room_name, subscriber_identity, track_sid);
-    let allocated_desired_temporal_layer = track_allocations.get_desired_temporal_layer_for_track(
+    let allocated_desired_quality = context.track_allocations.get_desired_quality_for_track(
         room_name,
         subscriber_identity,
         track_sid,
     );
-    let should_forward_media = should_forward_media_for_subscriber_with_settings_value(
-        media_subscriptions,
-        auto_subscribe_preferences,
-        rooms,
-        room_name,
-        publisher_identity,
-        track_sid,
-        subscriber_identity,
-        settings.as_ref(),
-    ) && subscriber_within_track_type_subscription_limit(
-        media_subscriptions,
-        auto_subscribe_preferences,
-        rooms,
-        room_name,
-        publisher_identity,
-        track_sid,
-        subscriber_identity,
-        track_info,
-        audio_subscription_limit,
-        video_subscription_limit,
-    );
+    let allocated_desired_temporal_layer = context
+        .track_allocations
+        .get_desired_temporal_layer_for_track(room_name, subscriber_identity, track_sid);
+    let should_forward_media =
+        should_forward_media_for_subscriber_with_settings_value(context, key, settings.as_ref())
+            && subscriber_within_track_type_subscription_limit(context, key, track_info);
     let decision = CachedForwardingDecision {
         should_forward_media,
         requested_max_quality,
@@ -1779,14 +1756,8 @@ fn cached_forwarding_decision_for_subscriber(
 fn cached_forwarding_decision_for_target(
     target: &mut ForwardTarget,
     revisions: ForwardingDecisionRevisions,
-    media_subscriptions: &MediaSubscriptionStore,
-    auto_subscribe_preferences: &crate::stores::AutoSubscribePreferenceStore,
-    track_settings: &crate::media::TrackSettingsStore,
-    track_allocations: &crate::media::TrackAllocationStore,
-    rooms: &RoomStore,
+    context: &ForwardingDecisionContext<'_>,
     track_info: Option<&proto::TrackInfo>,
-    audio_subscription_limit: Option<usize>,
-    video_subscription_limit: Option<usize>,
 ) -> CachedForwardingDecision {
     if let Some(decision) = target.decision
         && decision.revisions == revisions
@@ -1794,38 +1765,27 @@ fn cached_forwarding_decision_for_target(
         return decision;
     }
 
-    let (room_name, publisher_identity, track_sid, subscriber_identity) = &target.key;
-    let settings = track_settings.get_for_track(room_name, subscriber_identity, track_sid);
+    let (room_name, _, track_sid, subscriber_identity) = &target.key;
+    let settings = context.settings_for(&target.key);
     let requested_max_quality =
         requested_video_quality_from_settings(settings.as_ref(), track_info);
-    let allocated_desired_quality =
-        track_allocations.get_desired_quality_for_track(room_name, subscriber_identity, track_sid);
-    let allocated_desired_temporal_layer = track_allocations.get_desired_temporal_layer_for_track(
+    let allocated_desired_quality = context.track_allocations.get_desired_quality_for_track(
         room_name,
         subscriber_identity,
         track_sid,
     );
+    let allocated_desired_temporal_layer = context
+        .track_allocations
+        .get_desired_temporal_layer_for_track(room_name, subscriber_identity, track_sid);
     let decision = CachedForwardingDecision {
         should_forward_media: should_forward_media_for_subscriber_with_settings_value(
-            media_subscriptions,
-            auto_subscribe_preferences,
-            rooms,
-            room_name,
-            publisher_identity,
-            track_sid,
-            subscriber_identity,
+            context,
+            &target.key,
             settings.as_ref(),
         ) && subscriber_within_track_type_subscription_limit(
-            media_subscriptions,
-            auto_subscribe_preferences,
-            rooms,
-            room_name,
-            publisher_identity,
-            track_sid,
-            subscriber_identity,
+            context,
+            &target.key,
             track_info,
-            audio_subscription_limit,
-            video_subscription_limit,
         ),
         requested_max_quality,
         desired_quality: desired_video_quality_from_allocation(
@@ -2088,6 +2048,7 @@ pub(crate) fn infer_video_quality_from_rid(rid: Option<&str>) -> Option<proto::V
     None
 }
 
+#[cfg(test)]
 #[allow(deprecated)]
 pub(crate) fn should_forward_video_packet_for_requested_quality(
     requested_max_quality: Option<proto::VideoQuality>,
@@ -2098,7 +2059,6 @@ pub(crate) fn should_forward_video_packet_for_requested_quality(
     };
 
     let Some(packet_quality) = packet_quality else {
-        // Unknown RID/quality mapping should not black-hole video unexpectedly.
         return true;
     };
 
@@ -2293,6 +2253,7 @@ impl SubscriberVideoTemporalController {
 
     /// Updates target policy without resetting timestamp continuity. `None` explicitly selects
     /// the metadata-poor timestamp fallback path rather than guessing a temporal layer.
+    #[cfg(test)]
     pub(crate) fn set_requested_fps(
         &mut self,
         requested_fps: u32,
@@ -2595,6 +2556,7 @@ pub(crate) fn video_temporal_codec_hint_from_mime(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn should_forward_video_packet_for_requested_fps(
     requested_fps: u32,
     codec_mime: Option<&str>,
@@ -2628,7 +2590,8 @@ pub(crate) fn temporal_layer_id_from_packet(
     })
 }
 
-pub(crate) fn should_forward_video_packet_for_requested_fps_with_codec_hint(
+#[cfg(test)]
+fn should_forward_video_packet_for_requested_fps_with_codec_hint(
     requested_fps: u32,
     codec_hint: VideoTemporalCodecHint,
     receiver_temporal_layer_fps: Option<[Option<f32>; 3]>,
@@ -2666,7 +2629,6 @@ pub(crate) fn should_forward_video_packet_for_requested_fps_with_codec_hint(
         return true;
     }
 
-    // Fallback when temporal metadata is unavailable.
     fps_state.should_forward_packet(packet_timestamp, requested_fps)
 }
 
@@ -2677,6 +2639,7 @@ pub(crate) fn forwarding_target_revision_changed(
     cached_revision != Some(current_revision)
 }
 
+#[cfg(test)]
 pub(crate) fn retain_forwarding_state_for_current_targets<T>(
     states: &mut std::collections::HashMap<(String, String, String, String), T>,
     current_forward_keys: &std::collections::HashSet<(String, String, String, String)>,
@@ -2684,6 +2647,7 @@ pub(crate) fn retain_forwarding_state_for_current_targets<T>(
     states.retain(|key, _| current_forward_keys.contains(key));
 }
 
+#[cfg(test)]
 pub(crate) fn retain_fps_forwarding_state_for_current_targets(
     fps_states: &mut std::collections::HashMap<
         (String, String, String, String),
@@ -2876,6 +2840,7 @@ pub(crate) fn emit_aggregate_subscribed_quality_update_for_track(
     });
 }
 
+#[cfg(test)]
 pub(crate) fn should_force_recvonly_for_single_pc_receive_sections(
     state: &SignalState,
     room_name: &str,
@@ -2894,7 +2859,7 @@ pub(crate) fn should_force_recvonly_for_single_pc_receive_sections(
 
     participants
         .into_iter()
-        .filter(|participant| participant.identity != subscriber_identity)
+        .filter(|participant| participant.identity != *subscriber_identity)
         .flat_map(|participant| participant.tracks.into_iter())
         .any(|track| !track.sid.is_empty())
 }
@@ -2903,13 +2868,6 @@ fn offer_advertises_ice_trickle(offer_sdp: &str) -> bool {
     offer_sdp
         .lines()
         .any(|line| line.trim() == "a=ice-options:trickle")
-}
-
-fn should_force_empty_multi_receive_sections_for_offer(
-    offer_sdp: &str,
-    receive_sections: &std::collections::VecDeque<ReceiveSection>,
-) -> bool {
-    receive_sections.len() > 1 && !offer_advertises_ice_trickle(offer_sdp)
 }
 
 fn sdp_line_without_ending(raw_line: &str) -> &str {
@@ -3173,7 +3131,7 @@ fn preferred_codec_mime_for_participant_track(track: &proto::TrackInfo) -> Optio
 }
 
 fn reorder_section_media_line_payloads_for_preferred_codec(
-    section: &mut Vec<String>,
+    section: &mut [String],
     preferred_mime: &str,
 ) {
     let Some(preferred_codec) = codec_name_from_mime(preferred_mime) else {
@@ -3424,6 +3382,21 @@ fn supports_auto_recommended_quality_updates(track: &proto::TrackInfo) -> bool {
     }
 }
 
+struct RecommendedQualityUpdateContext<'a> {
+    signal_connections: &'a SignalConnectionStore,
+    track_settings: &'a crate::media::TrackSettingsStore,
+    rooms: &'a RoomStore,
+}
+
+struct RecommendedQualityUpdate<'a> {
+    room_name: &'a str,
+    publisher_identity: &'a str,
+    track_sid: &'a str,
+    subscriber_identity: &'a str,
+    recommended_quality: crate::media::RecommendedVideoQuality,
+}
+
+#[allow(clippy::too_many_arguments, dead_code)]
 pub(crate) fn maybe_emit_recommended_subscribed_quality_update(
     signal_connections: &SignalConnectionStore,
     track_settings: &crate::media::TrackSettingsStore,
@@ -3434,14 +3407,45 @@ pub(crate) fn maybe_emit_recommended_subscribed_quality_update(
     subscriber_identity: &str,
     recommended_quality: crate::media::RecommendedVideoQuality,
 ) {
-    if track_settings
+    maybe_emit_recommended_subscribed_quality_update_in(
+        &RecommendedQualityUpdateContext {
+            signal_connections,
+            track_settings,
+            rooms,
+        },
+        RecommendedQualityUpdate {
+            room_name,
+            publisher_identity,
+            track_sid,
+            subscriber_identity,
+            recommended_quality,
+        },
+    );
+}
+
+fn maybe_emit_recommended_subscribed_quality_update_in(
+    context: &RecommendedQualityUpdateContext<'_>,
+    update: RecommendedQualityUpdate<'_>,
+) {
+    let RecommendedQualityUpdate {
+        room_name,
+        publisher_identity,
+        track_sid,
+        subscriber_identity,
+        recommended_quality,
+    } = update;
+    if context
+        .track_settings
         .get_for_track(room_name, subscriber_identity, track_sid)
         .is_some()
     {
         return;
     }
 
-    let Some(publisher_outbound_tx) = signal_connections.get(room_name, publisher_identity) else {
+    let Some(publisher_outbound_tx) = context
+        .signal_connections
+        .get(room_name, publisher_identity)
+    else {
         return;
     };
 
@@ -3452,7 +3456,8 @@ pub(crate) fn maybe_emit_recommended_subscribed_quality_update(
         crate::media::RecommendedVideoQuality::High => proto::VideoQuality::High,
     };
 
-    let Some(track) = rooms
+    let Some(track) = context
+        .rooms
         .get_participant(room_name, publisher_identity)
         .ok()
         .and_then(|participant| {
@@ -3972,10 +3977,7 @@ pub(crate) fn reconcile_subscriber_data_track_subscriptions(
         state,
         room_name,
         identity,
-        proto::UpdateDataSubscription {
-            updates,
-            ..Default::default()
-        },
+        proto::UpdateDataSubscription { updates },
     );
 
     if let Some(outbound_tx) = state.signal_connections.get(room_name, identity) {
@@ -5427,6 +5429,7 @@ pub(crate) async fn answer_publisher_offer(
     })
 }
 
+#[allow(dead_code)]
 struct PeerConnectionEventForwardingContext {
     state: SignalState,
     outbound_tx: OutboundSignalSender,
@@ -5481,21 +5484,21 @@ fn forward_peer_connection_events(
             data_messages,
             data_channels,
             data_track_subscriptions,
-            peer_connections,
+            peer_connections: _,
             publish_permissions,
             rooms,
-            media_forwarding,
-            pending_media_section_requests,
-            media_subscriptions,
-            subscribe_permissions,
-            auto_subscribe_preferences,
-            media_track_cids,
-            pending_remote_tracks,
-            track_settings,
-            track_allocations,
-            forward_tracks,
-            rtp_forwarding,
-            signal_connections,
+            media_forwarding: _,
+            pending_media_section_requests: _,
+            media_subscriptions: _,
+            subscribe_permissions: _,
+            auto_subscribe_preferences: _,
+            media_track_cids: _,
+            pending_remote_tracks: _,
+            track_settings: _,
+            track_allocations: _,
+            forward_tracks: _,
+            rtp_forwarding: _,
+            signal_connections: _,
             room_name,
             identity,
             target,
@@ -5535,51 +5538,23 @@ fn forward_peer_connection_events(
                         continue;
                     }
                     let state = state.clone();
-                    let peer_connections = peer_connections.clone();
-                    let rooms = rooms.clone();
-                    let media_forwarding = media_forwarding.clone();
-                    let pending_media_section_requests = pending_media_section_requests.clone();
-                    let media_subscriptions = media_subscriptions.clone();
-                    let subscribe_permissions = subscribe_permissions.clone();
-                    let auto_subscribe_preferences = auto_subscribe_preferences.clone();
-                    let track_settings = track_settings.clone();
-                    let track_allocations = track_allocations.clone();
-                    let media_track_cids = media_track_cids.clone();
-                    let pending_remote_tracks = pending_remote_tracks.clone();
-                    let subscriber_offer_ids = state.subscriber_offer_ids.clone();
-                    let forward_tracks = forward_tracks.clone();
-                    let rtp_forwarding = rtp_forwarding.clone();
-                    let signal_connections = signal_connections.clone();
                     let room_name = room_name.clone();
                     let publisher_identity = identity.clone();
-                    let Ok(publisher) = rooms.get_participant(&room_name, &publisher_identity)
+                    let Ok(publisher) = state.rooms.get_participant(&room_name, &publisher_identity)
                     else {
                         continue;
                     };
                     let publisher_sid = publisher.sid;
                     tokio::spawn(async move {
                         if let Err(error) = forward_publisher_remote_track(
-                            &state,
-                            remote_track,
-                            None,
-                            &peer_connections,
-                            &rooms,
-                            &media_forwarding,
-                            &pending_media_section_requests,
-                            &media_subscriptions,
-                            &subscribe_permissions,
-                            &auto_subscribe_preferences,
-                            &track_settings,
-                            &track_allocations,
-                            &media_track_cids,
-                            &pending_remote_tracks,
-                            &subscriber_offer_ids,
-                            &forward_tracks,
-                            &rtp_forwarding,
-                            &signal_connections,
-                            &room_name,
-                            &publisher_identity,
-                            &publisher_sid,
+                            state,
+                            PublisherRemoteTrackEvent {
+                                remote_track,
+                                remote_mid: None,
+                                room_name: room_name.clone(),
+                                publisher_identity: publisher_identity.clone(),
+                                publisher_sid,
+                            },
                         )
                         .await
                         {
@@ -5774,6 +5749,7 @@ pub(crate) fn raw_reliable_payload_data_packet(
     }
 }
 
+#[allow(deprecated)]
 fn resolved_destination_identities_for_packet(packet: &proto::DataPacket) -> Vec<String> {
     if !packet.destination_identities.is_empty() {
         return packet.destination_identities.clone();
@@ -5860,7 +5836,7 @@ fn is_slow_reader_backpressure_error(error: &(dyn std::error::Error + 'static)) 
 
     error
         .source()
-        .is_some_and(|source| is_slow_reader_backpressure_error(source))
+        .is_some_and(is_slow_reader_backpressure_error)
 }
 
 async fn relay_data_packet_after_channel_convergence(
@@ -6321,29 +6297,44 @@ pub(crate) async fn rebuild_forwarding_tracks_after_runtime_codec_change(
     }
 }
 
-async fn forward_publisher_remote_track(
-    state: &SignalState,
+struct PublisherRemoteTrackEvent {
     remote_track: oxidesfu_rtc::RemoteTrack,
     remote_mid: Option<String>,
-    peer_connections: &PeerConnectionStore,
-    rooms: &RoomStore,
-    media_forwarding: &MediaForwardingStore,
-    pending_media_section_requests: &PendingMediaSectionRequestStore,
-    media_subscriptions: &MediaSubscriptionStore,
-    subscribe_permissions: &crate::stores::SubscribePermissionStore,
-    auto_subscribe_preferences: &crate::stores::AutoSubscribePreferenceStore,
-    track_settings: &crate::media::TrackSettingsStore,
-    track_allocations: &crate::media::TrackAllocationStore,
-    media_track_cids: &crate::stores::MediaTrackCidStore,
-    pending_remote_tracks: &crate::stores::PendingPublisherRemoteTrackStore,
-    subscriber_offer_ids: &crate::stores::SubscriberOfferIdStore,
-    forward_tracks: &ForwardTrackStore,
-    rtp_forwarding: &RtpForwardingStore,
-    signal_connections: &SignalConnectionStore,
-    room_name: &str,
-    publisher_identity: &str,
-    publisher_sid: &str,
+    room_name: String,
+    publisher_identity: String,
+    publisher_sid: String,
+}
+
+async fn forward_publisher_remote_track(
+    state: SignalState,
+    event: PublisherRemoteTrackEvent,
 ) -> oxidesfu_rtc::RtcResult<()> {
+    let PublisherRemoteTrackEvent {
+        remote_track,
+        remote_mid,
+        room_name: event_room_name,
+        publisher_identity: event_publisher_identity,
+        publisher_sid: event_publisher_sid,
+    } = event;
+    let room_name = event_room_name.as_str();
+    let publisher_identity = event_publisher_identity.as_str();
+    let publisher_sid = event_publisher_sid.as_str();
+    let peer_connections = &state.peer_connections;
+    let rooms = &state.rooms;
+    let media_forwarding = &state.media_forwarding;
+    let pending_media_section_requests = &state.pending_media_section_requests;
+    let media_subscriptions = &state.media_subscriptions;
+    let subscribe_permissions = &state.subscribe_permissions;
+    let auto_subscribe_preferences = &state.auto_subscribe_preferences;
+    let track_settings = &state.track_settings;
+    let track_allocations = &state.track_allocations;
+    let media_track_cids = &state.media_track_cids;
+    let pending_remote_tracks = &state.pending_remote_tracks;
+    let subscriber_offer_ids = &state.subscriber_offer_ids;
+    let forward_tracks = &state.forward_tracks;
+    let rtp_forwarding = &state.rtp_forwarding;
+    let signal_connections = &state.signal_connections;
+
     if !publisher_session_is_current(rooms, room_name, publisher_identity, publisher_sid) {
         tracing::debug!(
             room = room_name,
@@ -6481,7 +6472,7 @@ async fn forward_publisher_remote_track(
             }];
             if runtime_mime_changed {
                 rebuild_forwarding_tracks_after_runtime_codec_change(
-                    state,
+                    &state,
                     room_name,
                     publisher_identity,
                     &track_info.sid,
@@ -6507,7 +6498,7 @@ async fn forward_publisher_remote_track(
 
     // Ensure forwarding tracks exist for current subscribers before copying RTP.
     ensure_subscriber_forwarding_from_parts(
-        state,
+        &state,
         peer_connections,
         rooms,
         media_forwarding,
@@ -6562,6 +6553,17 @@ async fn forward_publisher_remote_track(
     let audio_subscription_limit = state.media_subscription_limit_audio;
     let video_subscription_limit = state.media_subscription_limit_video;
     tokio::spawn(async move {
+        let forwarding_decision_context = ForwardingDecisionContext {
+            media_subscriptions: &media_subscriptions,
+            auto_subscribe_preferences: &auto_subscribe_preferences,
+            track_settings: &track_settings,
+            track_allocations: &track_allocations,
+            rooms: &rooms,
+            subscription_limits: SubscriptionLimits {
+                audio: audio_subscription_limit,
+                video: video_subscription_limit,
+            },
+        };
         let mut logged_no_forward_tracks = false;
         let mut logged_first_rtp = false;
         let mut keyframe_retry_tick = tokio::time::interval_at(
@@ -6950,14 +6952,8 @@ async fn forward_publisher_remote_track(
                             let decision = cached_forwarding_decision_for_target(
                                 target,
                                 decision_revisions,
-                                &media_subscriptions,
-                                &auto_subscribe_preferences,
-                                &track_settings,
-                                &track_allocations,
-                                &rooms,
+                                &forwarding_decision_context,
                                 Some(&track_info),
-                                audio_subscription_limit,
-                                video_subscription_limit,
                             );
                             if !decision.should_forward_media {
                                 filtered_out_targets += 1;
@@ -6989,9 +6985,11 @@ async fn forward_publisher_remote_track(
                     if is_video_track {
                         let incoming_ssrc = packet.header.ssrc;
 
-                        if !video_ssrc_rids.contains_key(&incoming_ssrc) {
+                        if let std::collections::hash_map::Entry::Vacant(entry) =
+                            video_ssrc_rids.entry(incoming_ssrc)
+                        {
                             let rid = remote_track.rid_for_ssrc(incoming_ssrc).await;
-                            video_ssrc_rids.insert(incoming_ssrc, rid);
+                            entry.insert(rid);
                         }
                         if !video_ssrc_codec_mime.contains_key(&incoming_ssrc) {
                             let codec_mime = remote_track.codec_mime_for_ssrc(incoming_ssrc).await;
@@ -7077,14 +7075,15 @@ async fn forward_publisher_remote_track(
                             }
                             video_ssrc_codec_mime.insert(incoming_ssrc, codec_mime);
                         }
-                        if !video_ssrc_is_repair.contains_key(&incoming_ssrc) {
-                            let is_repair = video_ssrc_codec_mime
-                                .get(&incoming_ssrc)
-                                .and_then(|mime| mime.as_deref())
-                                .map(|mime| mime.to_ascii_lowercase().contains("rtx"))
-                                .unwrap_or(false);
-                            video_ssrc_is_repair.insert(incoming_ssrc, is_repair);
-                        }
+                        video_ssrc_is_repair
+                            .entry(incoming_ssrc)
+                            .or_insert_with(|| {
+                                video_ssrc_codec_mime
+                                    .get(&incoming_ssrc)
+                                    .and_then(|mime| mime.as_deref())
+                                    .map(|mime| mime.to_ascii_lowercase().contains("rtx"))
+                                    .unwrap_or(false)
+                            });
 
                         if video_ssrc_is_repair
                             .get(&incoming_ssrc)
@@ -7093,7 +7092,7 @@ async fn forward_publisher_remote_track(
                         {
                             dropped_repair_video_ssrc_count =
                                 dropped_repair_video_ssrc_count.saturating_add(1);
-                            if dropped_repair_video_ssrc_count % 300 == 0 {
+                            if dropped_repair_video_ssrc_count.is_multiple_of(300) {
                                 tracing::debug!(
                                     room = %room_name,
                                     publisher_identity = %publisher_identity,
@@ -7119,12 +7118,14 @@ async fn forward_publisher_remote_track(
                         let incoming_codec_mime = video_ssrc_codec_mime
                             .get(&incoming_ssrc)
                             .and_then(|mime| mime.as_deref());
-                        packet_source_kind = is_single_scalable_source(
+                        packet_source_kind = if is_single_scalable_source(
                             incoming_codec_mime,
                             !layer_quality_by_ssrc.is_empty() || !layer_quality_by_rid.is_empty(),
-                        )
-                        .then_some(VideoSourceKind::SingleScalable)
-                        .unwrap_or(VideoSourceKind::Simulcast);
+                        ) {
+                            VideoSourceKind::SingleScalable
+                        } else {
+                            VideoSourceKind::Simulcast
+                        };
                         packet_video_quality = packet_video_quality_for_track(
                             incoming_ssrc,
                             video_ssrc_rids
@@ -7312,14 +7313,8 @@ async fn forward_publisher_remote_track(
                         let decision = cached_forwarding_decision_for_target(
                             target,
                             decision_revisions,
-                            &media_subscriptions,
-                            &auto_subscribe_preferences,
-                            &track_settings,
-                            &track_allocations,
-                            &rooms,
+                            &forwarding_decision_context,
                             Some(&track_info),
-                            audio_subscription_limit,
-                            video_subscription_limit,
                         );
                         if !decision.should_forward_media {
                             filtered_out_targets += 1;
@@ -7425,36 +7420,36 @@ async fn forward_publisher_remote_track(
                             }
                         }
 
-                        if track_supports_quality_control {
-                            if let Some(requested_fps) = decision.requested_fps {
-                                target
-                                    .video_temporal_controller
-                                    .set_requested_fps_with_desired_temporal_layer(
-                                        requested_fps,
-                                        packet_receiver_temporal_layer_fps,
-                                        decision.desired_temporal_layer,
-                                    );
-                                match target.video_temporal_controller.observe_packet(
-                                    packet.header.timestamp,
+                        if track_supports_quality_control
+                            && let Some(requested_fps) = decision.requested_fps
+                        {
+                            target
+                                .video_temporal_controller
+                                .set_requested_fps_with_desired_temporal_layer(
                                     requested_fps,
-                                    packet_temporal_layer,
-                                ) {
-                                    TemporalIngressDecision::Forward => {}
-                                    TemporalIngressDecision::DropAboveMaximum => {
-                                        target.video_counters.drop_temporal_above_maximum += 1;
-                                        filtered_out_targets += 1;
-                                        continue;
-                                    }
-                                    TemporalIngressDecision::DropAboveDesired => {
-                                        target.video_counters.drop_temporal_above_desired += 1;
-                                        filtered_out_targets += 1;
-                                        continue;
-                                    }
-                                    TemporalIngressDecision::DropTimestampCap => {
-                                        target.video_counters.drop_temporal_timestamp_cap += 1;
-                                        filtered_out_targets += 1;
-                                        continue;
-                                    }
+                                    packet_receiver_temporal_layer_fps,
+                                    decision.desired_temporal_layer,
+                                );
+                            match target.video_temporal_controller.observe_packet(
+                                packet.header.timestamp,
+                                requested_fps,
+                                packet_temporal_layer,
+                            ) {
+                                TemporalIngressDecision::Forward => {}
+                                TemporalIngressDecision::DropAboveMaximum => {
+                                    target.video_counters.drop_temporal_above_maximum += 1;
+                                    filtered_out_targets += 1;
+                                    continue;
+                                }
+                                TemporalIngressDecision::DropAboveDesired => {
+                                    target.video_counters.drop_temporal_above_desired += 1;
+                                    filtered_out_targets += 1;
+                                    continue;
+                                }
+                                TemporalIngressDecision::DropTimestampCap => {
+                                    target.video_counters.drop_temporal_timestamp_cap += 1;
+                                    filtered_out_targets += 1;
+                                    continue;
                                 }
                             }
                         }
@@ -7738,26 +7733,13 @@ async fn forward_publisher_remote_track(
                         forward_tracks.list_for_track(&room_name, &publisher_identity, &track_sid);
                     for (key, local_forward_track) in forward_tracks_for_track {
                         let (key_room, key_publisher, key_track_sid, key_subscriber) = &key;
-                        if !should_forward_media_for_subscriber_with_track_settings(
-                            &media_subscriptions,
-                            &auto_subscribe_preferences,
-                            &track_settings,
-                            &rooms,
-                            key_room,
-                            key_publisher,
-                            key_track_sid,
-                            key_subscriber,
+                        if !should_forward_media_for_subscriber_with_track_settings_in(
+                            &forwarding_decision_context,
+                            &key,
                         ) || !subscriber_within_track_type_subscription_limit(
-                            &media_subscriptions,
-                            &auto_subscribe_preferences,
-                            &rooms,
-                            key_room,
-                            key_publisher,
-                            key_track_sid,
-                            key_subscriber,
+                            &forwarding_decision_context,
+                            &key,
                             Some(&track_info),
-                            audio_subscription_limit,
-                            video_subscription_limit,
                         ) {
                             continue;
                         }
@@ -7855,15 +7837,19 @@ async fn forward_publisher_remote_track(
                         if track_info.r#type == proto::TrackType::Video as i32
                             && let Some(quality) = recommended_video_quality
                         {
-                            maybe_emit_recommended_subscribed_quality_update(
-                                &signal_connections,
-                                &track_settings,
-                                &rooms,
-                                key_room,
-                                key_publisher,
-                                key_track_sid,
-                                key_subscriber,
-                                quality,
+                            maybe_emit_recommended_subscribed_quality_update_in(
+                                &RecommendedQualityUpdateContext {
+                                    signal_connections: &signal_connections,
+                                    track_settings: &track_settings,
+                                    rooms: &rooms,
+                                },
+                                RecommendedQualityUpdate {
+                                    room_name: key_room,
+                                    publisher_identity: key_publisher,
+                                    track_sid: key_track_sid,
+                                    subscriber_identity: key_subscriber,
+                                    recommended_quality: quality,
+                                },
                             );
                         }
                     }
@@ -8009,17 +7995,27 @@ async fn ensure_subscriber_forwarding_from_parts(
             continue;
         }
 
-        if !subscriber_within_track_type_subscription_limit(
+        let forwarding_decision_context = ForwardingDecisionContext {
             media_subscriptions,
             auto_subscribe_preferences,
+            track_settings: &state.track_settings,
+            track_allocations: &state.track_allocations,
             rooms,
-            room_name,
-            publisher_identity,
-            &track.sid,
-            &subscriber_identity,
+            subscription_limits: SubscriptionLimits {
+                audio: state.media_subscription_limit_audio,
+                video: state.media_subscription_limit_video,
+            },
+        };
+        let forwarding_key = (
+            room_name.to_string(),
+            publisher_identity.to_string(),
+            track.sid.clone(),
+            subscriber_identity.clone(),
+        );
+        if !subscriber_within_track_type_subscription_limit(
+            &forwarding_decision_context,
+            &forwarding_key,
             Some(track),
-            state.media_subscription_limit_audio,
-            state.media_subscription_limit_video,
         ) {
             tracing::debug!(
                 room = %room_name,
@@ -8369,6 +8365,17 @@ async fn signal_server_offer_with_offer_id(
     .await
 }
 
+struct MediaForwardingNegotiationRequest<'a> {
+    subscriber_offer_ids: &'a crate::stores::SubscriberOfferIdStore,
+    room_name: &'a str,
+    subscriber_identity: &'a str,
+    peer_connection: &'a SharedPeerConnection,
+    connection_kind: MediaForwardingConnectionKind,
+    track_kind: rtc::rtp_transceiver::rtp_sender::RtpCodecKind,
+    outbound_tx: &'a OutboundSignalSender,
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn signal_media_forwarding_negotiation_with_offer_id(
     state: &SignalState,
     subscriber_offer_ids: &crate::stores::SubscriberOfferIdStore,
@@ -8379,6 +8386,34 @@ pub(crate) async fn signal_media_forwarding_negotiation_with_offer_id(
     track_kind: rtc::rtp_transceiver::rtp_sender::RtpCodecKind,
     outbound_tx: &OutboundSignalSender,
 ) -> oxidesfu_rtc::RtcResult<()> {
+    signal_media_forwarding_negotiation_with_request(
+        state,
+        MediaForwardingNegotiationRequest {
+            subscriber_offer_ids,
+            room_name,
+            subscriber_identity,
+            peer_connection,
+            connection_kind,
+            track_kind,
+            outbound_tx,
+        },
+    )
+    .await
+}
+
+async fn signal_media_forwarding_negotiation_with_request(
+    state: &SignalState,
+    request: MediaForwardingNegotiationRequest<'_>,
+) -> oxidesfu_rtc::RtcResult<()> {
+    let MediaForwardingNegotiationRequest {
+        subscriber_offer_ids,
+        room_name,
+        subscriber_identity,
+        peer_connection,
+        connection_kind,
+        track_kind,
+        outbound_tx,
+    } = request;
     match connection_kind {
         MediaForwardingConnectionKind::DualPcSubscriber => {
             signal_server_offer_with_offer_id(
@@ -8739,6 +8774,7 @@ async fn relay_data_track_packet_with_rooms(
     Ok(sent)
 }
 
+#[cfg(test)]
 async fn relay_data_track_packet(
     data_channels: &DataChannelStore,
     data_track_subscriptions: &DataTrackSubscriptionStore,
@@ -8776,6 +8812,8 @@ async fn relay_data_track_packet(
 
 #[cfg(test)]
 mod tests {
+    #![allow(deprecated)]
+
     use std::{
         collections::{HashMap, HashSet},
         time::Duration,
@@ -8786,8 +8824,9 @@ mod tests {
     use prost::Message;
 
     use super::{
-        DependencyDescriptorForwardingDecision, ForwardingDecisionRevisions, ForwardingRtpWindow,
-        FpsForwardingState, SubscriberVideoTemporalController, TemporalIngressDecision,
+        DependencyDescriptorForwardingDecision, ForwardingDecisionContext,
+        ForwardingDecisionRevisions, ForwardingRtpWindow, FpsForwardingState,
+        SubscriberVideoTemporalController, SubscriptionLimits, TemporalIngressDecision,
         TemporalLayer, add_track_response, allocation_available_outgoing_bitrate_bps,
         allocation_layout_weight, allocation_quality_for_budget,
         allocation_temporal_layer_for_budget, apply_publisher_codec_preferences_to_answer,
@@ -9436,6 +9475,17 @@ mod tests {
             ..Default::default()
         };
 
+        let forwarding_decision_context = ForwardingDecisionContext {
+            media_subscriptions: &media_subscriptions,
+            auto_subscribe_preferences: &auto_subscribe_preferences,
+            track_settings: &track_settings,
+            track_allocations: &track_allocations,
+            rooms: &rooms,
+            subscription_limits: SubscriptionLimits {
+                audio: Some(1),
+                video: None,
+            },
+        };
         let mut cache = HashMap::new();
         let key_b = (
             "room".to_string(),
@@ -9454,14 +9504,8 @@ mod tests {
         let blocked = cached_forwarding_decision_for_subscriber(
             &mut cache,
             revisions,
-            &media_subscriptions,
-            &auto_subscribe_preferences,
-            &track_settings,
-            &track_allocations,
-            &rooms,
+            &forwarding_decision_context,
             Some(&track_info),
-            Some(1),
-            None,
             &key_b,
         );
         assert!(
@@ -9488,14 +9532,8 @@ mod tests {
         let promoted = cached_forwarding_decision_for_subscriber(
             &mut cache,
             promoted_revisions,
-            &media_subscriptions,
-            &auto_subscribe_preferences,
-            &track_settings,
-            &track_allocations,
-            &rooms,
+            &forwarding_decision_context,
             Some(&track_info),
-            Some(1),
-            None,
             &key_b,
         );
         assert!(
@@ -9541,6 +9579,17 @@ mod tests {
         let auto_subscribe_preferences = crate::stores::AutoSubscribePreferenceStore::default();
         let track_settings = crate::media::TrackSettingsStore::default();
         let track_allocations = crate::media::TrackAllocationStore::default();
+        let forwarding_decision_context = ForwardingDecisionContext {
+            media_subscriptions: &media_subscriptions,
+            auto_subscribe_preferences: &auto_subscribe_preferences,
+            track_settings: &track_settings,
+            track_allocations: &track_allocations,
+            rooms: &rooms,
+            subscription_limits: SubscriptionLimits {
+                audio: None,
+                video: None,
+            },
+        };
         let mut cache = HashMap::new();
         let key = (
             "room".to_string(),
@@ -9559,13 +9608,7 @@ mod tests {
         let initial = cached_forwarding_decision_for_subscriber(
             &mut cache,
             revisions,
-            &media_subscriptions,
-            &auto_subscribe_preferences,
-            &track_settings,
-            &track_allocations,
-            &rooms,
-            None,
-            None,
+            &forwarding_decision_context,
             None,
             &key,
         );
@@ -9590,13 +9633,7 @@ mod tests {
         let updated = cached_forwarding_decision_for_subscriber(
             &mut cache,
             updated_revisions,
-            &media_subscriptions,
-            &auto_subscribe_preferences,
-            &track_settings,
-            &track_allocations,
-            &rooms,
-            None,
-            None,
+            &forwarding_decision_context,
             None,
             &key,
         );
