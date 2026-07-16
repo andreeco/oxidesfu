@@ -38,6 +38,7 @@ OXIDESFU_TURN_BIND=127.0.0.1 \
 OXIDESFU_TURN_UDP_PORT=3479 \
 OXIDESFU_TURN_RELAY_PORT_RANGE_START=31000 \
 OXIDESFU_TURN_RELAY_PORT_RANGE_END=31050 \
+RUST_LOG=oxidesfu_signaling=debug,oxidesfu_rtc=debug \
 cargo run -p oxidesfu-server -- \
   --bind 127.0.0.1:7880 \
   --api-key "$LIVEKIT_API_KEY" \
