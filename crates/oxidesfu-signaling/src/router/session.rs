@@ -7023,16 +7023,20 @@ async fn forward_publisher_remote_track(
                             let layer_selection =
                                 target
                                     .video_layer_selector
-                                    .observe_packet(LayerPacketMetadata {
-                                    ssrc: effective_video_ssrc,
-                                    spatial: packet_video_quality.map(SpatialLayer::from_quality),
-                                    is_decodable_switch_point:
-                                        video_is_decodable_switch_point_with_dependency_descriptor(
-                                            packet_codec_mime,
-                                            &packet.payload,
-                                            packet_descriptor_switch_point,
-                                        ),
-                                });
+                                    .observe_packet_with_dependency_descriptor_metadata(
+                                        LayerPacketMetadata {
+                                            ssrc: effective_video_ssrc,
+                                            spatial: packet_video_quality
+                                                .map(SpatialLayer::from_quality),
+                                            is_decodable_switch_point:
+                                                video_is_decodable_switch_point_with_dependency_descriptor(
+                                                    packet_codec_mime,
+                                                    &packet.payload,
+                                                    packet_descriptor_switch_point,
+                                                ),
+                                        },
+                                        packet_descriptor_switch_point.is_some(),
+                                    );
                             match layer_selection {
                                 VideoIngressDecision::Forward {
                                     selected_ssrc_changed,

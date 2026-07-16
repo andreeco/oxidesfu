@@ -75,6 +75,15 @@ fn dependency_descriptor_is_switch_point(
     metadata.first_packet_in_frame && metadata.has_switching_decode_target
 }
 
+/// Dependency-descriptor availability observed for the latest RTP packet on an SSRC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DependencyDescriptorLayerAvailability {
+    /// RTP was received, but it was not a descriptor-backed decoder-usable frame boundary.
+    RtpSeen,
+    /// The descriptor reports an active DTI Switch target at a frame boundary.
+    DecoderUsable,
+}
+
 #[derive(Debug, Default)]
 struct RemoteTrackState {
     codec_mime_by_ssrc: Mutex<HashMap<u32, Option<String>>>,
@@ -83,6 +92,7 @@ struct RemoteTrackState {
         HashMap<u32, rtp::extension::dependency_descriptor_extension::DependencyDescriptorParser>,
     >,
     last_dd_switch_point_by_ssrc: Mutex<HashMap<u32, bool>>,
+    last_dd_availability_by_ssrc: Mutex<HashMap<u32, DependencyDescriptorLayerAvailability>>,
     last_observed_layer_by_ssrc: Mutex<HashMap<u32, ObservedLayerIds>>,
 }
 
@@ -106,6 +116,11 @@ impl RemoteTrackState {
             None
         };
 
+        let availability = metadata.map(|metadata| {
+            dependency_descriptor_is_switch_point(metadata)
+                .then_some(DependencyDescriptorLayerAvailability::DecoderUsable)
+                .unwrap_or(DependencyDescriptorLayerAvailability::RtpSeen)
+        });
         if let Ok(mut switch_points) = self.last_dd_switch_point_by_ssrc.lock() {
             match metadata {
                 Some(metadata) => {
@@ -113,6 +128,16 @@ impl RemoteTrackState {
                 }
                 None => {
                     switch_points.remove(&ssrc);
+                }
+            }
+        }
+        if let Ok(mut availability_by_ssrc) = self.last_dd_availability_by_ssrc.lock() {
+            match availability {
+                Some(availability) => {
+                    availability_by_ssrc.insert(ssrc, availability);
+                }
+                None => {
+                    availability_by_ssrc.remove(&ssrc);
                 }
             }
         }
@@ -258,6 +283,20 @@ impl RemoteTrack {
             .and_then(|switch_points| switch_points.get(&ssrc).copied())
     }
 
+    /// Returns dependency-descriptor availability for the latest packet on an incoming SSRC.
+    ///
+    /// `None` means the latest packet did not produce dependency-descriptor metadata.
+    pub fn last_observed_dependency_descriptor_availability_for_ssrc(
+        &self,
+        ssrc: u32,
+    ) -> Option<DependencyDescriptorLayerAvailability> {
+        self.state
+            .last_dd_availability_by_ssrc
+            .lock()
+            .ok()
+            .and_then(|availability| availability.get(&ssrc).copied())
+    }
+
     /// Returns the most recently observed temporal layer for an incoming SSRC.
     pub fn last_observed_temporal_layer_for_ssrc(&self, ssrc: u32) -> Option<u8> {
         self.state
@@ -369,7 +408,8 @@ pub struct LocalRtpTrack {
 #[allow(clippy::items_after_test_module)] // LocalRtpTrack implementation follows its focused tests.
 mod tests {
     use super::{
-        RemoteTrackState, TemporalLayerFpsEstimate, dependency_descriptor_is_switch_point,
+        DependencyDescriptorLayerAvailability, RemoteTrackState, TemporalLayerFpsEstimate,
+        dependency_descriptor_is_switch_point,
     };
     use bytes::Bytes;
     use rtc::rtp::{
@@ -507,6 +547,15 @@ mod tests {
             Some(&false),
             "a frame start without DTI Switch must not authorize a source switch"
         );
+        assert_eq!(
+            state
+                .last_dd_availability_by_ssrc
+                .lock()
+                .expect("dependency descriptor availability lock should not be poisoned")
+                .get(&ssrc),
+            Some(&DependencyDescriptorLayerAvailability::RtpSeen),
+            "descriptor RTP without a DTI Switch boundary is not decoder-usable"
+        );
 
         let switch = descriptor_packet(ssrc, 101, descriptor_with_switch_target(2));
         assert!(
@@ -522,6 +571,14 @@ mod tests {
                 .get(&ssrc),
             Some(&true),
             "a later frame start with an active DTI Switch target must authorize a source switch"
+        );
+        assert_eq!(
+            state
+                .last_dd_availability_by_ssrc
+                .lock()
+                .expect("dependency descriptor availability lock should not be poisoned")
+                .get(&ssrc),
+            Some(&DependencyDescriptorLayerAvailability::DecoderUsable)
         );
 
         let without_descriptor = Packet {
@@ -544,6 +601,14 @@ mod tests {
                 .expect("dependency descriptor state lock should not be poisoned")
                 .contains_key(&ssrc),
             "a packet without descriptor metadata must not inherit a prior switch point"
+        );
+        assert!(
+            !state
+                .last_dd_availability_by_ssrc
+                .lock()
+                .expect("dependency descriptor availability lock should not be poisoned")
+                .contains_key(&ssrc),
+            "a packet without descriptor metadata must not inherit prior availability"
         );
     }
 

@@ -76,7 +76,8 @@ pub(crate) struct KeyframeRequest {
 pub(crate) struct SubscriberVideoLayerSelector {
     policy: LayerPolicy,
     current: Option<(u32, SpatialLayer)>,
-    seen_ssrc: [Option<u32>; 3],
+    rtp_seen_ssrc: [Option<u32>; 3],
+    decoder_usable_ssrc: [Option<u32>; 3],
     seen_age_ticks: [u8; 3],
     waiting_for: SpatialLayer,
     acquisition_ticks: u8,
@@ -109,7 +110,8 @@ impl SubscriberVideoLayerSelector {
         Self {
             policy,
             current: None,
-            seen_ssrc: [None; 3],
+            rtp_seen_ssrc: [None; 3],
+            decoder_usable_ssrc: [None; 3],
             seen_age_ticks: [u8::MAX; 3],
             waiting_for: policy.desired,
             acquisition_ticks: 0,
@@ -182,9 +184,22 @@ impl SubscriberVideoLayerSelector {
         }
     }
 
-    /// Evaluates a packet. Unknown layer metadata is never silently promoted to the desired
-    /// layer; it remains observable as a distinct drop reason.
+    /// Evaluates a packet without dependency-descriptor availability metadata.
+    ///
+    /// This preserves the existing keyframe fallback for codecs that do not provide a descriptor.
     pub(crate) fn observe_packet(&mut self, packet: LayerPacketMetadata) -> VideoIngressDecision {
+        self.observe_packet_with_dependency_descriptor_metadata(packet, false)
+    }
+
+    /// Evaluates a packet with whether dependency-descriptor metadata was available.
+    ///
+    /// When metadata is available, only a verified descriptor switch boundary makes a layer
+    /// fallback-usable. RTP from descriptor-absent codecs retains the legacy keyframe behavior.
+    pub(crate) fn observe_packet_with_dependency_descriptor_metadata(
+        &mut self,
+        packet: LayerPacketMetadata,
+        dependency_descriptor_metadata_available: bool,
+    ) -> VideoIngressDecision {
         let Some(spatial) = packet.spatial else {
             return if self.current.is_some_and(|(ssrc, _)| ssrc == packet.ssrc) {
                 VideoIngressDecision::Forward {
@@ -198,8 +213,15 @@ impl SubscriberVideoLayerSelector {
             return VideoIngressDecision::DropAboveMaximum;
         }
 
-        self.seen_ssrc[spatial as usize] = Some(packet.ssrc);
-        self.seen_age_ticks[spatial as usize] = 0;
+        let spatial_index = spatial as usize;
+        if self.rtp_seen_ssrc[spatial_index] != Some(packet.ssrc) {
+            self.decoder_usable_ssrc[spatial_index] = None;
+        }
+        self.rtp_seen_ssrc[spatial_index] = Some(packet.ssrc);
+        self.seen_age_ticks[spatial_index] = 0;
+        if !dependency_descriptor_metadata_available || packet.is_decodable_switch_point {
+            self.decoder_usable_ssrc[spatial_index] = Some(packet.ssrc);
+        }
 
         if let Some((selected_ssrc, selected_spatial)) = self.current
             && selected_ssrc == packet.ssrc
@@ -207,7 +229,7 @@ impl SubscriberVideoLayerSelector {
             // RID/SSRC layer metadata may arrive late or be temporarily inconsistent with the
             // source catalog. A selected source that is still producing RTP is live; preserve
             // its known spatial identity until a keyframe-gated switch changes it.
-            self.seen_ssrc[selected_spatial as usize] = Some(packet.ssrc);
+            self.rtp_seen_ssrc[selected_spatial as usize] = Some(packet.ssrc);
             self.seen_age_ticks[selected_spatial as usize] = 0;
             return VideoIngressDecision::Forward {
                 selected_ssrc_changed: false,
@@ -264,13 +286,17 @@ impl SubscriberVideoLayerSelector {
         self.acquisition_ticks = self.acquisition_ticks.saturating_add(1);
         if !self.fallback_started && self.acquisition_ticks >= Self::ACQUISITION_GRACE_TICKS {
             self.fallback_started = true;
-            let fallback = self.best_seen_allowed().unwrap_or(self.policy.desired);
+            self.acquisition_ticks = 0;
+        }
+        if self.fallback_started {
+            let fallback = self
+                .best_decoder_usable_allowed()
+                .unwrap_or(self.policy.desired);
             if fallback != self.waiting_for {
                 self.waiting_for = fallback;
                 self.pli_ticks = 0;
                 self.remaining_pli_requests = Self::MAX_KEYFRAME_REQUESTS_PER_ACQUISITION;
             }
-            self.acquisition_ticks = 0;
         }
 
         if self.pli_ticks > 0 {
@@ -281,21 +307,22 @@ impl SubscriberVideoLayerSelector {
             return None;
         }
 
-        let ssrc = self.seen_ssrc[self.waiting_for as usize]?;
+        let ssrc = self.rtp_seen_ssrc[self.waiting_for as usize]?;
         self.pli_ticks = Self::KEYFRAME_RETRY_TICKS.saturating_sub(1);
         self.remaining_pli_requests -= 1;
         Some(KeyframeRequest { media_ssrc: ssrc })
     }
 
     fn expire_stale_sources(&mut self) {
-        for (ssrc, age) in self.seen_ssrc.iter_mut().zip(&mut self.seen_age_ticks) {
-            *age = age.saturating_add(1);
-            if *age >= Self::SOURCE_STALE_TICKS {
-                *ssrc = None;
+        for index in 0..self.rtp_seen_ssrc.len() {
+            self.seen_age_ticks[index] = self.seen_age_ticks[index].saturating_add(1);
+            if self.seen_age_ticks[index] >= Self::SOURCE_STALE_TICKS {
+                self.rtp_seen_ssrc[index] = None;
+                self.decoder_usable_ssrc[index] = None;
             }
         }
         if let Some((ssrc, spatial)) = self.current
-            && self.seen_ssrc[spatial as usize] != Some(ssrc)
+            && self.rtp_seen_ssrc[spatial as usize] != Some(ssrc)
         {
             self.current = None;
             self.waiting_for = self.policy.desired;
@@ -307,10 +334,12 @@ impl SubscriberVideoLayerSelector {
         }
     }
 
-    fn best_seen_allowed(&self) -> Option<SpatialLayer> {
+    fn best_decoder_usable_allowed(&self) -> Option<SpatialLayer> {
         [SpatialLayer::High, SpatialLayer::Medium, SpatialLayer::Low]
             .into_iter()
-            .find(|layer| *layer <= self.policy.max && self.seen_ssrc[*layer as usize].is_some())
+            .find(|layer| {
+                *layer <= self.policy.max && self.decoder_usable_ssrc[*layer as usize].is_some()
+            })
     }
 }
 
@@ -536,6 +565,40 @@ mod tests {
             }
         );
         assert_eq!(selector.current_spatial(), Some(SpatialLayer::High));
+    }
+
+    #[test]
+    fn descriptor_rtp_seen_layer_is_not_fallback_usable_until_a_switch_boundary() {
+        let mut selector =
+            SubscriberVideoLayerSelector::new(LayerPolicy::fixed(SpatialLayer::High));
+
+        assert_eq!(
+            selector.observe_packet_with_dependency_descriptor_metadata(
+                packet(10, SpatialLayer::Low, false),
+                true,
+            ),
+            VideoIngressDecision::DropNonSelectedSsrc
+        );
+        for _ in 0..SubscriberVideoLayerSelector::ACQUISITION_GRACE_TICKS {
+            assert_eq!(selector.on_timer(), None);
+        }
+        assert_eq!(selector.waiting_for(), SpatialLayer::High);
+
+        // Once the descriptor-backed switch boundary arrives, low becomes a usable fallback
+        // candidate. It is still not selected until the selector requests and receives a later
+        // decodable boundary, preserving source-switch safety.
+        assert_eq!(
+            selector.observe_packet_with_dependency_descriptor_metadata(
+                packet(10, SpatialLayer::Low, true),
+                true,
+            ),
+            VideoIngressDecision::DropNonSelectedSsrc
+        );
+        assert_eq!(
+            selector.on_timer(),
+            Some(KeyframeRequest { media_ssrc: 10 })
+        );
+        assert_eq!(selector.waiting_for(), SpatialLayer::Low);
     }
 
     #[test]

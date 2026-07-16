@@ -1,3 +1,5 @@
+const parameters = new URLSearchParams(window.location.search);
+const forceVp9 = parameters.get('codec') === 'vp9';
 const nativePeerConnection = window.RTCPeerConnection;
 const peerConnections = [];
 const peerConnectionStateHistory = [];
@@ -19,6 +21,28 @@ function observeDescriptionSetter(method) {
 
 observeDescriptionSetter('setLocalDescription');
 observeDescriptionSetter('setRemoteDescription');
+
+const nativeAddTransceiver = nativePeerConnection.prototype.addTransceiver;
+nativePeerConnection.prototype.addTransceiver = function (trackOrKind, init) {
+  const isVideo = trackOrKind === 'video' || trackOrKind.kind === 'video';
+  const videoInit = forceVp9 && isVideo
+    ? {
+        ...init,
+        sendEncodings: (init?.sendEncodings ?? [{}]).map((encoding) => ({
+          ...encoding,
+          scalabilityMode: 'L3T3_KEY',
+        })),
+      }
+    : init;
+  const transceiver = nativeAddTransceiver.call(this, trackOrKind, videoInit);
+  if (forceVp9 && isVideo) {
+    const vp9Codecs = RTCRtpReceiver.getCapabilities('video')?.codecs
+      .filter((codec) => codec.mimeType.toLowerCase() === 'video/vp9');
+    if (!vp9Codecs?.length) throw new Error('Firefox does not expose a VP9 video codec capability');
+    transceiver.setCodecPreferences(vp9Codecs);
+  }
+  return transceiver;
+};
 
 const nativeAddIceCandidate = nativePeerConnection.prototype.addIceCandidate;
 nativePeerConnection.prototype.addIceCandidate = async function (candidate) {
@@ -49,10 +73,11 @@ window.RTCPeerConnection = class extends nativePeerConnection {
   }
 };
 
-const parameters = new URLSearchParams(window.location.search);
 const role = parameters.get('role');
 const url = parameters.get('url');
 const token = parameters.get('token');
+const codec = parameters.get('codec');
+const scalabilityMode = parameters.get('scalabilityMode');
 const ready = document.querySelector('[data-testid="browser-harness-ready"]');
 const video = document.querySelector('[data-testid="remote-video"]');
 
@@ -64,8 +89,19 @@ if (!role || !url || !token) {
 try {
   const { LocalVideoTrack, Room, RoomEvent, Track, VideoQuality } =
     await import('livekit-client');
-  const room = new Room();
+  const room = new Room(
+    codec === 'vp9' && scalabilityMode === 'L3T3_KEY'
+      ? {
+          publishDefaults: {
+            simulcast: false,
+            videoCodec: 'vp9',
+            scalabilityMode: 'L3T3_KEY',
+          },
+        }
+      : undefined,
+  );
   let publication;
+  let publishedMediaTrack;
   const receivedChatMessages = [];
 
   room.registerTextStreamHandler('lk.chat', async (reader) => {
@@ -112,9 +148,10 @@ try {
     window.setInterval(drawFrame, 33);
     const mediaTrack = canvas.captureStream(30).getVideoTracks()[0];
     if (!mediaTrack) throw new Error('Canvas capture did not provide a video track');
+    publishedMediaTrack = mediaTrack;
     const track = new LocalVideoTrack(mediaTrack, undefined, true);
     ready.textContent = 'publishing-video';
-    await room.localParticipant.publishTrack(track, { simulcast: true });
+    await room.localParticipant.publishTrack(track, { simulcast: codec !== 'vp9' });
   }
 
   window.oxidesfuSetQuality = (quality) => {
@@ -132,16 +169,37 @@ try {
       const stats = await receiver.getStats();
       for (const report of stats.values()) {
         if (report.type === 'inbound-rtp' && report.kind === 'video') {
+          const codecReport = report.codecId ? stats.get(report.codecId) : undefined;
           return {
             pcId: `${pc.getConfiguration().iceServers.length}:${receiver.track.id}`,
             trackId: receiver.track.id,
             packetsReceived: report.packetsReceived ?? 0,
             framesDecoded: report.framesDecoded ?? 0,
+            codec: codecReport?.mimeType?.toLowerCase() ?? 'unknown',
           };
         }
       }
     }
     throw new Error('No inbound video RTP report belongs to the rendered track');
+  };
+
+  window.oxidesfuPublisherSample = async () => {
+    if (!publishedMediaTrack) throw new Error('No local video track is published');
+
+    for (const pc of peerConnections) {
+      const sender = pc.getSenders().find((candidate) => candidate.track?.id === publishedMediaTrack.id);
+      if (!sender) continue;
+      const stats = await sender.getStats();
+      for (const report of stats.values()) {
+        if (report.type !== 'outbound-rtp' || report.kind !== 'video') continue;
+        const codecReport = report.codecId ? stats.get(report.codecId) : undefined;
+        return {
+          codec: codecReport?.mimeType?.toLowerCase() ?? 'unknown',
+          requestedScalabilityMode: forceVp9 ? 'L3T3_KEY' : undefined,
+        };
+      }
+    }
+    throw new Error('No outbound video RTP report belongs to the published track');
   };
 
   window.oxidesfuSendChatMessage = async (message) => {

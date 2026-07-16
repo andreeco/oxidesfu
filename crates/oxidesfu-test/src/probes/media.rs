@@ -1154,6 +1154,178 @@ async fn rust_sdk_room_simulcast_video_quality_switch_preserves_video_delivery_c
     server.abort();
 }
 
+#[test]
+fn rust_sdk_vp9_svc_options_construct_one_l3t3_key_encoding_and_three_spatial_layers() {
+    let options = TrackPublishOptions {
+        simulcast: false,
+        video_codec: livekit::options::VideoCodec::VP9,
+        scalability_mode: Some("L3T3_KEY".to_string()),
+        ..Default::default()
+    };
+
+    let encodings = livekit::options::compute_video_encodings(1280, 720, &options);
+    assert_eq!(encodings.len(), 1, "SVC must use one RTP encoding, not simulcast RIDs");
+    assert_eq!(encodings[0].scalability_mode.as_deref(), Some("L3T3_KEY"));
+
+    let layers = livekit::options::video_layers_from_encodings(1280, 720, &encodings);
+    let dimensions = layers
+        .iter()
+        .map(|layer| (layer.width, layer.height))
+        .collect::<Vec<_>>();
+    assert_eq!(dimensions, vec![(320, 180), (640, 360), (1280, 720)]);
+}
+
+// The native SDK exposes raw I420 and encoded access-unit capture, but not an RTP injection or
+// packet-extension API. Consequently this probe cannot construct a known VP9 packet sequence
+// whose first packet has a dependency descriptor with an active DTI Switch target. Its native
+// L3T3_KEY encoder produced no decoded low-layer frame in the bounded run below, so this remains
+// a regression contract rather than a passing default test until the SDK exposes such a fixture.
+#[tokio::test]
+#[ignore = "native SDK cannot construct a deterministic VP9 dependency-descriptor RTP switch packet"]
+async fn rust_sdk_room_vp9_svc_quality_low_to_high_preserves_delivery_contract() {
+    let _media_probe_guard = NATIVE_MEDIA_PROBE_LOCK.lock().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener should bind");
+    let addr = listener
+        .local_addr()
+        .expect("listener should have a local address");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, oxidesfu_server::app())
+            .await
+            .expect("test server should run");
+    });
+
+    let room_name = format!("sdk-vp9-svc-quality-switch-{}", unique_suffix());
+    let publisher_token = AccessToken::with_api_key(API_KEY, API_SECRET)
+        .with_identity("sdk-vp9-svc-publisher")
+        .with_grants(VideoGrants {
+            room_join: true,
+            room: room_name.clone(),
+            can_publish: true,
+            can_subscribe: true,
+            ..Default::default()
+        })
+        .to_jwt()
+        .expect("publisher token should encode");
+    let subscriber_token = AccessToken::with_api_key(API_KEY, API_SECRET)
+        .with_identity("sdk-vp9-svc-subscriber")
+        .with_grants(VideoGrants {
+            room_join: true,
+            room: room_name,
+            can_publish: true,
+            can_subscribe: true,
+            ..Default::default()
+        })
+        .to_jwt()
+        .expect("subscriber token should encode");
+
+    let mut options = RoomOptions::default();
+    options.single_peer_connection = false;
+    options.connect_timeout = Duration::from_secs(10);
+    let (publisher_room, mut publisher_events) =
+        Room::connect(&format!("http://{addr}"), &publisher_token, options.clone())
+            .await
+            .expect("publisher room should connect");
+    let (subscriber_room, mut subscriber_events) =
+        Room::connect(&format!("http://{addr}"), &subscriber_token, options)
+            .await
+            .expect("subscriber room should connect");
+    wait_for_room_connected(&mut publisher_events).await;
+    wait_for_room_connected(&mut subscriber_events).await;
+
+    let source = NativeVideoSource::new(
+        VideoResolution {
+            width: 1280,
+            height: 720,
+        },
+        false,
+    );
+    let track = LocalVideoTrack::create_video_track("svc-cam", RtcVideoSource::Native(source.clone()));
+    let _publication = publisher_room
+        .local_participant()
+        .publish_track(
+            LocalTrack::Video(track),
+            TrackPublishOptions {
+                simulcast: false,
+                video_codec: livekit::options::VideoCodec::VP9,
+                scalability_mode: Some("L3T3_KEY".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("native SDK should publish VP9 L3T3_KEY SVC video");
+    let (remote_video_track, remote_publication) =
+        wait_for_remote_video_subscription(&mut subscriber_events).await;
+    assert!(
+        remote_publication.simulcasted(),
+        "the SDK SVC publication should advertise switchable spatial layers"
+    );
+
+    let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let frame_pump_source = source.clone();
+    let frame_pump = tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_millis(33));
+        let mut luma = 96_u8;
+        loop {
+            tokio::select! {
+                _ = &mut stop_rx => break,
+                _ = ticker.tick() => {
+                    let mut buffer = livekit::webrtc::prelude::I420Buffer::new(1280, 720);
+                    let (y, u, v) = buffer.data_mut();
+                    y.fill(luma);
+                    u.fill(128);
+                    v.fill(128);
+                    luma = luma.wrapping_add(1);
+                    let frame = livekit::webrtc::prelude::VideoFrame::new(
+                        livekit::webrtc::prelude::VideoRotation::VideoRotation0,
+                        buffer,
+                    );
+                    frame_pump_source.capture_frame(&frame);
+                }
+            }
+        }
+    });
+    let mut video_stream =
+        livekit::webrtc::video_stream::native::NativeVideoStream::new(remote_video_track.rtc_track());
+
+    remote_publication.set_video_quality(livekit::track::VideoQuality::Low);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    drain_video_frames_for_duration(&mut video_stream, Duration::from_secs(1)).await;
+    let low_pixels = collect_video_frame_pixels(&mut video_stream, 12, Duration::from_secs(3)).await;
+    let low_max_pixels = low_pixels.iter().copied().max().unwrap_or_default();
+    assert!(
+        low_max_pixels > 0,
+        "the requested SVC low layer must decode frames (low_max={low_max_pixels})"
+    );
+    assert!(
+        low_max_pixels <= 640 * 360,
+        "the low SVC request must not retain the 1280x720 layer (low_max={low_max_pixels})"
+    );
+
+    remote_publication.set_video_quality(livekit::track::VideoQuality::High);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    drain_video_frames_for_duration(&mut video_stream, Duration::from_secs(1)).await;
+    let high_pixels = collect_video_frame_pixels(&mut video_stream, 12, Duration::from_secs(3)).await;
+    let high_min_pixels = high_pixels.iter().copied().min().unwrap_or_default();
+    assert!(
+        high_min_pixels > low_max_pixels,
+        "the SVC low-to-high request must recover decoded dimensions (low_max={low_max_pixels}, high_min={high_min_pixels})"
+    );
+    assert!(
+        high_pixels.iter().all(|pixels| *pixels > 0),
+        "the SVC high-layer transition must keep delivering decodable frames"
+    );
+
+    let _ = stop_tx.send(());
+    let _ = frame_pump.await;
+    let _ = publisher_room.close().await;
+    let _ = subscriber_room.close().await;
+    server.abort();
+}
+
+
+
 #[tokio::test]
 async fn differential_media_publish_subscribe_event_flow_matches_go_livekit_dev() {
     let _media_probe_guard = NATIVE_MEDIA_PROBE_LOCK.lock().await;

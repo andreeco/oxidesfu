@@ -4,6 +4,7 @@ import { expect, test } from '@playwright/test';
 type ReceiverSample = {
   packetsReceived: number;
   framesDecoded: number;
+  codec: string;
   trackId: string;
   pcId: string;
 };
@@ -90,6 +91,55 @@ test('final adaptive low request keeps the active Firefox receiver advancing', a
   await subscriber.evaluate(() => window.oxidesfuClose());
   await publisherContext.close();
   await subscriberContext.close();
+});
+
+test('Firefox VP9 SVC receiver keeps decoding after adaptive quality churn', async ({ browser }) => {
+  const serverUrl = process.env.OXIDESFU_URL;
+  const room = `browser-vp9-svc-${randomUUID()}`;
+  const publisherContext = await browser.newContext();
+  const subscriberContext = await browser.newContext();
+  const publisher = await publisherContext.newPage();
+  const subscriber = await subscriberContext.newPage();
+  const publisherUrl = `/?role=publisher&codec=vp9&scalabilityMode=L3T3_KEY&url=${encodeURIComponent(serverUrl!)}&token=${encodeURIComponent(token('browser-vp9-publisher', room))}`;
+  const subscriberUrl = `/?role=subscriber&url=${encodeURIComponent(serverUrl!)}&token=${encodeURIComponent(token('browser-vp9-subscriber', room))}`;
+
+  try {
+    await publisher.goto(publisherUrl);
+    await waitForHarnessReady(publisher, 'VP9 publisher');
+    await subscriber.goto(subscriberUrl);
+    await waitForHarnessReady(subscriber, 'VP9 subscriber');
+    await expect.poll(
+      () => subscriber.evaluate(() => document.querySelector('video[data-testid="remote-video"]')?.srcObject !== null),
+    ).toBe(true);
+
+    await expect.poll(
+      () => publisher.evaluate(() => window.oxidesfuPublisherSample().then((sample) => sample.codec)),
+    ).toBe('video/vp9');
+    expect(
+      await publisher.evaluate(() => window.oxidesfuPublisherSample().then((sample) => sample.requestedScalabilityMode)),
+    ).toBe('L3T3_KEY');
+
+    await subscriber.evaluate(() => {
+      window.oxidesfuSetQuality('high');
+      window.oxidesfuSetQuality('low');
+      window.oxidesfuSetQuality('high');
+      window.oxidesfuSetQuality('low');
+    });
+    await subscriber.waitForTimeout(250);
+
+    const first = await subscriber.evaluate(() => window.oxidesfuReceiverSample()) as ReceiverSample;
+    await subscriber.waitForTimeout(5_000);
+    const second = await subscriber.evaluate(() => window.oxidesfuReceiverSample()) as ReceiverSample;
+
+    expect(second.pcId).toBe(first.pcId);
+    expect(second.trackId).toBe(first.trackId);
+    expect(second.codec).toBe('video/vp9');
+    expect(second.packetsReceived).toBeGreaterThan(first.packetsReceived);
+    expect(second.framesDecoded).toBeGreaterThan(first.framesDecoded);
+  } finally {
+    await publisherContext.close();
+    await subscriberContext.close();
+  }
 });
 
 test('Meet-style chat delivery keeps the active Firefox video receiver advancing', async ({ browser }) => {

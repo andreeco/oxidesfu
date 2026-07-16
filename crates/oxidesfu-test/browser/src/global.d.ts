@@ -8,6 +8,11 @@ declare global {
       trackId: string;
       packetsReceived: number;
       framesDecoded: number;
+      codec: string;
+    }>;
+    oxidesfuPublisherSample: () => Promise<{
+      codec: string;
+      requestedScalabilityMode?: 'L3T3_KEY';
     }>;
     oxidesfuSendChatMessage: (message: string) => Promise<void>;
     oxidesfuReceivedChatMessages: () => string[];
