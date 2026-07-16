@@ -159,8 +159,12 @@ The first real paired sweep reached build completion but encountered an empty Go
 
 Remaining work:
 
-- rerun and retain a real paired Go/Oxide sweep using the new artifacts, then compare post-warm-up media work;
-- correlate Oxide client evidence with the collected server target/max/desired/current, RID/SSRC, selector PLI, transitions, and driver wait/backpressure fields;
+A real one-run, 30-second paired sweep completed at `target/profiles/paired-mixed_room_high_simulcast_large-20260716T074243Z-2555c723`. The client-observed artifacts confirm the media remains unequal: Go video points were about `1.00–1.01 MB/s` per observer with `1280×720` video, while Oxide was about `0.21–0.46 MB/s` and included `320×150`/`320×180` video. Audio-only remained matched (`10.25` vs `10.31 KB/s`). This confirms the remaining divergence is still video selection/allocation/delivery, not the common audio path.
+
+Remaining work:
+
+- correlate the retained Oxide client evidence with the collected server target/max/desired/current, RID/SSRC, selector PLI, transitions, and driver wait/backpressure fields to identify why targets settle low under real load;
+- repeat the paired comparison after that repair, with multiple runs before making CPU conclusions;
 - use separately scoped Go instrumentation only if client-observed evidence is insufficient.
 
 ## Validation completed for the current slice
