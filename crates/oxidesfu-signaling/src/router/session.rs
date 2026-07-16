@@ -6596,13 +6596,9 @@ async fn forward_publisher_remote_track(
         let mut track_allocation_changes = track_allocations.subscribe_effective_changes();
         let mut cached_forward_targets = Vec::<ForwardTarget>::new();
 
+        let reader_lease_generation = reader_lease.generation();
         loop {
-            if !forward_tracks.owns_track_reader(
-                &room_name,
-                &publisher_identity,
-                &track_sid,
-                reader_lease,
-            ) {
+            if !forward_tracks.owns_track_reader(&reader_lease) {
                 tracing::debug!(
                     room = %room_name,
                     publisher_identity = %publisher_identity,
@@ -7878,17 +7874,12 @@ async fn forward_publisher_remote_track(
             }
         }
 
-        let released = forward_tracks.release_track_reader(
-            &room_name,
-            &publisher_identity,
-            &track_sid,
-            reader_lease,
-        );
+        let released = forward_tracks.release_track_reader(reader_lease);
         tracing::debug!(
             room = %room_name,
             publisher_identity = %publisher_identity,
             track_sid = %track_sid,
-            reader_lease,
+            reader_lease = reader_lease_generation,
             released,
             "forward_track_reader_lease_released"
         );

@@ -9,6 +9,20 @@ use std::{
 type ForwardTrackKey = (String, String, String, String);
 type ForwardTrackReaderKey = (String, String, String);
 
+/// Reader-local ownership token for one inbound remote-track instance.
+#[derive(Debug, Clone)]
+pub(crate) struct ForwardTrackReaderLease {
+    key: ForwardTrackReaderKey,
+    generation: u64,
+}
+
+impl ForwardTrackReaderLease {
+    /// Returns the opaque generation used to distinguish replacement readers.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct ForwardTrackStore {
     tracks: Arc<Mutex<HashMap<ForwardTrackKey, oxidesfu_rtc::LocalRtpTrack>>>,
@@ -613,40 +627,35 @@ impl ForwardTrackStore {
 
     /// Acquires exclusive ownership of the reader for one inbound remote-track instance.
     ///
-    /// The returned lease must be released when that instance ends. A stale reader cannot
-    /// release a lease acquired by a replacement remote track.
+    /// Acquires a reader-local ownership token for one inbound remote-track instance.
+    ///
+    /// The token retains its compound key so packet-loop ownership checks do not reconstruct
+    /// and hash room/publisher/track strings for every RTP packet.
     pub(crate) fn acquire_track_reader(
         &self,
         room: &str,
         publisher_identity: &str,
         track_sid: &str,
-    ) -> Option<u64> {
+    ) -> Option<ForwardTrackReaderLease> {
         let key = Self::reader_key(room, publisher_identity, track_sid);
-        let lease = self.next_reader_lease.fetch_add(1, Ordering::Relaxed);
+        let generation = self.next_reader_lease.fetch_add(1, Ordering::Relaxed);
         self.started
             .lock()
             .ok()
-            .and_then(|mut started| match started.entry(key) {
+            .and_then(|mut started| match started.entry(key.clone()) {
                 std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(lease);
-                    Some(lease)
+                    entry.insert(generation);
+                    Some(ForwardTrackReaderLease { key, generation })
                 }
                 std::collections::hash_map::Entry::Occupied(_) => None,
             })
     }
 
-    /// Returns whether an inbound reader still owns its lease.
-    pub(crate) fn owns_track_reader(
-        &self,
-        room: &str,
-        publisher_identity: &str,
-        track_sid: &str,
-        lease: u64,
-    ) -> bool {
-        let key = Self::reader_key(room, publisher_identity, track_sid);
+    /// Returns whether an inbound reader still owns its token.
+    pub(crate) fn owns_track_reader(&self, lease: &ForwardTrackReaderLease) -> bool {
         self.started
             .lock()
-            .is_ok_and(|started| started.get(&key) == Some(&lease))
+            .is_ok_and(|started| started.get(&lease.key) == Some(&lease.generation))
     }
 
     /// Revokes the current reader lease so a replacement remote track can take over.
@@ -664,20 +673,14 @@ impl ForwardTrackStore {
             .is_some()
     }
 
-    /// Releases a reader lease only when it is still owned by that remote-track instance.
-    pub(crate) fn release_track_reader(
-        &self,
-        room: &str,
-        publisher_identity: &str,
-        track_sid: &str,
-        lease: u64,
-    ) -> bool {
-        let key = Self::reader_key(room, publisher_identity, track_sid);
+    /// Releases a reader token only when it is still owned by that remote-track instance.
+    pub(crate) fn release_track_reader(&self, lease: ForwardTrackReaderLease) -> bool {
         self.started
             .lock()
             .ok()
             .and_then(|mut started| {
-                (started.get(&key) == Some(&lease)).then(|| started.remove(&key))
+                (started.get(&lease.key) == Some(&lease.generation))
+                    .then(|| started.remove(&lease.key))
             })
             .flatten()
             .is_some()

@@ -8403,26 +8403,23 @@ fn forward_track_reader_lease_is_owned_by_one_remote_track_instance() {
             .is_none(),
         "a concurrent remote track must not share the reader lease"
     );
-    assert!(
-        !store.release_track_reader("room", "publisher", "TR_a", first.wrapping_add(1)),
-        "a stale remote track must not release the current reader lease"
-    );
-    assert!(store.owns_track_reader("room", "publisher", "TR_a", first));
+    assert!(store.owns_track_reader(&first));
+    let stale_first = first.clone();
     assert!(
         store.revoke_track_reader("room", "publisher", "TR_a"),
         "a runtime codec replacement must revoke the old reader lease"
     );
     assert!(
-        !store.owns_track_reader("room", "publisher", "TR_a", first),
+        !store.owns_track_reader(&first),
         "the revoked reader must observe that it no longer owns the track"
     );
 
     let replacement = store
         .acquire_track_reader("room", "publisher", "TR_a")
         .expect("a codec-replacement remote track should acquire immediately");
-    assert_ne!(replacement, first);
+    assert_ne!(replacement.generation(), first.generation());
     assert!(
-        !store.release_track_reader("room", "publisher", "TR_a", first),
+        !store.release_track_reader(stale_first),
         "the old reader must not clear the replacement reader lease"
     );
 
