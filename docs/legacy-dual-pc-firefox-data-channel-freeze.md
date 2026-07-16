@@ -60,9 +60,19 @@ Oxide did not populate `fast_publish`, so the JS client took its delayed publish
 - `crates/oxidesfu-test/browser/tests/receiver-counters.spec.ts`
   - the dual-PC browser contract and optional redacted upstream-comparison diagnostic remain in place.
 
-## Related, but not part of this fix
+## Follow-up dual-PC transport parity
 
-`DataChannelStore` is still keyed by `(room, identity, kind)` without an explicit publisher/subscriber transport dimension. The now-passing end-to-end chat regression proves the current flow for this scenario, but upstream maintains separate writers per transport and selects the primary transport for downstream data. Address that ownership model when extending dual-PC data behavior, with a dedicated regression.
+The initial `fast_publish` fix made publisher SCTP establishment deterministic, exposing a second upstream parity requirement: LiveKit keeps publisher/subscriber writers separate and sends downstream data through the primary transport.
+
+This slice now:
+
+- keys `DataChannelStore` by `(room, identity, transport target, kind)`;
+- preserves both publisher and subscriber channels with the same label;
+- uses subscriber-first lookup for downstream packets, with publisher fallback for single-PC/publisher-primary sessions;
+- creates `_reliable`, `_lossy`, and `_data_track` before the initial subscriber offer, matching upstream channel readiness; and
+- keeps the open-triggered data-track subscription reconciliation without the former fixed 250 ms creation delay.
+
+For relayed joins, the owner response now advertises default ICE servers and uses effective subscriber-primary topology (`requested && can_subscribe`), preventing a denied-subscribe participant from receiving an incompatible subscriber-primary response. Configured per-participant ICE/client configuration propagation, enabled publish-codec policy, region metadata, and SIF trailer support require their own backing Oxide configuration/state model; they were not fabricated in this transport compatibility fix.
 
 ## Validation
 
@@ -74,6 +84,7 @@ Oxide did not populate `fast_publish`, so the JS client took its delayed publish
 - `cargo test -p oxidesfu-signaling --lib`: passed (541 passed, 2 ignored).
 - `cargo test -p oxidesfu-server --lib`: passed (110 passed).
 - A broad four-test Firefox run was intentionally stopped by the developer after two unrelated tests had reported failures; it is not a completed suite result for this fix.
+- Follow-up transport ownership slice: `cargo test -p oxidesfu-rtc --lib` passed (41 passed); `cargo test -p oxidesfu-signaling --lib` passed (541 passed, 2 ignored); `cargo test -p oxidesfu-server --lib` passed (112 passed); and the focused Firefox dual-PC test passed after subscriber-first routing and initial `_data_track` creation.
 - Previous investigation coverage remains relevant:
   - `cargo test -p oxidesfu-rtc client_created_data_channel_opens_after_media_only_offer_is_renegotiated_with_sctp -- --nocapture`: passed.
   - `cargo test -p oxidesfu-signaling --lib`: previously passed (541 passed, 2 ignored) before this focused fix.

@@ -5059,14 +5059,38 @@ pub(crate) async fn create_subscriber_offer(
         let _ = reliable.set_buffered_amount_high_threshold(threshold).await;
     }
 
-    let reliable_for_ready = reliable.clone();
-    let lossy_for_ready = lossy.clone();
-    state
-        .data_channels
-        .insert_with_kind(room_name, identity, DataChannelKind::Reliable, reliable);
-    state
-        .data_channels
-        .insert_with_kind(room_name, identity, DataChannelKind::Lossy, lossy);
+    let data_track = peer_connection
+        .create_data_channel_with_options(
+            "_data_track",
+            oxidesfu_rtc::DataChannelOptions {
+                ordered: false,
+                max_retransmits: Some(0),
+            },
+        )
+        .await
+        .map_err(|err| prost::DecodeError::new(err.to_string()))?;
+    state.data_channels.insert_with_kind_for_target(
+        room_name,
+        identity,
+        oxidesfu_rtc::DataChannelTransportTarget::Subscriber,
+        DataChannelKind::Reliable,
+        reliable,
+    );
+    state.data_channels.insert_with_kind_for_target(
+        room_name,
+        identity,
+        oxidesfu_rtc::DataChannelTransportTarget::Subscriber,
+        DataChannelKind::Lossy,
+        lossy,
+    );
+    let data_track_for_ready = data_track.clone();
+    state.data_channels.insert_with_kind_for_target(
+        room_name,
+        identity,
+        oxidesfu_rtc::DataChannelTransportTarget::Subscriber,
+        DataChannelKind::DataTrack,
+        data_track,
+    );
 
     attach_existing_media_to_subscriber_pc(state, room_name, identity, &peer_connection)
         .await
@@ -5122,7 +5146,7 @@ pub(crate) async fn create_subscriber_offer(
             target: SignalConnectionTarget::Subscriber,
         },
     );
-    let subscriber_peer_connection = state.peer_connections.insert(
+    state.peer_connections.insert(
         room_name,
         identity,
         SignalConnectionTarget::Subscriber,
@@ -5135,35 +5159,10 @@ pub(crate) async fn create_subscriber_offer(
     reconcile_subscriber_data_track_subscriptions(state, room_name, identity);
 
     let state_for_data_track_reconcile = state.clone();
-    let data_channels_for_data_track = state.data_channels.clone();
     let room_name_for_data_track_reconcile = room_name.to_string();
     let identity_for_data_track_reconcile = identity.to_string();
     tokio::spawn(async move {
-        let reliable_open = reliable_for_ready.wait_open().await;
-        let lossy_open = lossy_for_ready.wait_open().await;
-        if reliable_open.is_err() || lossy_open.is_err() {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        let Ok(data_track) = subscriber_peer_connection
-            .create_data_channel_with_options(
-                "_data_track",
-                oxidesfu_rtc::DataChannelOptions {
-                    ordered: false,
-                    max_retransmits: Some(0),
-                },
-            )
-            .await
-        else {
-            return;
-        };
-        data_channels_for_data_track.insert_with_kind(
-            &room_name_for_data_track_reconcile,
-            &identity_for_data_track_reconcile,
-            DataChannelKind::DataTrack,
-            data_track.clone(),
-        );
-        if data_track.wait_open().await.is_ok() {
+        if data_track_for_ready.wait_open().await.is_ok() {
             reconcile_subscriber_data_track_subscriptions(
                 &state_for_data_track_reconcile,
                 &room_name_for_data_track_reconcile,
@@ -5864,10 +5863,19 @@ fn forward_peer_connection_events(
                                 .await;
                         }
 
+                        let transport_target = match target {
+                            SignalConnectionTarget::Publisher => {
+                                oxidesfu_rtc::DataChannelTransportTarget::Publisher
+                            }
+                            SignalConnectionTarget::Subscriber => {
+                                oxidesfu_rtc::DataChannelTransportTarget::Subscriber
+                            }
+                        };
                         let should_insert = if kind == DataChannelKind::Reliable {
-                            if let Some(existing) = data_channels.get_with_kind(
+                            if let Some(existing) = data_channels.get_with_kind_for_target(
                                 &room_name,
                                 &identity,
+                                transport_target,
                                 DataChannelKind::Reliable,
                             ) {
                                 let existing_label = existing.label().await.unwrap_or_default();
@@ -5881,8 +5889,13 @@ fn forward_peer_connection_events(
                         };
 
                         if should_insert {
-                            data_channels
-                                .insert_with_kind(&room_name, &identity, kind, data_channel.clone());
+                            data_channels.insert_with_kind_for_target(
+                                &room_name,
+                                &identity,
+                                transport_target,
+                                kind,
+                                data_channel.clone(),
+                            );
                         }
                     }
                     let data_messages = data_messages.clone();
@@ -6136,9 +6149,11 @@ async fn relay_data_packet_after_channel_convergence(
     for target_identity in target_identities {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            if let Some(channel) =
-                data_channels.get_with_kind(room_name, &target_identity, channel_kind)
-                && channel.is_open().await.unwrap_or(false)
+            if let Some(channel) = data_channels.get_with_kind_for_downstream(
+                room_name,
+                &target_identity,
+                channel_kind,
+            ) && channel.is_open().await.unwrap_or(false)
             {
                 channels.push((target_identity, channel));
                 break;
@@ -9100,7 +9115,7 @@ async fn relay_data_track_packet_with_rooms(
 
     let mut sent = 0;
     for (subscriber_identity, sub_handle) in subscribers {
-        let Some(channel) = data_channels.get_with_kind(
+        let Some(channel) = data_channels.get_with_kind_for_downstream(
             room_name,
             &subscriber_identity,
             DataChannelKind::DataTrack,
@@ -9166,7 +9181,7 @@ async fn relay_data_track_packet(
 
     let mut sent = 0;
     for (subscriber_identity, sub_handle) in subscribers {
-        let Some(channel) = data_channels.get_with_kind(
+        let Some(channel) = data_channels.get_with_kind_for_downstream(
             room_name,
             &subscriber_identity,
             DataChannelKind::DataTrack,

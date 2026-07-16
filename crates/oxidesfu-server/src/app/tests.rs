@@ -2070,6 +2070,90 @@ async fn relay_worker_claims_intent_and_dispatcher_receives_response() {
         .expect("relay worker should finish without panic");
 }
 
+#[test]
+fn relay_executor_join_response_advertises_default_ice_and_effective_subscriber_topology() {
+    let executor = RoomStoreRelayJoinIntentExecutor::new(RoomStore::default());
+    let response = executor.execute_join(&NonLocalRelayJoinIntent {
+        room: "relay-room".to_string(),
+        identity: "subscriber-disabled".to_string(),
+        name: "Subscriber Disabled".to_string(),
+        requested_participant_sid: None,
+        selected_room_node_id: "node-remote".to_string(),
+        subscriber_primary: true,
+        can_publish: false,
+        can_subscribe: false,
+        can_publish_data: false,
+        can_update_metadata: false,
+        hidden: false,
+        metadata: String::new(),
+        attributes: HashMap::new(),
+        api_key: String::new(),
+        kind: String::new(),
+        kind_details: Vec::new(),
+        destination_room: String::new(),
+        room_config: None,
+    });
+
+    let join = match response {
+        NonLocalRelayJoinResponse::AcceptedWithJoin { join_response } => {
+            livekit_protocol::JoinResponse::decode(join_response.as_slice())
+                .expect("relay join response should decode as JoinResponse")
+        }
+        other => panic!("expected AcceptedWithJoin relay response, got {other:?}"),
+    };
+
+    assert!(
+        !join.subscriber_primary,
+        "a participant without subscribe permission cannot use the subscriber transport as primary"
+    );
+    assert_eq!(join.ice_servers.len(), 1);
+    assert_eq!(
+        join.ice_servers[0].urls,
+        vec!["stun:stun.l.google.com:19302"]
+    );
+    assert!(
+        join.client_configuration.is_none(),
+        "the default local join response has no client-specific configuration"
+    );
+}
+
+#[tokio::test]
+async fn relay_executor_v0_subscriber_topology_is_disabled_without_subscribe_permission() {
+    let executor = RoomStoreRelayJoinIntentExecutor::new(RoomStore::default());
+    let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::unbounded_channel();
+    let response = executor
+        .execute_join_with_outbound(
+            &NonLocalRelayJoinIntent {
+                room: "relay-room".to_string(),
+                identity: "subscriber-disabled".to_string(),
+                name: "Subscriber Disabled".to_string(),
+                requested_participant_sid: None,
+                selected_room_node_id: "node-remote".to_string(),
+                subscriber_primary: true,
+                can_publish: false,
+                can_subscribe: false,
+                can_publish_data: false,
+                can_update_metadata: false,
+                hidden: false,
+                metadata: String::new(),
+                attributes: HashMap::new(),
+                api_key: String::new(),
+                kind: String::new(),
+                kind_details: Vec::new(),
+                destination_room: String::new(),
+                room_config: None,
+            },
+            outbound_tx,
+        )
+        .await;
+
+    assert!(matches!(
+        response,
+        NonLocalRelayJoinResponse::AcceptedWithJoin { .. }
+    ));
+    assert!(outbound_rx.try_recv().is_err());
+}
+
 #[tokio::test]
 async fn relay_executor_reconnect_with_matching_sid_resumes_existing_participant() {
     let rooms = RoomStore::default();

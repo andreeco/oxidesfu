@@ -151,6 +151,19 @@ impl RoomStoreRelayJoinIntentExecutor {
     }
 }
 
+impl RoomStoreRelayJoinIntentExecutor {
+    fn effective_subscriber_primary(intent: &oxidesfu_signaling::NonLocalRelayJoinIntent) -> bool {
+        intent.subscriber_primary && intent.can_subscribe
+    }
+
+    fn default_ice_servers() -> Vec<livekit_protocol::IceServer> {
+        vec![livekit_protocol::IceServer {
+            urls: vec!["stun:stun.l.google.com:19302".to_string()],
+            ..Default::default()
+        }]
+    }
+}
+
 impl RelayJoinIntentExecutor for RoomStoreRelayJoinIntentExecutor {
     fn execute_join(
         &self,
@@ -290,7 +303,8 @@ impl RelayJoinIntentExecutor for RoomStoreRelayJoinIntentExecutor {
                 server_version: env!("CARGO_PKG_VERSION").to_string(),
                 ping_interval: 5,
                 ping_timeout: 15,
-                subscriber_primary: intent.subscriber_primary,
+                ice_servers: Self::default_ice_servers(),
+                subscriber_primary: Self::effective_subscriber_primary(intent),
                 fast_publish: intent.can_publish,
                 server_info: Some(livekit_protocol::ServerInfo {
                     edition: livekit_protocol::server_info::Edition::Standard as i32,
@@ -419,7 +433,7 @@ impl RelayJoinIntentExecutor for RoomStoreRelayJoinIntentExecutor {
             else {
                 return response;
             };
-            if !intent.subscriber_primary {
+            if !Self::effective_subscriber_primary(intent) {
                 return oxidesfu_signaling::NonLocalRelayJoinResponse::AcceptedWithJoin {
                     join_response,
                 };
