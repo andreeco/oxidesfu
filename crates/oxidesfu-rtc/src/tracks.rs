@@ -682,9 +682,13 @@ impl LocalRtpTrack {
         &self,
         packets: Vec<rtp::Packet>,
     ) -> RtcResult<()> {
-        let Some(mid) = self.forwarding_mid_bytes.clone() else {
+        let Some(mid) = self
+            .forwarding_mid_bytes
+            .clone()
+            .filter(|mid| !mid.is_empty())
+        else {
             return Err(std::io::Error::other(
-                "prepared RTP batch requires a cached forwarding MID",
+                "prepared RTP batch requires a non-empty cached forwarding MID",
             )
             .into());
         };

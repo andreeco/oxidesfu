@@ -1188,6 +1188,26 @@ const fn uses_prepared_video_batching(is_video_track: bool) -> bool {
     is_video_track
 }
 
+/// Latches only a known-good prepared sender binding.
+///
+/// A forwarding target can observe RTP before its negotiated sender is bound. A temporary pending
+/// binding must therefore remain retryable rather than permanently disabling batching.
+fn prepared_video_batching_is_ready(
+    cached_compatible: &mut Option<bool>,
+    forwarding_mid: Option<&str>,
+    binding_compatible: bool,
+) -> bool {
+    if *cached_compatible == Some(true) {
+        return true;
+    }
+
+    let ready = forwarding_mid.is_some_and(|mid| !mid.is_empty()) && binding_compatible;
+    if ready {
+        *cached_compatible = Some(true);
+    }
+    ready
+}
+
 /// Target-local, frame-bounded output retained until one prepared driver write.
 ///
 /// Packets have already received their final RTP rewrite before entering this queue. This keeps
@@ -7833,16 +7853,15 @@ async fn forward_publisher_remote_track(
                         }
 
                         if uses_prepared_video_batching(is_video_track) {
-                            if target.prepared_video_batching_compatible.is_none() {
-                                target.prepared_video_batching_compatible = Some(
-                                    target.local_forward_track.forwarding_mid().is_some()
-                                        && matches!(
-                                            target.local_forward_track.bind_result().await,
-                                            oxidesfu_rtc::ForwardTrackBindResult::Compatible { .. }
-                                        ),
-                                );
-                            }
-                            if target.prepared_video_batching_compatible == Some(true) {
+                            let binding_compatible = matches!(
+                                target.local_forward_track.bind_result().await,
+                                oxidesfu_rtc::ForwardTrackBindResult::Compatible { .. }
+                            );
+                            if prepared_video_batching_is_ready(
+                                &mut target.prepared_video_batching_compatible,
+                                target.local_forward_track.forwarding_mid(),
+                                binding_compatible,
+                            ) {
                                 if target
                                     .pending_video_rtp_batch
                                     .needs_flush_before(rewritten_packet.header.timestamp)
@@ -9259,6 +9278,30 @@ mod tests {
     fn only_video_targets_use_the_prepared_batch_path() {
         assert!(super::uses_prepared_video_batching(true));
         assert!(!super::uses_prepared_video_batching(false));
+    }
+
+    #[test]
+    fn prepared_video_batching_retries_pending_binding_and_rejects_empty_mid() {
+        let mut cached = None;
+        assert!(
+            !super::prepared_video_batching_is_ready(&mut cached, Some("0"), false),
+            "a pending sender binding must not permanently disable batching"
+        );
+        assert_eq!(cached, None);
+        assert!(super::prepared_video_batching_is_ready(
+            &mut cached,
+            Some("0"),
+            true
+        ));
+        assert_eq!(cached, Some(true));
+
+        let mut empty_mid = None;
+        assert!(!super::prepared_video_batching_is_ready(
+            &mut empty_mid,
+            Some(""),
+            true
+        ));
+        assert_eq!(empty_mid, None);
     }
 
     #[test]
