@@ -5,11 +5,20 @@ use std::{
 
 use super::*;
 use crate::media::{
-    ForwardTrackKey, LayerPacketMetadata, LayerPolicy, SpatialLayer, SubscriberVideoLayerSelector,
-    VideoIngressDecision,
+    ForwardTrackKey, LayerAcquisitionState, LayerPacketMetadata, LayerPolicy, SpatialLayer,
+    SubscriberVideoLayerSelector, VideoIngressDecision,
+};
+use forwarding_snapshot::{
+    DownstreamFeedbackSnapshot, ForwardingResultSnapshot, ForwardingSnapshot,
+    ForwardingTargetSnapshot, RtpWindowSnapshot, SelectorPliSnapshot, SpatialSelectionSnapshot,
+    TemporalSelectionSnapshot,
 };
 
+#[path = "../media/forwarding_snapshot.rs"]
+mod forwarding_snapshot;
+
 static NEXT_TRACK_SID_COUNTER: AtomicU64 = AtomicU64::new(0);
+static NEXT_FORWARDING_SNAPSHOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const RTCP_EFFECTS_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
 
 const REMOTE_TRACK_EVENT_IDLE_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
@@ -1123,6 +1132,41 @@ struct CachedForwardingDecision {
 }
 
 #[derive(Debug, Default)]
+struct ForwardingRtpWindow {
+    packets: u64,
+    wire_bytes: u64,
+}
+
+impl ForwardingRtpWindow {
+    fn record_successful_write(&mut self, wire_bytes: u64) {
+        self.packets = self.packets.saturating_add(1);
+        self.wire_bytes = self.wire_bytes.saturating_add(wire_bytes);
+    }
+
+    fn finish_window(&mut self, duration: std::time::Duration) -> RtpWindowSnapshot {
+        let duration_millis = duration.as_millis().max(1) as u64;
+        let snapshot = RtpWindowSnapshot {
+            packets: self.packets,
+            wire_bytes: self.wire_bytes,
+            packets_per_second: self.packets.saturating_mul(1_000) / duration_millis,
+            wire_bytes_per_second: self.wire_bytes.saturating_mul(1_000) / duration_millis,
+        };
+        *self = Self::default();
+        snapshot
+    }
+}
+
+#[derive(Debug, Default)]
+struct DownstreamFeedbackCounters {
+    pli_received: u64,
+    pli_sent: u64,
+    pli_suppressed: u64,
+    fir_received: u64,
+    fir_sent: u64,
+    fir_suppressed: u64,
+}
+
+#[derive(Debug, Default)]
 struct VideoForwardingCounters {
     layer_switches: u64,
     drop_waiting_for_keyframe: u64,
@@ -1133,6 +1177,10 @@ struct VideoForwardingCounters {
     drop_temporal_above_desired: u64,
     drop_temporal_timestamp_cap: u64,
     selector_pli_requests: u64,
+    selector_pli_suppressed_stable: u64,
+    selector_pli_suppressed_fallback_locked: u64,
+    selector_pli_suppressed_budget_exhausted: u64,
+    selector_pli_suppressed_retry_or_no_target: u64,
     rewrite_drops: u64,
     successful_rtp_packets: u64,
     successful_rtp_payload_bytes: u64,
@@ -1153,6 +1201,8 @@ struct ForwardTarget {
     video_layer_selector: SubscriberVideoLayerSelector,
     video_temporal_controller: SubscriberVideoTemporalController,
     video_counters: VideoForwardingCounters,
+    downstream_feedback_counters: DownstreamFeedbackCounters,
+    rtp_window: ForwardingRtpWindow,
     target_primary_ssrc: Option<Option<u32>>,
     target_payload_type: Option<Option<u8>>,
 
@@ -1179,6 +1229,8 @@ impl ForwardTarget {
             video_layer_selector: SubscriberVideoLayerSelector::default(),
             video_temporal_controller: SubscriberVideoTemporalController::default(),
             video_counters: VideoForwardingCounters::default(),
+            downstream_feedback_counters: DownstreamFeedbackCounters::default(),
+            rtp_window: ForwardingRtpWindow::default(),
             target_primary_ssrc: None,
             target_payload_type: None,
 
@@ -1202,6 +1254,149 @@ impl ForwardTarget {
     fn subscriber_identity(&self) -> &str {
         &self.key.3
     }
+}
+
+const FORWARDING_SNAPSHOT_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
+
+const fn spatial_layer_name(layer: SpatialLayer) -> &'static str {
+    match layer {
+        SpatialLayer::Low => "low",
+        SpatialLayer::Medium => "medium",
+        SpatialLayer::High => "high",
+    }
+}
+
+const fn temporal_layer_name(layer: TemporalLayer) -> &'static str {
+    match layer {
+        TemporalLayer::T0 => "t0",
+        TemporalLayer::T1 => "t1",
+        TemporalLayer::T2 => "t2",
+    }
+}
+
+const fn acquisition_state_name(state: LayerAcquisitionState) -> &'static str {
+    match state {
+        LayerAcquisitionState::Stable => "stable",
+        LayerAcquisitionState::WaitingForDesired => "waiting_for_desired",
+        LayerAcquisitionState::WaitingForFallback => "waiting_for_fallback",
+        LayerAcquisitionState::FallbackLocked => "fallback_locked",
+    }
+}
+
+fn outgoing_rtp_wire_bytes(packet: &rtc::rtp::Packet) -> u64 {
+    let header = &packet.header;
+    let mut header_bytes = 12 + header.csrc.len().saturating_mul(4);
+    if header.extension {
+        let extension_bytes = header
+            .get_extension_payload_len()
+            .saturating_add(header.extensions_padding);
+        header_bytes = header_bytes.saturating_add(4 + extension_bytes.div_ceil(4) * 4);
+    }
+    let padding_bytes = if header.padding {
+        let remainder = packet.payload.len() % 4;
+        if remainder == 0 { 4 } else { 4 - remainder }
+    } else {
+        0
+    };
+    (header_bytes
+        .saturating_add(packet.payload.len())
+        .saturating_add(padding_bytes)) as u64
+}
+
+/// Returns the bounded JSON-lines heartbeat tail for profiler collection.
+#[allow(dead_code)] // Coordinator-owned profiler/API integration consumes this internal path.
+pub(crate) fn forwarding_snapshot_json_lines() -> String {
+    forwarding_snapshot::forwarding_snapshot_json_lines()
+}
+
+fn record_forwarding_snapshot(
+    room_name: &str,
+    publisher_identity: &str,
+    track_sid: &str,
+    targets: &mut [ForwardTarget],
+    video_ssrc_rids: &HashMap<u32, Option<String>>,
+) {
+    let targets = targets
+        .iter_mut()
+        .map(|target| {
+            let spatial_policy = target.video_layer_selector.policy();
+            let temporal_policy = target.video_temporal_controller.policy();
+            let selected_ssrc = target.video_layer_selector.selected_ssrc();
+            ForwardingTargetSnapshot {
+                subscriber_identity: target.subscriber_identity().to_string(),
+                spatial: SpatialSelectionSnapshot {
+                    maximum: spatial_layer_name(spatial_policy.max),
+                    desired: spatial_layer_name(spatial_policy.desired),
+                    current: target
+                        .video_layer_selector
+                        .current_spatial()
+                        .map(spatial_layer_name),
+                    selected_ssrc,
+                    selected_rid: selected_ssrc
+                        .and_then(|ssrc| video_ssrc_rids.get(&ssrc))
+                        .and_then(|rid| rid.clone()),
+                    acquisition_state: acquisition_state_name(
+                        target.video_layer_selector.acquisition_state(),
+                    ),
+                    waiting_for: spatial_layer_name(target.video_layer_selector.waiting_for()),
+                    acquisition_ticks: target.video_layer_selector.acquisition_ticks(),
+                    remaining_pli_requests: target.video_layer_selector.remaining_pli_requests(),
+                    transitions: target.video_counters.layer_switches,
+                },
+                temporal: TemporalSelectionSnapshot {
+                    maximum: temporal_policy.map(|policy| temporal_layer_name(policy.max)),
+                    desired: temporal_policy.map(|policy| temporal_layer_name(policy.desired)),
+                    current: target
+                        .video_temporal_controller
+                        .current()
+                        .map(temporal_layer_name),
+                },
+                rtp_window: target.rtp_window.finish_window(FORWARDING_SNAPSHOT_WINDOW),
+                selector_pli: SelectorPliSnapshot {
+                    sent: target.video_counters.selector_pli_requests,
+                    suppressed_stable: target.video_counters.selector_pli_suppressed_stable,
+                    suppressed_fallback_locked: target
+                        .video_counters
+                        .selector_pli_suppressed_fallback_locked,
+                    suppressed_budget_exhausted: target
+                        .video_counters
+                        .selector_pli_suppressed_budget_exhausted,
+                    suppressed_retry_or_no_target: target
+                        .video_counters
+                        .selector_pli_suppressed_retry_or_no_target,
+                },
+                downstream_feedback: DownstreamFeedbackSnapshot {
+                    pli_received: target.downstream_feedback_counters.pli_received,
+                    pli_sent: target.downstream_feedback_counters.pli_sent,
+                    pli_suppressed: target.downstream_feedback_counters.pli_suppressed,
+                    fir_received: target.downstream_feedback_counters.fir_received,
+                    fir_sent: target.downstream_feedback_counters.fir_sent,
+                    fir_suppressed: target.downstream_feedback_counters.fir_suppressed,
+                },
+                forwarding: ForwardingResultSnapshot {
+                    rewrite_drops: target.video_counters.rewrite_drops,
+                    write_errors: target.video_write_errors,
+                    drop_waiting_for_keyframe: target.video_counters.drop_waiting_for_keyframe,
+                    drop_non_selected_ssrc: target.video_counters.drop_non_selected_ssrc,
+                    drop_above_maximum: target.video_counters.drop_above_maximum,
+                    drop_unknown_layer: target.video_counters.drop_unknown_layer,
+                    drop_temporal_above_maximum: target.video_counters.drop_temporal_above_maximum,
+                    drop_temporal_above_desired: target.video_counters.drop_temporal_above_desired,
+                    drop_temporal_timestamp_cap: target.video_counters.drop_temporal_timestamp_cap,
+                },
+            }
+        })
+        .collect();
+
+    forwarding_snapshot::record_snapshot(ForwardingSnapshot {
+        schema_version: 1,
+        sequence: NEXT_FORWARDING_SNAPSHOT_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+        window_duration_ms: FORWARDING_SNAPSHOT_WINDOW.as_millis() as u64,
+        room: room_name.to_string(),
+        publisher_identity: publisher_identity.to_string(),
+        track_sid: track_sid.to_string(),
+        targets,
+    });
 }
 
 /// Returns whether a timer requested one diagnostic scan, consuming that request.
@@ -6211,9 +6406,30 @@ async fn forward_publisher_remote_track(
                         let keyframe_requests = cached_forward_targets
                             .iter_mut()
                             .filter_map(|target| {
+                                let state_before = target.video_layer_selector.acquisition_state();
+                                let remaining_before = target.video_layer_selector.remaining_pli_requests();
                                 let request = target.video_layer_selector.on_timer();
                                 if request.is_some() {
                                     target.video_counters.selector_pli_requests += 1;
+                                } else {
+                                    match state_before {
+                                        LayerAcquisitionState::Stable => {
+                                            target.video_counters.selector_pli_suppressed_stable += 1;
+                                        }
+                                        LayerAcquisitionState::FallbackLocked => {
+                                            target.video_counters.selector_pli_suppressed_fallback_locked += 1;
+                                        }
+                                        LayerAcquisitionState::WaitingForDesired
+                                        | LayerAcquisitionState::WaitingForFallback
+                                            if remaining_before == 0 =>
+                                        {
+                                            target.video_counters.selector_pli_suppressed_budget_exhausted += 1;
+                                        }
+                                        LayerAcquisitionState::WaitingForDesired
+                                        | LayerAcquisitionState::WaitingForFallback => {
+                                            target.video_counters.selector_pli_suppressed_retry_or_no_target += 1;
+                                        }
+                                    }
                                 }
                                 request
                             })
@@ -6303,6 +6519,25 @@ async fn forward_publisher_remote_track(
                         continue;
                     }
                     _ = forwarding_debug_tick.tick() => {
+                        let current_revision = forward_tracks.revision();
+                        if cached_forward_tracks_revision != Some(current_revision) {
+                            refresh_forward_targets_for_track(
+                                &mut cached_forward_targets,
+                                &forward_tracks,
+                                &rtp_forwarding,
+                                &room_name,
+                                &publisher_identity,
+                                &track_sid,
+                            );
+                            cached_forward_tracks_revision = Some(current_revision);
+                        }
+                        record_forwarding_snapshot(
+                            &room_name,
+                            &publisher_identity,
+                            &track_sid,
+                            &mut cached_forward_targets,
+                            &video_ssrc_rids,
+                        );
                         forwarding_debug_heartbeat_due = true;
                         // This is track-level recovery, distinct from target-layer acquisition.
                         // It preserves the prior periodic keyframe behavior for an already
@@ -6938,6 +7173,7 @@ async fn forward_publisher_remote_track(
 
                         let forwarded_payload_type = rewritten_packet.header.payload_type;
                         let rewritten_payload_bytes = rewritten_packet.payload.len() as u64;
+                        let rewritten_wire_bytes = outgoing_rtp_wire_bytes(&rewritten_packet);
                         let write_result = if is_video_track {
                             target
                                 .local_forward_track
@@ -6986,6 +7222,9 @@ async fn forward_publisher_remote_track(
                                 .video_counters
                                 .successful_rtp_payload_bytes
                                 .saturating_add(rewritten_payload_bytes);
+                            target
+                                .rtp_window
+                                .record_successful_write(rewritten_wire_bytes);
                         }
 
                         if !target.forwarded_once {
@@ -7091,6 +7330,22 @@ async fn forward_publisher_remote_track(
                         continue;
                     }
 
+                    let downstream_pli_received = rtcp_packets
+                        .iter()
+                        .filter(|packet| {
+                            packet.as_any().is::<
+                                rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication,
+                            >()
+                        })
+                        .count() as u64;
+                    let downstream_fir_received = rtcp_packets
+                        .iter()
+                        .filter(|packet| {
+                            packet.as_any().is::<
+                                rtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest,
+                            >()
+                        })
+                        .count() as u64;
                     let forward_tracks_for_track =
                         forward_tracks.list_for_track(&room_name, &publisher_identity, &track_sid);
                     for (key, local_forward_track) in forward_tracks_for_track {
@@ -7125,6 +7380,57 @@ async fn forward_publisher_remote_track(
                             &rtp_forwarding,
                             current_unix_millis(),
                         );
+                        let downstream_pli_sent = effects
+                            .feedback_packets
+                            .iter()
+                            .filter(|packet| {
+                                packet.as_any().is::<
+                                    rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication,
+                                >()
+                            })
+                            .count() as u64;
+                        let downstream_fir_sent = effects
+                            .feedback_packets
+                            .iter()
+                            .filter(|packet| {
+                                packet.as_any().is::<
+                                    rtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest,
+                                >()
+                            })
+                            .count() as u64;
+                        if let Some(target) = cached_forward_targets
+                            .iter_mut()
+                            .find(|target| target.key == key)
+                        {
+                            target.downstream_feedback_counters.pli_received = target
+                                .downstream_feedback_counters
+                                .pli_received
+                                .saturating_add(downstream_pli_received);
+                            target.downstream_feedback_counters.pli_sent = target
+                                .downstream_feedback_counters
+                                .pli_sent
+                                .saturating_add(downstream_pli_sent);
+                            target.downstream_feedback_counters.pli_suppressed = target
+                                .downstream_feedback_counters
+                                .pli_suppressed
+                                .saturating_add(
+                                    downstream_pli_received.saturating_sub(downstream_pli_sent),
+                                );
+                            target.downstream_feedback_counters.fir_received = target
+                                .downstream_feedback_counters
+                                .fir_received
+                                .saturating_add(downstream_fir_received);
+                            target.downstream_feedback_counters.fir_sent = target
+                                .downstream_feedback_counters
+                                .fir_sent
+                                .saturating_add(downstream_fir_sent);
+                            target.downstream_feedback_counters.fir_suppressed = target
+                                .downstream_feedback_counters
+                                .fir_suppressed
+                                .saturating_add(
+                                    downstream_fir_received.saturating_sub(downstream_fir_sent),
+                                );
+                        }
 
                         let rtp_sink = LocalForwardTrackRtpSink {
                             track: local_forward_track,
@@ -8092,18 +8398,19 @@ mod tests {
     use prost::Message;
 
     use super::{
-        ForwardingDecisionRevisions, FpsForwardingState, SubscriberVideoTemporalController,
-        TemporalIngressDecision, TemporalLayer, add_track_response,
-        allocation_available_outgoing_bitrate_bps, allocation_layout_weight,
+        ForwardingDecisionRevisions, ForwardingRtpWindow, FpsForwardingState,
+        SubscriberVideoTemporalController, TemporalIngressDecision, TemporalLayer,
+        add_track_response, allocation_available_outgoing_bitrate_bps, allocation_layout_weight,
         allocation_quality_for_budget, allocation_temporal_layer_for_budget,
         apply_publisher_codec_preferences_to_answer, av1_is_keyframe_start,
         cached_forwarding_decision_for_subscriber,
         clear_publisher_subscription_active_if_no_remaining_tracks, data_channel_kind_for_label,
         desired_video_quality_from_allocation, filter_h264_from_publisher_answer_for_client,
         force_sendonly_sections_without_msid_recvonly, h264_is_keyframe_start,
-        normalize_incoming_data_packet, preferred_codec_mime_for_participant_track,
-        relay_data_packet_after_channel_convergence, relay_data_track_packet,
-        reliable_channel_label_rank, reorder_section_media_line_payloads_for_preferred_codec,
+        normalize_incoming_data_packet, outgoing_rtp_wire_bytes,
+        preferred_codec_mime_for_participant_track, relay_data_packet_after_channel_convergence,
+        relay_data_track_packet, reliable_channel_label_rank,
+        reorder_section_media_line_payloads_for_preferred_codec,
         resolved_destination_identities_for_packet, selected_forwarding_mime_type_for_subscriber,
         signal_track_subscribed_to_publisher, video_is_decodable_switch_point,
         video_is_decodable_switch_point_with_dependency_descriptor, vp8_is_keyframe_start,
@@ -8116,6 +8423,55 @@ mod tests {
     };
     use oxidesfu_auth::{ApiKeyStore, TokenVerifier};
     use oxidesfu_rtc::DataChannelKind;
+
+    #[test]
+    fn forwarding_rtp_window_reports_wire_packet_rates_not_payload_totals() {
+        let mut window = ForwardingRtpWindow::default();
+        window.record_successful_write(1_500);
+        window.record_successful_write(900);
+
+        let snapshot = window.finish_window(Duration::from_secs(3));
+        assert_eq!(snapshot.packets, 2);
+        assert_eq!(snapshot.wire_bytes, 2_400);
+        assert_eq!(snapshot.packets_per_second, 0);
+        assert_eq!(snapshot.wire_bytes_per_second, 800);
+        assert_eq!(window.finish_window(Duration::from_secs(3)).packets, 0);
+    }
+
+    #[test]
+    fn outgoing_rtp_wire_bytes_includes_the_rtp_header() {
+        let packet = rtc::rtp::Packet {
+            header: rtc::rtp::header::Header {
+                ssrc: 123,
+                ..Default::default()
+            },
+            payload: vec![0; 100].into(),
+        };
+
+        assert_eq!(outgoing_rtp_wire_bytes(&packet), 112);
+    }
+
+    #[test]
+    fn forwarding_snapshot_store_retains_a_bounded_json_lines_tail() {
+        let store = super::forwarding_snapshot::ForwardingSnapshotStore::new(2);
+        for sequence in 1..=3 {
+            store.push(super::forwarding_snapshot::ForwardingSnapshot {
+                schema_version: 1,
+                sequence,
+                window_duration_ms: 3_000,
+                room: "room".to_string(),
+                publisher_identity: "publisher".to_string(),
+                track_sid: "track".to_string(),
+                targets: Vec::new(),
+            });
+        }
+
+        let output = store.json_lines();
+        let lines = output.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("\"sequence\":2"));
+        assert!(lines[1].contains("\"sequence\":3"));
+    }
 
     #[test]
     fn allocation_bitrate_source_prefers_test_override_and_falls_back_to_rtc_estimate() {
