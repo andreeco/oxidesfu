@@ -101,6 +101,12 @@ async function waitForReliableDataChannelOpen(
   throw new Error(`${label} did not open ${origin} _reliable within ${timeoutMs}ms: channels=${JSON.stringify(latest)}, descriptions=${JSON.stringify(descriptions)}`);
 }
 
+async function printSessionDescriptionSample(page: import('@playwright/test').Page, label: string) {
+  if (process.env.OXIDESFU_PRINT_SESSION_DESCRIPTIONS !== '1') return;
+  const descriptions = await page.evaluate(() => window.oxidesfuSessionDescriptionSample()) as SessionDescriptionSample[];
+  console.log(`${label} session descriptions: ${JSON.stringify(descriptions)}`);
+}
+
 async function waitForPeerConnectionCount(
   page: import('@playwright/test').Page,
   label: string,
@@ -305,6 +311,7 @@ test('dual-PC chat delivery keeps the active Firefox video receiver advancing', 
     const before = await waitForReceiverSample(subscriber, 'dual-PC subscriber');
     const sendChat = publisher.evaluate((message) => window.oxidesfuSendChatMessage(message), message);
     await waitForReliableDataChannelOpen(publisher, 'dual-PC publisher');
+    await printSessionDescriptionSample(publisher, 'dual-PC publisher');
     await sendChat;
     await expect.poll(
       () => subscriber.evaluate(() => window.oxidesfuReceivedChatMessages()),

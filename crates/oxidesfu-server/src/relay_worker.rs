@@ -291,6 +291,7 @@ impl RelayJoinIntentExecutor for RoomStoreRelayJoinIntentExecutor {
                 ping_interval: 5,
                 ping_timeout: 15,
                 subscriber_primary: intent.subscriber_primary,
+                fast_publish: intent.can_publish,
                 server_info: Some(livekit_protocol::ServerInfo {
                     edition: livekit_protocol::server_info::Edition::Standard as i32,
                     version: env!("CARGO_PKG_VERSION").to_string(),

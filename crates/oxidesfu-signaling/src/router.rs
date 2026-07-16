@@ -1177,6 +1177,10 @@ async fn run_join_socket(
                 ping_interval: PING_INTERVAL_SECONDS,
                 ping_timeout: PING_TIMEOUT_SECONDS,
                 subscriber_primary: effective_subscriber_primary,
+                // LiveKit sets this for publish-authorized participants without an ICE fallback
+                // preference. Oxide does not currently model fallback preferences, so every
+                // publish-authorized join must establish its publisher transport eagerly.
+                fast_publish: auth.claims.video.get_can_publish(),
                 ice_servers: state.ice_servers(&participant.sid),
                 client_configuration: client_configuration_for_participant(
                     &state, &room_name, &identity,

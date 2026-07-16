@@ -15678,6 +15678,10 @@ async fn rtc_v0_websocket_sends_join_response_without_join_request() {
     assert_eq!(participant.name, "Alice");
     assert_eq!(participant.metadata, "");
     assert!(join.subscriber_primary);
+    assert!(
+        join.fast_publish,
+        "a publish-authorized v0 participant must establish its publisher transport at join"
+    );
 
     server.abort();
 }
