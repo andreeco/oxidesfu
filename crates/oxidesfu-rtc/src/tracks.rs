@@ -63,25 +63,11 @@ impl TemporalLayerFpsEstimate {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-struct ObservedLayerIds {
-    temporal_id: u8,
-    spatial_id: u8,
-}
-
+#[cfg_attr(not(test), allow(dead_code))]
 fn dependency_descriptor_is_switch_point(
     metadata: &rtp::extension::dependency_descriptor_extension::DependencyDescriptorPacketMetadata,
 ) -> bool {
     metadata.first_packet_in_frame && metadata.has_switching_decode_target
-}
-
-/// Dependency-descriptor availability observed for the latest RTP packet on an SSRC.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DependencyDescriptorLayerAvailability {
-    /// RTP was received, but it was not a descriptor-backed decoder-usable frame boundary.
-    RtpSeen,
-    /// The descriptor reports an active DTI Switch target at a frame boundary.
-    DecoderUsable,
 }
 
 /// Owned dependency-descriptor target metadata retained for the latest RTP packet on an SSRC.
@@ -107,6 +93,12 @@ pub struct DependencyDescriptorMetadataSnapshot {
     pub frame_number: u64,
     /// Whether this packet starts its descriptor frame.
     pub first_packet_in_frame: bool,
+    /// Whether this frame contains an active DTI Switch decode target.
+    pub has_switching_decode_target: bool,
+    /// Spatial layer carried by this packet.
+    pub spatial_id: u8,
+    /// Temporal layer carried by this packet.
+    pub temporal_id: u8,
     /// Effective active decode-target mask.
     pub active_decode_targets: u32,
     /// Layer bounds for each decode target.
@@ -123,6 +115,32 @@ pub struct DependencyDescriptorMetadataSnapshot {
     pub target_protected_by_chain: Vec<u8>,
 }
 
+/// Metadata derived exactly once from an incoming RTP packet.
+///
+/// This travels with [`IncomingRtpPacket`] to avoid storing packet-local state in a remote-track
+/// map and immediately locking that map again in the forwarding reader.
+#[derive(Debug, Clone, Default)]
+pub struct IncomingRtpMetadata {
+    /// Parsed temporal layer when the codec or descriptor carries one.
+    pub temporal_layer: Option<u8>,
+    /// Parsed spatial layer when the codec or descriptor carries one.
+    pub spatial_layer: Option<u8>,
+    /// `Some` when a dependency descriptor was parsed for this packet.
+    pub dependency_descriptor_switch_point: Option<bool>,
+    /// Owned descriptor metadata for this exact packet.
+    pub dependency_descriptor: Option<DependencyDescriptorMetadataSnapshot>,
+    /// Receiver-observed temporal cadence for this packet's source and spatial layer.
+    pub temporal_layer_fps: Option<[Option<f32>; 3]>,
+}
+
+/// An RTP packet and metadata derived while it was received.
+pub struct IncomingRtpPacket {
+    /// The original incoming RTP packet.
+    pub packet: rtp::Packet,
+    /// Metadata derived from this exact packet.
+    pub metadata: IncomingRtpMetadata,
+}
+
 impl DependencyDescriptorMetadataSnapshot {
     fn from_packet_metadata(
         source_extension_id: u8,
@@ -132,6 +150,9 @@ impl DependencyDescriptorMetadataSnapshot {
             source_extension_id,
             frame_number: u64::from(metadata.frame_number),
             first_packet_in_frame: metadata.first_packet_in_frame,
+            has_switching_decode_target: metadata.has_switching_decode_target,
+            spatial_id: metadata.layer_ids.spatial_id,
+            temporal_id: metadata.layer_ids.temporal_id,
             active_decode_targets: metadata.active_decode_targets_mask,
             target_layers: metadata
                 .decode_target_layers
@@ -162,76 +183,31 @@ struct RemoteTrackState {
     dd_parser_by_ssrc: Mutex<
         HashMap<u32, rtp::extension::dependency_descriptor_extension::DependencyDescriptorParser>,
     >,
-    last_dd_switch_point_by_ssrc: Mutex<HashMap<u32, bool>>,
-    last_dd_availability_by_ssrc: Mutex<HashMap<u32, DependencyDescriptorLayerAvailability>>,
-    last_dd_metadata_by_ssrc: Mutex<HashMap<u32, DependencyDescriptorMetadataSnapshot>>,
-    last_observed_layer_by_ssrc: Mutex<HashMap<u32, ObservedLayerIds>>,
 }
 
 impl RemoteTrackState {
     fn observe_dependency_descriptor_packet(
         &self,
         packet: &rtp::Packet,
-    ) -> Option<rtp::extension::dependency_descriptor_extension::DependencyDescriptorPacketMetadata>
-    {
+    ) -> Option<DependencyDescriptorMetadataSnapshot> {
         let ssrc = packet.header.ssrc;
-        let metadata = if packet.header.extension {
-            self.dd_parser_by_ssrc.lock().ok().and_then(|mut parsers| {
-                let parser = parsers.entry(ssrc).or_default();
-                packet.header.extensions.iter().find_map(|extension| {
-                    parser
-                        .parse_packet_metadata(&extension.payload)
-                        .map(|metadata| (extension.id, metadata))
-                })
-            })
-        } else {
-            None
-        };
+        if !packet.header.extension {
+            return None;
+        }
 
-        let availability = metadata.as_ref().map(|(_, metadata)| {
-            if dependency_descriptor_is_switch_point(metadata) {
-                DependencyDescriptorLayerAvailability::DecoderUsable
-            } else {
-                DependencyDescriptorLayerAvailability::RtpSeen
-            }
-        });
-        if let Ok(mut switch_points) = self.last_dd_switch_point_by_ssrc.lock() {
-            match metadata {
-                Some((_, ref metadata)) => {
-                    switch_points.insert(ssrc, dependency_descriptor_is_switch_point(metadata));
-                }
-                None => {
-                    switch_points.remove(&ssrc);
-                }
-            }
-        }
-        if let Ok(mut availability_by_ssrc) = self.last_dd_availability_by_ssrc.lock() {
-            match availability {
-                Some(availability) => {
-                    availability_by_ssrc.insert(ssrc, availability);
-                }
-                None => {
-                    availability_by_ssrc.remove(&ssrc);
-                }
-            }
-        }
-        if let Ok(mut metadata_by_ssrc) = self.last_dd_metadata_by_ssrc.lock() {
-            match metadata.as_ref() {
-                Some((source_extension_id, metadata)) => {
-                    metadata_by_ssrc.insert(
-                        ssrc,
+        self.dd_parser_by_ssrc.lock().ok().and_then(|mut parsers| {
+            let parser = parsers.entry(ssrc).or_default();
+            packet.header.extensions.iter().find_map(|extension| {
+                parser
+                    .parse_packet_metadata(&extension.payload)
+                    .map(|metadata| {
                         DependencyDescriptorMetadataSnapshot::from_packet_metadata(
-                            *source_extension_id,
-                            metadata.clone(),
-                        ),
-                    );
-                }
-                None => {
-                    metadata_by_ssrc.remove(&ssrc);
-                }
-            }
-        }
-        metadata.map(|(_, metadata)| metadata)
+                            extension.id,
+                            metadata,
+                        )
+                    })
+            })
+        })
     }
 }
 
@@ -264,150 +240,65 @@ impl RemoteTrack {
         resolved
     }
 
-    async fn observe_temporal_layer_fps(&self, packet: &rtp::Packet) {
+    async fn observe_rtp_metadata(&self, packet: &rtp::Packet) -> IncomingRtpMetadata {
         let ssrc = packet.header.ssrc;
-        let dd_metadata = self.state.observe_dependency_descriptor_packet(packet);
+        let dependency_descriptor = self.state.observe_dependency_descriptor_packet(packet);
+        let dependency_descriptor_switch_point = dependency_descriptor
+            .as_ref()
+            .map(|metadata| metadata.first_packet_in_frame && metadata.has_switching_decode_target);
 
-        let Some(codec_mime) = self.codec_mime_cached_for_ssrc(ssrc).await else {
-            return;
-        };
-        let mime = codec_mime.to_ascii_lowercase();
-
-        let (spatial_id, temporal_id) = if let Some(metadata) = dd_metadata {
-            (
-                metadata.layer_ids.spatial_id,
-                Some(metadata.layer_ids.temporal_id),
-            )
-        } else if mime.contains("vp8") {
-            (
-                0,
-                rtp::codec::vp8::temporal_layer_id_from_payload(&packet.payload),
-            )
-        } else if mime.contains("vp9") {
-            if let Some(layer_ids) = rtp::codec::vp9::layer_ids_from_payload(&packet.payload) {
-                (layer_ids.spatial_id, Some(layer_ids.temporal_id))
-            } else {
-                (
-                    0,
-                    rtp::codec::vp9::temporal_layer_id_from_payload(&packet.payload),
-                )
-            }
-        } else if mime.contains("h265") {
-            (
-                0,
-                rtp::codec::h265::temporal_layer_id_from_payload(&packet.payload),
-            )
+        let (spatial_layer, temporal_layer) = if let Some(metadata) = dependency_descriptor.as_ref()
+        {
+            (Some(metadata.spatial_id), Some(metadata.temporal_id))
         } else {
-            (0, None)
-        };
-
-        let Some(temporal_id) = temporal_id else {
-            if let Ok(mut last_layers) = self.state.last_observed_layer_by_ssrc.lock() {
-                last_layers.remove(&ssrc);
+            let codec_mime = self.codec_mime_cached_for_ssrc(ssrc).await;
+            let mime = codec_mime.as_deref().map(str::to_ascii_lowercase);
+            match mime.as_deref() {
+                Some(mime) if mime.contains("vp8") => (
+                    Some(0),
+                    rtp::codec::vp8::temporal_layer_id_from_payload(&packet.payload),
+                ),
+                Some(mime) if mime.contains("vp9") => {
+                    if let Some(layer_ids) =
+                        rtp::codec::vp9::layer_ids_from_payload(&packet.payload)
+                    {
+                        (Some(layer_ids.spatial_id), Some(layer_ids.temporal_id))
+                    } else {
+                        (
+                            Some(0),
+                            rtp::codec::vp9::temporal_layer_id_from_payload(&packet.payload),
+                        )
+                    }
+                }
+                Some(mime) if mime.contains("h265") => (
+                    Some(0),
+                    rtp::codec::h265::temporal_layer_id_from_payload(&packet.payload),
+                ),
+                _ => (None, None),
             }
-            return;
         };
 
-        if let Ok(mut last_layers) = self.state.last_observed_layer_by_ssrc.lock() {
-            last_layers.insert(
-                ssrc,
-                ObservedLayerIds {
-                    temporal_id,
-                    spatial_id,
-                },
-            );
+        let temporal_layer_fps = match (spatial_layer, temporal_layer) {
+            (Some(spatial_layer), Some(temporal_layer)) => self
+                .state
+                .temporal_fps_by_ssrc_spatial
+                .lock()
+                .ok()
+                .map(|mut stats| {
+                    let estimate = stats.entry((ssrc, spatial_layer)).or_default();
+                    estimate.observe(temporal_layer, packet.header.timestamp);
+                    estimate.as_array()
+                }),
+            _ => None,
+        };
+
+        IncomingRtpMetadata {
+            temporal_layer,
+            spatial_layer,
+            dependency_descriptor_switch_point,
+            dependency_descriptor,
+            temporal_layer_fps,
         }
-
-        if let Ok(mut stats) = self.state.temporal_fps_by_ssrc_spatial.lock() {
-            stats
-                .entry((ssrc, spatial_id))
-                .or_default()
-                .observe(temporal_id, packet.header.timestamp);
-        }
-    }
-
-    /// Returns estimated temporal-layer FPS values for a specific incoming SSRC.
-    ///
-    /// Values are `None` until enough packets have been observed for each layer.
-    pub fn temporal_layer_fps_for_ssrc(&self, ssrc: u32) -> Option<[Option<f32>; 3]> {
-        self.temporal_layer_fps_for_ssrc_and_spatial(ssrc, 0)
-    }
-
-    /// Returns estimated temporal-layer FPS values for a specific incoming SSRC and spatial layer.
-    pub fn temporal_layer_fps_for_ssrc_and_spatial(
-        &self,
-        ssrc: u32,
-        spatial_id: u8,
-    ) -> Option<[Option<f32>; 3]> {
-        self.state
-            .temporal_fps_by_ssrc_spatial
-            .lock()
-            .ok()
-            .and_then(|stats| {
-                stats
-                    .get(&(ssrc, spatial_id))
-                    .or_else(|| stats.get(&(ssrc, 0)))
-                    .map(TemporalLayerFpsEstimate::as_array)
-            })
-    }
-
-    /// Returns the most recently observed spatial layer for an incoming SSRC.
-    pub fn last_observed_spatial_layer_for_ssrc(&self, ssrc: u32) -> Option<u8> {
-        self.state
-            .last_observed_layer_by_ssrc
-            .lock()
-            .ok()
-            .and_then(|layers| layers.get(&ssrc).map(|ids| ids.spatial_id))
-    }
-
-    /// Returns whether the latest packet for an SSRC is a verified dependency-descriptor switch
-    /// point. `None` means descriptor metadata was unavailable for that packet.
-    pub fn last_observed_dependency_descriptor_switch_point_for_ssrc(
-        &self,
-        ssrc: u32,
-    ) -> Option<bool> {
-        self.state
-            .last_dd_switch_point_by_ssrc
-            .lock()
-            .ok()
-            .and_then(|switch_points| switch_points.get(&ssrc).copied())
-    }
-
-    /// Returns dependency-descriptor availability for the latest packet on an incoming SSRC.
-    ///
-    /// `None` means the latest packet did not produce dependency-descriptor metadata.
-    pub fn last_observed_dependency_descriptor_availability_for_ssrc(
-        &self,
-        ssrc: u32,
-    ) -> Option<DependencyDescriptorLayerAvailability> {
-        self.state
-            .last_dd_availability_by_ssrc
-            .lock()
-            .ok()
-            .and_then(|availability| availability.get(&ssrc).copied())
-    }
-
-    /// Returns the dependency-descriptor metadata for the latest packet on an incoming SSRC.
-    ///
-    /// `None` means the latest packet did not produce dependency-descriptor metadata.
-    pub fn last_observed_dependency_descriptor_metadata_for_ssrc(
-        &self,
-        ssrc: u32,
-    ) -> Option<DependencyDescriptorMetadataSnapshot> {
-        self.state
-            .last_dd_metadata_by_ssrc
-            .lock()
-            .ok()
-            .and_then(|metadata| metadata.get(&ssrc).cloned())
-    }
-
-    /// Returns the most recently observed temporal layer for an incoming SSRC.
-    pub fn last_observed_temporal_layer_for_ssrc(&self, ssrc: u32) -> Option<u8> {
-        self.state
-            .last_observed_layer_by_ssrc
-            .lock()
-            .ok()
-            .and_then(|layers| layers.get(&ssrc).map(|ids| ids.temporal_id))
     }
 
     /// Returns remote track identifier.
@@ -456,8 +347,11 @@ impl RemoteTrack {
         while let Some(event) = self.inner.poll().await {
             match event {
                 TrackRemoteEvent::OnRtpPacket(packet) => {
-                    self.observe_temporal_layer_fps(&packet).await;
-                    return Ok(RemoteTrackEvent::RtpPacket(packet));
+                    let metadata = self.observe_rtp_metadata(&packet).await;
+                    return Ok(RemoteTrackEvent::RtpPacket(IncomingRtpPacket {
+                        packet,
+                        metadata,
+                    }));
                 }
                 TrackRemoteEvent::OnRtcpPacket(packets) => {
                     return Ok(RemoteTrackEvent::RtcpPacket(packets));
@@ -476,7 +370,7 @@ impl RemoteTrack {
     pub async fn recv_rtp_packet(&self) -> RtcResult<rtp::Packet> {
         loop {
             match self.recv_event().await? {
-                RemoteTrackEvent::RtpPacket(packet) => return Ok(packet),
+                RemoteTrackEvent::RtpPacket(incoming) => return Ok(incoming.packet),
                 RemoteTrackEvent::RtcpPacket(_) => continue,
                 RemoteTrackEvent::Ended => {
                     return Err(
@@ -512,8 +406,7 @@ pub struct LocalRtpTrack {
 #[allow(clippy::items_after_test_module)] // LocalRtpTrack implementation follows its focused tests.
 mod tests {
     use super::{
-        DependencyDescriptorLayerAvailability, RemoteTrackState, TemporalLayerFpsEstimate,
-        dependency_descriptor_is_switch_point,
+        RemoteTrackState, TemporalLayerFpsEstimate, dependency_descriptor_is_switch_point,
     };
     use bytes::Bytes;
     use rtc::rtp::{
@@ -644,68 +537,25 @@ mod tests {
     }
 
     #[test]
-    fn remote_track_state_tracks_dependency_descriptor_switch_points_across_rtp_packets() {
+    fn remote_track_state_returns_packet_local_dependency_descriptor_metadata() {
         let state = RemoteTrackState::default();
         let ssrc = 0x1234_5678;
 
         let non_switch = descriptor_packet(ssrc, 100, descriptor_with_structure(1));
-        assert!(
-            state
-                .observe_dependency_descriptor_packet(&non_switch)
-                .is_some()
-        );
-        assert_eq!(
-            state
-                .last_dd_switch_point_by_ssrc
-                .lock()
-                .expect("dependency descriptor state lock should not be poisoned")
-                .get(&ssrc),
-            Some(&false),
-            "a frame start without DTI Switch must not authorize a source switch"
-        );
-        assert_eq!(
-            state
-                .last_dd_availability_by_ssrc
-                .lock()
-                .expect("dependency descriptor availability lock should not be poisoned")
-                .get(&ssrc),
-            Some(&DependencyDescriptorLayerAvailability::RtpSeen),
-            "descriptor RTP without a DTI Switch boundary is not decoder-usable"
-        );
+        let non_switch_snapshot = state
+            .observe_dependency_descriptor_packet(&non_switch)
+            .expect("descriptor packet should return packet-local metadata");
+        assert!(non_switch_snapshot.first_packet_in_frame);
+        assert!(!non_switch_snapshot.has_switching_decode_target);
 
         let switch = descriptor_packet(ssrc, 101, descriptor_with_switch_target(2));
-        assert!(
-            state
-                .observe_dependency_descriptor_packet(&switch)
-                .is_some()
-        );
-        assert_eq!(
-            state
-                .last_dd_switch_point_by_ssrc
-                .lock()
-                .expect("dependency descriptor state lock should not be poisoned")
-                .get(&ssrc),
-            Some(&true),
-            "a later frame start with an active DTI Switch target must authorize a source switch"
-        );
-        assert_eq!(
-            state
-                .last_dd_availability_by_ssrc
-                .lock()
-                .expect("dependency descriptor availability lock should not be poisoned")
-                .get(&ssrc),
-            Some(&DependencyDescriptorLayerAvailability::DecoderUsable)
-        );
         let snapshot = state
-            .last_dd_metadata_by_ssrc
-            .lock()
-            .expect("dependency descriptor metadata lock should not be poisoned")
-            .get(&ssrc)
-            .cloned()
-            .expect("descriptor packet should retain a metadata snapshot");
+            .observe_dependency_descriptor_packet(&switch)
+            .expect("later descriptor packet should return its own metadata");
         assert_eq!(snapshot.source_extension_id, 1);
         assert_eq!(snapshot.frame_number, 2);
         assert!(snapshot.first_packet_in_frame);
+        assert!(snapshot.has_switching_decode_target);
         assert_eq!(snapshot.active_decode_targets, 1);
         assert_eq!(snapshot.target_layers.len(), 1);
         assert_eq!(snapshot.decode_target_indications.len(), 1);
@@ -721,31 +571,8 @@ mod tests {
         assert!(
             state
                 .observe_dependency_descriptor_packet(&without_descriptor)
-                .is_none()
-        );
-        assert!(
-            !state
-                .last_dd_switch_point_by_ssrc
-                .lock()
-                .expect("dependency descriptor state lock should not be poisoned")
-                .contains_key(&ssrc),
-            "a packet without descriptor metadata must not inherit a prior switch point"
-        );
-        assert!(
-            !state
-                .last_dd_availability_by_ssrc
-                .lock()
-                .expect("dependency descriptor availability lock should not be poisoned")
-                .contains_key(&ssrc),
-            "a packet without descriptor metadata must not inherit prior availability"
-        );
-        assert!(
-            !state
-                .last_dd_metadata_by_ssrc
-                .lock()
-                .expect("dependency descriptor metadata lock should not be poisoned")
-                .contains_key(&ssrc),
-            "a packet without descriptor metadata must not inherit prior metadata"
+                .is_none(),
+            "a descriptor-free packet must not inherit prior packet metadata"
         );
     }
 

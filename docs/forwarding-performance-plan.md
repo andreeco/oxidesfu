@@ -4,7 +4,7 @@ _This document serves as a kind of memory for an LLM on how to continue with per
 
 ## Status
 
-**Reader-local forwarding, bounded RTC writes, target-aware simulcast spatial/temporal selection, viewport-weighted receiver-bandwidth allocation, runtime VP9 forwarding reconciliation, and one-SSRC scalable-source forwarding through per-subscriber dependency-descriptor wire rewriting are implemented; remaining work is evidence-driven.** Large simulcast forwarding workloads are functionally healthy, but the current paired benchmark overview has one CPU outlier: `mixed_room_high_simulcast_large` is +19.7% CPU versus Go while every other real scenario is faster and uses substantially less RSS. Three retained 30-second paired rounds now reach comparable post-warm-up high video delivery; repeat idle-host rounds are still required before treating the CPU delta as an equal-work conclusion.
+**Reader-local forwarding, bounded RTC writes, target-aware simulcast spatial/temporal selection, viewport-weighted receiver-bandwidth allocation, runtime VP9 forwarding reconciliation, and one-SSRC scalable-source forwarding through per-subscriber dependency-descriptor wire rewriting are implemented.** Equal-media paired evidence now permits packet-path optimization: bounded driver RTP event batching, reader-lease reuse, per-SSRC codec classification, packet-local remote RTP metadata handoff, and one descriptor conversion per packet fan-out are implemented. A fresh completed paired round is still required after the latest reductions before making a CPU-capacity claim.
 
 This plan records the evidence, reference behavior, target architecture, staged implementation plan, and compatibility gates for normalizing delivered simulcast media before attributing or closing the remaining CPU gap.
 
@@ -353,6 +353,20 @@ No `ip netns` client namespace was configured. As a fallback, the profile bound 
 This fallback verifies the workload through a non-loopback address but does **not** isolate client kernel wakeups from server work, because clients and server still share a host network namespace. Provision a routed namespace or run `lk` on another host before attributing the epoll/kernel entries to OxideSFU's transport design.
 
 The WebRTC fork now reuses the driver-owned core-output `Vec<TaggedBytesMut>` batch. The current OxideSFU pin is `3b0b2f0d8f0443deeab47fb83dada7eb4d7778ea`, whose RTC submodule is `56a36e408913475baeeb5672bd3e30036dea820f`. It retains ring-backed in-place AEAD AES-GCM, lossless `poll_write` backpressure ownership, cached bind-time SDES MID IDs, bounded 64-datagram driver-visible core write batches with coalesced continuation wake, and dependency-descriptor packet metadata with active DTI `Switch` semantics for scalable VP9/AV1 source-switch gating. RTC tests cover retry identity, `A/B/C` FIFO order, bounded output ordering, downstream-stage exclusion until retry success, non-backpressure drops, RTP/RTCP/data-channel variants, and dependency-descriptor parser `Switch` semantics; outer-WebRTC tests cover MID output/ownership and continuation coalescing.
+
+### 2026-07-16: normalized-media packet-path reductions
+
+The equal-media paired profiles showed a residual common-path cycle delta (including audio-only), so the next slices preserve forwarding semantics while removing proven local overhead:
+
+1. The pinned WebRTC fork at `0b370d10e1100d9e3ecb14cedcbc7fc2a22133a2` drains a bounded FIFO batch of ready driver events and processes contiguous prepared-RTP runs under one peer-core lock. Control events remain ordering/fairness boundaries.
+2. The signaling reader retains a `ForwardTrackReaderLease`, eliminating per-packet reconstruction and hashing of the room/publisher/track ownership key (`bf2f70f3`).
+3. Per-SSRC `VideoCodecClass` caching eliminates packet-loop MIME lowercase/string classification for repair filtering, scalable-source selection, temporal parsing, VP9 fallback, and descriptor switch gating (`8d2a17de`).
+4. `RemoteTrackEvent::RtpPacket` now carries metadata derived from that exact RTP packet. The reader no longer writes descriptor/layer state into multiple remote-track maps and then locks those maps again to retrieve it. The descriptor parser and temporal-FPS estimator retain only state that genuinely spans packets.
+5. Descriptor target layers and DTIs are converted once into a packet-local borrowed view before the subscriber loop, rather than allocating equivalent vectors once per target.
+
+The packet event deliberately keeps its metadata inline despite its larger enum variant: boxing would replace synchronization/hash churn with a per-RTP heap allocation. Packet-local descriptor metadata never inherits a prior packet's switch eligibility.
+
+Validation for the metadata/view slice: `cargo test -p oxidesfu-rtc --lib` (38 passed), `cargo test -p oxidesfu-signaling --lib` (534 passed, 3 ignored), native VP9 SVC low→high contract passed, and `cargo clippy -p oxidesfu-rtc -p oxidesfu-signaling --all-targets -- -D warnings` passed. The first post-change paired run was intentionally interrupted during the clean profile build and produced no artifact; rerun it before evaluating impact.
 
 ### Completed and remaining opportunities, in priority order
 

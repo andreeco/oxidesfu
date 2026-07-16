@@ -1342,9 +1342,48 @@ fn rewrite_dependency_descriptor_for_target(
     true
 }
 
+/// Packet-local dependency-descriptor view shared by every subscriber target.
+///
+/// Conversion from RTC descriptor metadata happens once before the forwarding target loop so a
+/// fan-out does not allocate equivalent target-layer and DTI vectors for every subscriber.
+struct PacketDependencyDescriptorFrame {
+    snapshot: oxidesfu_rtc::DependencyDescriptorMetadataSnapshot,
+    target_layers: Vec<DependencyDescriptorTargetLayer>,
+    dtis: Vec<DependencyDescriptorDti>,
+}
+
+impl PacketDependencyDescriptorFrame {
+    fn new(snapshot: oxidesfu_rtc::DependencyDescriptorMetadataSnapshot) -> Self {
+        let target_layers = snapshot
+            .target_layers
+            .iter()
+            .map(|layer| DependencyDescriptorTargetLayer {
+                target: layer.target,
+                spatial: match layer.spatial_id {
+                    0 => SpatialLayer::Low,
+                    1 => SpatialLayer::Medium,
+                    _ => SpatialLayer::High,
+                },
+                temporal: layer.temporal_id,
+            })
+            .collect();
+        let dtis = snapshot
+            .decode_target_indications
+            .iter()
+            .copied()
+            .map(dependency_descriptor_dti)
+            .collect();
+        Self {
+            snapshot,
+            target_layers,
+            dtis,
+        }
+    }
+}
+
 fn select_dependency_descriptor_frame(
     target: &mut ForwardTarget,
-    snapshot: &oxidesfu_rtc::DependencyDescriptorMetadataSnapshot,
+    frame: &PacketDependencyDescriptorFrame,
     spatial_policy: LayerPolicy,
     temporal_policy: Option<TemporalLayerPolicy>,
 ) -> DependencyDescriptorForwardingDecision {
@@ -1369,33 +1408,14 @@ fn select_dependency_descriptor_frame(
     let Some((_, selector)) = target.dependency_descriptor_forwarding_selector.as_mut() else {
         return DependencyDescriptorForwardingDecision::DropInvalidMetadata;
     };
-    let target_layers = snapshot
-        .target_layers
-        .iter()
-        .map(|layer| DependencyDescriptorTargetLayer {
-            target: layer.target,
-            spatial: match layer.spatial_id {
-                0 => SpatialLayer::Low,
-                1 => SpatialLayer::Medium,
-                _ => SpatialLayer::High,
-            },
-            temporal: layer.temporal_id,
-        })
-        .collect::<Vec<_>>();
-    let dtis = snapshot
-        .decode_target_indications
-        .iter()
-        .copied()
-        .map(dependency_descriptor_dti)
-        .collect::<Vec<_>>();
     selector.select(DependencyDescriptorFrame {
-        frame_number: snapshot.frame_number,
-        active_decode_targets: snapshot.active_decode_targets,
-        target_layers: &target_layers,
-        dtis: &dtis,
-        frame_diffs: &snapshot.frame_diffs,
-        chain_diffs: &snapshot.chain_diffs,
-        target_protected_by_chain: &snapshot.target_protected_by_chain,
+        frame_number: frame.snapshot.frame_number,
+        active_decode_targets: frame.snapshot.active_decode_targets,
+        target_layers: &frame.target_layers,
+        dtis: &frame.dtis,
+        frame_diffs: &frame.snapshot.frame_diffs,
+        chain_diffs: &frame.snapshot.chain_diffs,
+        target_protected_by_chain: &frame.snapshot.target_protected_by_chain,
     })
 }
 
@@ -2505,7 +2525,10 @@ fn video_is_decodable_switch_point_for_codec_class(
 
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn video_is_decodable_switch_point(codec_mime: Option<&str>, payload: &[u8]) -> bool {
-    video_is_decodable_switch_point_for_codec_class(video_codec_class_from_mime(codec_mime), payload)
+    video_is_decodable_switch_point_for_codec_class(
+        video_codec_class_from_mime(codec_mime),
+        payload,
+    )
 }
 
 /// Applies dependency-descriptor source-switch semantics for scalable VP9/AV1 when available.
@@ -2516,8 +2539,9 @@ fn video_is_decodable_switch_point_with_dependency_descriptor_for_codec_class(
     descriptor_switch_point: Option<bool>,
 ) -> bool {
     if matches!(codec_class, VideoCodecClass::Vp9 | VideoCodecClass::Av1) {
-        return descriptor_switch_point
-            .unwrap_or_else(|| video_is_decodable_switch_point_for_codec_class(codec_class, payload));
+        return descriptor_switch_point.unwrap_or_else(|| {
+            video_is_decodable_switch_point_for_codec_class(codec_class, payload)
+        });
     }
 
     video_is_decodable_switch_point_for_codec_class(codec_class, payload)
@@ -2540,6 +2564,7 @@ pub(crate) fn vp9_temporal_layer_id_from_payload(payload: &[u8]) -> Option<u8> {
     rtc::rtp::codec::vp9::temporal_layer_id_from_payload(payload)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn vp9_spatial_layer_id_from_payload(payload: &[u8]) -> Option<u8> {
     rtc::rtp::codec::vp9::layer_ids_from_payload(payload).map(|ids| ids.spatial_id)
 }
@@ -7027,7 +7052,11 @@ async fn forward_publisher_remote_track(
             };
 
             match recv_event {
-                Ok(oxidesfu_rtc::RemoteTrackEvent::RtpPacket(packet)) => {
+                Ok(oxidesfu_rtc::RemoteTrackEvent::RtpPacket(incoming)) => {
+                    let oxidesfu_rtc::IncomingRtpPacket {
+                        packet,
+                        metadata: packet_metadata,
+                    } = incoming;
                     let mut packet_video_quality: Option<proto::VideoQuality> = None;
                     let mut packet_source_kind = VideoSourceKind::Simulcast;
                     let mut effective_video_ssrc = packet.header.ssrc;
@@ -7274,54 +7303,31 @@ async fn forward_publisher_remote_track(
                     let media_subscription_revision = media_subscriptions.revision();
                     let auto_subscribe_revision = auto_subscribe_preferences.revision();
                     let room_media_subscription_revision = rooms.media_subscription_revision();
-                    let packet_codec_mime = video_ssrc_codec_mime
-                        .get(&packet.header.ssrc)
-                        .and_then(|mime| mime.as_deref());
                     let packet_codec_class = video_ssrc_codec_class
                         .get(&packet.header.ssrc)
                         .copied()
-                        .unwrap_or_else(|| video_codec_class_from_mime(packet_codec_mime));
+                        .unwrap_or(VideoCodecClass::Unknown);
                     let packet_temporal_codec_hint =
                         video_temporal_codec_hint_from_class(packet_codec_class);
-                    let packet_temporal_layer_hint = if is_video_track {
-                        remote_track.last_observed_temporal_layer_for_ssrc(packet.header.ssrc)
-                    } else {
-                        None
-                    };
-                    let packet_descriptor_switch_point = if is_video_track {
-                        remote_track.last_observed_dependency_descriptor_switch_point_for_ssrc(
-                            packet.header.ssrc,
-                        )
-                    } else {
-                        None
-                    };
-                    let packet_descriptor_metadata = if is_video_track {
-                        remote_track.last_observed_dependency_descriptor_metadata_for_ssrc(
-                            packet.header.ssrc,
-                        )
-                    } else {
-                        None
-                    };
-                    let packet_spatial_layer = if is_video_track {
-                        remote_track
-                            .last_observed_spatial_layer_for_ssrc(packet.header.ssrc)
-                            .or_else(|| {
-                                matches!(packet_codec_class, VideoCodecClass::Vp9)
-                                    .then(|| vp9_spatial_layer_id_from_payload(&packet.payload))
-                                    .flatten()
-                            })
-                            .unwrap_or(0)
-                    } else {
-                        0
-                    };
-                    let packet_receiver_temporal_layer_fps = if is_video_track {
-                        remote_track.temporal_layer_fps_for_ssrc_and_spatial(
-                            packet.header.ssrc,
-                            packet_spatial_layer,
-                        )
-                    } else {
-                        None
-                    };
+                    let packet_temporal_layer_hint = is_video_track
+                        .then_some(packet_metadata.temporal_layer)
+                        .flatten();
+                    let packet_descriptor_switch_point = is_video_track
+                        .then_some(packet_metadata.dependency_descriptor_switch_point)
+                        .flatten();
+                    let packet_descriptor_metadata = is_video_track
+                        .then_some(packet_metadata.dependency_descriptor)
+                        .flatten();
+                    let packet_descriptor_frame = (packet_source_kind
+                        == VideoSourceKind::SingleScalable)
+                        .then(|| {
+                            packet_descriptor_metadata.map(PacketDependencyDescriptorFrame::new)
+                        })
+                        .flatten();
+
+                    let packet_receiver_temporal_layer_fps = is_video_track
+                        .then_some(packet_metadata.temporal_layer_fps)
+                        .flatten();
                     let packet_temporal_layer = temporal_layer_id_from_packet(
                         packet_temporal_codec_hint,
                         &packet.payload,
@@ -7448,7 +7454,7 @@ async fn forward_publisher_remote_track(
 
                         if is_video_track
                             && packet_source_kind == VideoSourceKind::SingleScalable
-                            && let Some(snapshot) = packet_descriptor_metadata.as_ref()
+                            && let Some(descriptor_frame) = packet_descriptor_frame.as_ref()
                         {
                             if let Some(requested_fps) = decision.requested_fps {
                                 target
@@ -7461,7 +7467,7 @@ async fn forward_publisher_remote_track(
                             }
                             let descriptor_decision = select_dependency_descriptor_frame(
                                 target,
-                                snapshot,
+                                descriptor_frame,
                                 target.video_layer_selector.policy(),
                                 target.video_temporal_controller.policy(),
                             );
@@ -7580,8 +7586,8 @@ async fn forward_publisher_remote_track(
                             continue;
                         };
 
-                        if let (Some(snapshot), Some(descriptor_decision)) = (
-                            packet_descriptor_metadata.as_ref(),
+                        if let (Some(descriptor_frame), Some(descriptor_decision)) = (
+                            packet_descriptor_frame.as_ref(),
                             packet_descriptor_forwarding_decision,
                         ) {
                             let destination_extension_id =
@@ -7599,7 +7605,7 @@ async fn forward_publisher_remote_track(
                                 };
                             if rewrite_dependency_descriptor_for_target(
                                 &mut rewritten_packet,
-                                snapshot,
+                                &descriptor_frame.snapshot,
                                 descriptor_decision,
                                 destination_extension_id,
                             ) {
@@ -8930,6 +8936,9 @@ mod tests {
             source_extension_id: 3,
             frame_number: 1,
             first_packet_in_frame: true,
+            has_switching_decode_target: true,
+            spatial_id: 1,
+            temporal_id: 0,
             active_decode_targets: 0b11,
             target_layers: Vec::new(),
             decode_target_indications: vec![

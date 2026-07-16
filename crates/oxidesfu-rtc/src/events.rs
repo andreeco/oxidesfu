@@ -1,6 +1,6 @@
 use tokio::sync::mpsc;
 
-use crate::{DataChannel, RemoteTrack};
+use crate::{DataChannel, IncomingRtpPacket, RemoteTrack};
 
 /// OxideSFU-owned local ICE candidate event.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,9 +22,13 @@ pub struct PeerConnectionEvents {
 }
 
 /// Event emitted by [`RemoteTrack`] polling.
+///
+/// Keeping the RTP packet and its derived metadata inline avoids a per-packet heap allocation on
+/// the forwarding path.
+#[allow(clippy::large_enum_variant)]
 pub enum RemoteTrackEvent {
-    /// Received RTP packet.
-    RtpPacket(rtc::rtp::Packet),
+    /// Received RTP packet together with metadata derived from that exact packet.
+    RtpPacket(IncomingRtpPacket),
     /// Received RTCP packets.
     RtcpPacket(Vec<Box<dyn rtc::rtcp::Packet>>),
     /// Track ended.
