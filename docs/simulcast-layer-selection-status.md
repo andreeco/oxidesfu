@@ -163,7 +163,12 @@ A real one-run, 30-second paired sweep completed at `target/profiles/paired-mixe
 
 Remaining work:
 
-- correlate the retained Oxide client evidence with the collected server target/max/desired/current, RID/SSRC, selector PLI, transitions, and driver wait/backpressure fields to identify why targets settle low under real load;
+Snapshot correlation for the profiler observer is now available: its retained targets request `max=desired=high`, but several remain `waiting_for_fallback` with no current layer and one enters `fallback_locked=low`; other observer targets do stably reach high. This rules out an allocator ceiling choosing low for the measured observer. The next repair target is desired-layer availability/keyframe acquisition under real load (publisher dynacast demand and selector PLI/keyframe delivery), while preserving bounded fallback.
+
+Remaining work:
+
+- add a real-load regression that reproduces a high target with unavailable/high-layer-late RTP and verifies desired-layer PLI/dynacast demand causes eventual high acquisition or records an explicit bounded-unavailable outcome;
+- inspect and repair publisher dynacast layer demand or upstream desired-layer keyframe delivery for those waiting targets;
 - repeat the paired comparison after that repair, with multiple runs before making CPU conclusions;
 - use separately scoped Go instrumentation only if client-observed evidence is insufficient.
 
