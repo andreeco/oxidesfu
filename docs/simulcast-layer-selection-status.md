@@ -213,7 +213,9 @@ cargo test -p oxidesfu-test \
   -- --nocapture
 ```
 
-The focused RTC suite passed with `38 passed`, including the VP9-only forwarding SDP regression; the focused signaling suite now passes with `534 passed, 3 ignored`. The dependency-descriptor-gated VP9/AV1 RTP-continuity regression passes. The browser harness production build passes, and a fresh-server Firefox run passed all three receiver-counter contracts, including the VP9 SVC quality-churn contract. Focused native SDK quality-transition, concurrent spatial-isolation, concurrent FPS-isolation, allocation-transition, and AV1 DD cadence contracts passed. The former signal-only quality-aggregate probe is superseded: upstream LiveKit sends dynacast demand after `SubscribedTrack.OnCodecNegotiated`, so Oxide now suppresses premature all-off demand until a compatible receiver is active and emits enabled demand at that activation boundary. `cargo clippy --workspace --all-targets -- -D warnings` still reaches a documented signaling lint backlog (deprecated protocol fields, dead compatibility helpers, and API-shape lints); the current RTC forwarding crate itself passes strict Clippy after the descriptor-availability cleanup.
+The focused RTC suite passed with `38 passed`, including the VP9-only forwarding SDP regression; the focused signaling suite now passes with `534 passed, 3 ignored`. The dependency-descriptor-gated VP9/AV1 RTP-continuity regression passes. The browser harness production build passes, and a fresh-server Firefox run passed all three receiver-counter contracts, including the VP9 SVC quality-churn contract. Focused native SDK quality-transition, concurrent spatial-isolation, concurrent FPS-isolation, allocation-transition, and AV1 DD cadence contracts passed. The former signal-only quality-aggregate probe is superseded: upstream LiveKit sends dynacast demand after `SubscribedTrack.OnCodecNegotiated`, so Oxide now suppresses premature all-off demand until a compatible receiver is active and emits enabled demand at that activation boundary.
+
+`cargo test --workspace` now passes with `118 passed, 10 ignored`. Strict Clippy passes for both `oxidesfu-signaling` and `oxidesfu-server` after the reader/negotiation context refactor and server telemetry/WHIP cleanup. Workspace Clippy now reaches only `oxidesfu-test` test-support hygiene (legacy protocol fixture fields, dead opt-in harness helpers, and style lints). An attempted bulk cleanup was intentionally discarded because legacy-file formatting produced more than 12,000 lines of unrelated churn; resume that work as small, hand-applied, per-file commits rather than accepting formatter noise.
 
 ## Completion criteria
 
@@ -221,4 +223,4 @@ This work should be called complete only when:
 
 1. one-SSRC scalable forwarding remains covered by the Firefox VP9 SVC browser contract; promote the native equivalent once a deterministic valid layered VP9/AV1 encoded-media fixture is available for the SDK's descriptor-aware encoded-frame API;
 2. repeat paired Go/Oxide runs on an otherwise idle host before making CPU/capacity conclusions; and
-3. remediate the workspace Clippy backlog, or retain its explicit documented outcome.
+3. remediate the remaining `oxidesfu-test` strict-Clippy test-support backlog with surgical per-file edits, or retain its explicit documented outcome.
