@@ -184,9 +184,11 @@ A repeat one-run, 30-second paired sweep at `target/profiles/paired-mixed_room_h
 
 A further complete one-run, 30-second five-point sweep at `target/profiles/paired-mixed_room_high_simulcast_large-20260716T130224Z-ff0beac2` confirms the result: every video point has four observer tracks at `1280×720`; Go reports `1,000,805–1,003,199 B/s` and Oxide `974,209–1,001,683 B/s` aggregate observer video delivery. Audio-only remains matched (`10,267 B/s` Go, `10,301 B/s` Oxide). This is one retained paired round, not a capacity conclusion.
 
+A latest one-run, 30-second five-point sweep at `target/profiles/paired-mixed_room_high_simulcast_large-20260716T164624Z-251aafb4` remains consistent: all video points are `1280×720`; baseline `1,000,141` Go vs `1,000,916` Oxide B/s, video-only `1,002,320` vs `974,306`, subscribers_10 `1,001,482` vs `1,000,132`, subscribers_15 `1,001,255` vs `972,907`; audio-only `10,341` vs `10,399` B/s.
+
 Remaining evidence work:
 
-- run multiple paired rounds on an otherwise idle host and compare the retained artifacts before making CPU conclusions;
+- run additional paired rounds on an otherwise idle host and compare the retained artifacts before making CPU conclusions;
 - use separately scoped Go instrumentation only if client-observed evidence is insufficient.
 
 ## Final wire-correctness slice (2026-07-16)
