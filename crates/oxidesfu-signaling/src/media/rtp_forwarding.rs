@@ -808,6 +808,109 @@ mod tests {
     }
 
     #[test]
+    fn dependency_descriptor_gated_vp9_and_av1_switches_preserve_target_rtp_continuity() {
+        use crate::{
+            media::{
+                LayerPacketMetadata, LayerPolicy, SpatialLayer, SubscriberVideoLayerSelector,
+                VideoIngressDecision,
+            },
+            router::session::video_is_decodable_switch_point_with_dependency_descriptor,
+        };
+
+        for (codec_mime, payload_that_looks_like_a_keyframe) in
+            [("video/VP9", vec![0x08]), ("video/AV1", vec![0x08])]
+        {
+            let source_low = 0x1111_0001;
+            let source_high = 0x2222_0002;
+            let target_ssrc = 0x3333_0003;
+            let target_payload_type = 112;
+            let store = RtpForwardingStore::default();
+            let key = forwarding_key(codec_mime);
+            let forwarder = store
+                .forwarder_for(&key)
+                .expect("target should have forwarding state");
+            let mut selector =
+                SubscriberVideoLayerSelector::new(LayerPolicy::fixed(SpatialLayer::Low));
+
+            let low = packet_with_seq_ssrc_timestamp(1_000, source_low, 90_000);
+            assert_eq!(
+                selector.observe_packet(LayerPacketMetadata {
+                    ssrc: source_low,
+                    spatial: Some(SpatialLayer::Low),
+                    is_decodable_switch_point: true,
+                }),
+                VideoIngressDecision::Forward {
+                    selected_ssrc_changed: true
+                }
+            );
+            let first_outgoing = forwarder
+                .rewrite_packet_with_target_ssrc_and_payload_type(
+                    &low,
+                    Some(target_ssrc),
+                    Some(target_payload_type),
+                )
+                .expect("selected low packet should forward");
+
+            selector.set_policy(LayerPolicy::fixed(SpatialLayer::High));
+            assert!(
+                !video_is_decodable_switch_point_with_dependency_descriptor(
+                    Some(codec_mime),
+                    &payload_that_looks_like_a_keyframe,
+                    Some(false),
+                ),
+                "a parsed non-Switch descriptor must override {codec_mime} payload fallback"
+            );
+            assert_eq!(
+                selector.observe_packet(LayerPacketMetadata {
+                    ssrc: source_high,
+                    spatial: Some(SpatialLayer::High),
+                    is_decodable_switch_point: false,
+                }),
+                VideoIngressDecision::DropWaitingForKeyframe,
+                "the selected source must remain unchanged until a DTI-Switch frame"
+            );
+            assert_eq!(selector.selected_ssrc(), Some(source_low));
+
+            assert!(video_is_decodable_switch_point_with_dependency_descriptor(
+                Some(codec_mime),
+                &[0],
+                Some(true),
+            ));
+            let switch = packet_with_seq_ssrc_timestamp(41, source_high, 180_000);
+            assert_eq!(
+                selector.observe_packet(LayerPacketMetadata {
+                    ssrc: source_high,
+                    spatial: Some(SpatialLayer::High),
+                    is_decodable_switch_point: true,
+                }),
+                VideoIngressDecision::Forward {
+                    selected_ssrc_changed: true
+                }
+            );
+            let switched_outgoing = forwarder
+                .rewrite_packet_with_target_ssrc_and_payload_type(
+                    &switch,
+                    Some(target_ssrc),
+                    Some(target_payload_type),
+                )
+                .expect("DTI-Switch packet should forward");
+
+            assert_eq!(switched_outgoing.header.ssrc, target_ssrc);
+            assert_eq!(switched_outgoing.header.payload_type, target_payload_type);
+            assert_eq!(
+                switched_outgoing.header.sequence_number,
+                first_outgoing.header.sequence_number.wrapping_add(1),
+                "{codec_mime} source switching must not create an outgoing RTP sequence gap"
+            );
+            assert_eq!(
+                switched_outgoing.header.timestamp,
+                first_outgoing.header.timestamp.wrapping_add(1),
+                "{codec_mime} source switching must resume the target RTP timestamp continuously"
+            );
+        }
+    }
+
+    #[test]
     fn extend_sequence_number_from_reference_tracks_small_increments_without_collapse() {
         let reference = 0_u64;
         assert_eq!(extend_sequence_number_from_reference(1, reference), 1);

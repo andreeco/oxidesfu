@@ -990,3 +990,148 @@ async fn differential_media_publish_subscribe_event_flow_matches_go_livekit_dev(
     let _ = go_livekit.kill().await;
     oxidesfu_server.abort();
 }
+
+#[derive(Clone, Copy)]
+struct ClientInboundMediaSnapshot {
+    bytes: u64,
+    packets: u64,
+    width: u32,
+    height: u32,
+    decoded: u32,
+    dropped: u32,
+    discarded: u64,
+    pli: u32,
+    nack: u32,
+}
+
+fn client_media_evidence_delta(
+    before: ClientInboundMediaSnapshot,
+    after: ClientInboundMediaSnapshot,
+    elapsed: Duration,
+) -> serde_json::Value {
+    let bytes_per_second = (elapsed.as_secs_f64() > 0.0).then(|| {
+        ((after.bytes.saturating_sub(before.bytes) as f64 / elapsed.as_secs_f64()) * 1_000.0)
+            .round() / 1_000.0
+    });
+    serde_json::json!({
+        "received_bytes": after.bytes,
+        "received_packets": after.packets,
+        "received_bytes_per_second": bytes_per_second,
+        "decoded_dimensions": { "width": after.width, "height": after.height },
+        "decoded_frames": after.decoded,
+        "dropped_frames": after.dropped,
+        "discarded_packets": after.discarded,
+        "pli_count": after.pli,
+        "nack_count": after.nack,
+        "transitions": {
+            "decoded_dimensions_changed": before.width != after.width || before.height != after.height,
+            "decoded_frames": after.decoded.saturating_sub(before.decoded),
+            "pli_count": after.pli.saturating_sub(before.pli),
+            "nack_count": after.nack.saturating_sub(before.nack),
+        },
+        "backpressure": {
+            "available": false,
+            "value": serde_json::Value::Null,
+            "reason": "Rust SDK inbound RTP statistics do not expose server forwarding backpressure"
+        }
+    })
+}
+
+#[test]
+fn client_media_evidence_delta_reports_client_stats_without_server_inference() {
+    let before = ClientInboundMediaSnapshot { bytes: 1_000, packets: 10, width: 320, height: 180, decoded: 5, dropped: 1, discarded: 2, pli: 3, nack: 4 };
+    let after = ClientInboundMediaSnapshot { bytes: 3_500, packets: 30, width: 640, height: 360, decoded: 15, dropped: 2, discarded: 5, pli: 4, nack: 6 };
+    let evidence = client_media_evidence_delta(before, after, Duration::from_secs(2));
+    assert_eq!(evidence["received_bytes_per_second"], 1_250.0);
+    assert_eq!(evidence["decoded_dimensions"]["width"], 640);
+    assert_eq!(evidence["transitions"]["decoded_dimensions_changed"], true);
+    assert_eq!(evidence["transitions"]["pli_count"], 1);
+    assert_eq!(evidence["backpressure"]["available"], false);
+    assert!(evidence["backpressure"]["value"].is_null());
+}
+
+/// Writes paired-profile post-warm-up media evidence from a Rust SDK client.
+#[tokio::test]
+#[ignore]
+async fn paired_profile_client_media_evidence_writes_post_warmup_track_stats() {
+    let _guard = NATIVE_MEDIA_PROBE_LOCK.lock().await;
+    let base_url = std::env::var("OXIDESFU_MEDIA_EVIDENCE_BASE_URL").expect("profile server URL is required");
+    let room_name = std::env::var("OXIDESFU_MEDIA_EVIDENCE_ROOM").expect("profile room is required");
+    let output_path = std::env::var("OXIDESFU_MEDIA_EVIDENCE_OUTPUT").expect("evidence output path is required");
+    let duration_from_env = |name, default| std::env::var(name).ok().and_then(|v| v.parse::<u64>().ok()).map(Duration::from_millis).unwrap_or(default);
+    let warmup = duration_from_env("OXIDESFU_MEDIA_EVIDENCE_WARMUP_MS", Duration::from_secs(5));
+    let window = duration_from_env("OXIDESFU_MEDIA_EVIDENCE_WINDOW_MS", Duration::from_secs(5));
+    let interval = duration_from_env("OXIDESFU_MEDIA_EVIDENCE_SAMPLE_INTERVAL_MS", Duration::from_secs(1)).max(Duration::from_millis(100));
+    let subscriber_identity = format!("profile-observer-{}", unique_suffix());
+    let token = AccessToken::with_api_key(API_KEY, API_SECRET)
+        .with_identity(&subscriber_identity)
+        .with_grants(VideoGrants { room_join: true, room: room_name.clone(), can_subscribe: true, ..Default::default() })
+        .to_jwt().expect("profile observer token should encode");
+    let mut options = RoomOptions::default();
+    options.single_peer_connection = false;
+    options.connect_timeout = Duration::from_secs(10);
+    let (room, mut events) = Room::connect(&base_url, &token, options).await.expect("profile observer should connect");
+    wait_for_room_connected(&mut events).await;
+    let subscriber_sid = room.local_participant().sid().to_string();
+    let started = tokio::time::Instant::now();
+    let deadline = started + warmup + window;
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut subscriptions = HashMap::new();
+    let mut samples = HashMap::new();
+    while tokio::time::Instant::now() < deadline {
+        tokio::select! {
+            event = events.recv() => if let Some(RoomEvent::TrackSubscribed { track, publication, participant }) = event {
+                subscriptions.insert(publication.sid().to_string(), (track, publication, participant));
+            },
+            _ = ticker.tick() => {
+                if tokio::time::Instant::now() < started + warmup { continue; }
+                for (sid, (track, publication, participant)) in &subscriptions {
+                    let kind = match track { livekit::track::RemoteTrack::Audio(_) => "audio", livekit::track::RemoteTrack::Video(_) => "video" };
+                    let Ok(stats) = track.get_stats().await else { continue; };
+                    let snapshot = stats.iter().find_map(|stat| match stat {
+                        livekit::webrtc::stats::RtcStats::InboundRtp(inbound) if inbound.stream.kind == kind => Some(ClientInboundMediaSnapshot {
+                            bytes: inbound.inbound.bytes_received, packets: inbound.received.packets_received,
+                            width: inbound.inbound.frame_width, height: inbound.inbound.frame_height,
+                            decoded: inbound.inbound.frames_decoded, dropped: inbound.inbound.frames_dropped,
+                            discarded: inbound.inbound.packets_discarded, pli: inbound.inbound.pli_count, nack: inbound.inbound.nack_count,
+                        }),
+                        _ => None,
+                    });
+                    if let Some(snapshot) = snapshot { samples.entry(sid.clone()).and_modify(|entry: &mut (ClientInboundMediaSnapshot, ClientInboundMediaSnapshot, tokio::time::Instant, u32)| {
+                        if entry.1.width != snapshot.width || entry.1.height != snapshot.height { entry.3 = entry.3.saturating_add(1); }
+                        entry.1 = snapshot;
+                    }).or_insert((snapshot, snapshot, tokio::time::Instant::now(), 0)); }
+                    let _ = (publication, participant);
+                }
+            }
+        }
+    }
+    let tracks = subscriptions.into_iter().map(|(sid, (track, publication, participant))| {
+        let kind = match &track { livekit::track::RemoteTrack::Audio(_) => "audio", livekit::track::RemoteTrack::Video(_) => "video" };
+        let mut report = serde_json::json!({
+            "subscriber_identity": subscriber_identity, "subscriber_sid": subscriber_sid,
+            "publisher_identity": participant.identity().to_string(), "publisher_sid": participant.sid().to_string(),
+            "publication_sid": publication.sid().to_string(), "track_sid": track.sid().to_string(), "kind": kind,
+        });
+        if let Some((first, latest, first_at, dimension_transitions)) = samples.remove(&sid) {
+            let evidence = client_media_evidence_delta(first, latest, tokio::time::Instant::now().saturating_duration_since(first_at));
+            report.as_object_mut().expect("evidence report is an object").extend(evidence.as_object().expect("delta is an object").clone());
+            report["stats_available"] = serde_json::json!(true);
+            report["transitions"]["decoded_dimension_transition_count"] = serde_json::json!(dimension_transitions);
+        } else {
+            report["stats_available"] = serde_json::json!(false);
+            report["unavailable_reason"] = serde_json::json!("no inbound RTP stats sample was available after warm-up");
+        }
+        report
+    }).collect::<Vec<_>>();
+    let document = serde_json::json!({
+        "schema_version": 1, "source": "rust_sdk_client_webrtc_inbound_rtp_stats", "room": room_name,
+        "observer": { "subscriber_identity": subscriber_identity, "subscriber_sid": subscriber_sid },
+        "post_warmup": { "warmup_ms": warmup.as_millis(), "observation_window_ms": window.as_millis(), "sample_interval_ms": interval.as_millis() },
+        "tracks": tracks,
+        "unavailable_fields": { "server_forwarding_backpressure": "not exposed by client-side Rust SDK inbound RTP statistics" }
+    });
+    std::fs::write(output_path, serde_json::to_vec_pretty(&document).expect("evidence should serialize")).expect("evidence artifact should write");
+    room.close().await.expect("profile observer should close");
+}

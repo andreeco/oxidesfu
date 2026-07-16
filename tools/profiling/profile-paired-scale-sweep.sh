@@ -48,6 +48,9 @@ livekit_root="${OXIDESFU_LIVEKIT_ROOT:-${DEFAULT_LIVEKIT_ROOT}}"
 attribution_mode="dwarf"
 client_netns=""
 print_plan=false
+media_evidence_warmup_ms="${OXIDESFU_PROFILE_MEDIA_EVIDENCE_WARMUP_MS:-5000}"
+media_evidence_window_ms="${OXIDESFU_PROFILE_MEDIA_EVIDENCE_WINDOW_MS:-5000}"
+media_evidence_sample_interval_ms="${OXIDESFU_PROFILE_MEDIA_EVIDENCE_SAMPLE_INTERVAL_MS:-1000}"
 bind_host="${OXIDESFU_PROFILE_BIND:-127.0.0.1}"
 base_url_origin="${OXIDESFU_PROFILE_URL:-http://${bind_host}}"
 
@@ -111,7 +114,7 @@ point_subscribers=(20 20 20 10 15)
 load_command_for_point() {
     local base_url="$1"
     local point_index="$2"
-    local room="paired-${scenario}-${point_names[point_index]}-$(date -u +%Y%m%dT%H%M%SZ)-${RANDOM}"
+    local room="${3:-paired-${scenario}-${point_names[point_index]}-$(date -u +%Y%m%dT%H%M%SZ)-${RANDOM}}"
     local -a command=(
         lk --url "${base_url}" --api-key "${API_KEY}" --api-secret "${API_SECRET}" --yes
         perf load-test --room "${room}" --duration "${duration}"
@@ -134,6 +137,10 @@ print_resolved_plan() {
     echo "attribution_mode=${attribution_mode}"
     echo "client_netns=${client_netns:-none}"
     echo "livekit_root=${livekit_root}"
+    echo "client_media_evidence=post-warmup Rust SDK inbound RTP stats"
+    echo "client_media_evidence_warmup_ms=${media_evidence_warmup_ms}"
+    echo "client_media_evidence_window_ms=${media_evidence_window_ms}"
+    echo "client_media_evidence_sample_interval_ms=${media_evidence_sample_interval_ms}"
     for index in "${!point_names[@]}"; do
         echo "point=${point_names[index]} video_publishers=${point_video_publishers[index]} audio_publishers=${point_audio_publishers[index]} subscribers=${point_subscribers[index]}"
     done
@@ -144,7 +151,7 @@ print_resolved_plan() {
             echo "run=${run} order=oxidesfu,go_livekit"
         fi
     done
-    echo "example_load_command=$(load_command_for_point \"${base_url_origin}:http-port\" 0)"
+    echo "example_load_command=$(load_command_for_point \"${base_url_origin}:http-port\" 0 paired-example-room)"
     echo "perf_command=perf record --pid <server-pid> --call-graph ${perf_call_graph} --freq 999 --output <artifact-dir>/perf.data"
 }
 
@@ -225,6 +232,10 @@ base_url=${base_url}
 attribution_mode=${attribution_mode}
 perf_call_graph=${perf_call_graph}
 client_netns=${client_netns:-none}
+client_media_evidence=client-media-evidence.json
+client_media_evidence_warmup_ms=${media_evidence_warmup_ms}
+client_media_evidence_window_ms=${media_evidence_window_ms}
+client_media_evidence_sample_interval_ms=${media_evidence_sample_interval_ms}
 oxidesfu_revision=$(git -C "${WORKSPACE_ROOT}" rev-parse HEAD)
 livekit_revision=$(git -C "${livekit_root}" rev-parse HEAD)
 kernel=$(uname -srmo)
@@ -271,10 +282,32 @@ run_profile() {
     active_perf_pid="${perf_pid}"
     sleep 1
 
-    local load_command
-    load_command="$(load_command_for_point "${base_url}" "${point_index}")"
+    local load_command room load_pid
+    room="paired-${scenario}-${point_names[point_index]}-$(date -u +%Y%m%dT%H%M%SZ)-${RANDOM}"
+    load_command="$(load_command_for_point "${base_url}" "${point_index}" "${room}")"
     printf '%s\n' "${load_command}" >"${point_dir}/load-command.txt"
-    if ! eval "${load_command}" >"${point_dir}/load-test.log" 2>&1; then
+    eval "${load_command}" >"${point_dir}/load-test.log" 2>&1 &
+    load_pid=$!
+    if ! OXIDESFU_MEDIA_EVIDENCE_BASE_URL="${base_url}" \
+        OXIDESFU_MEDIA_EVIDENCE_ROOM="${room}" \
+        OXIDESFU_MEDIA_EVIDENCE_OUTPUT="${point_dir}/client-media-evidence.json" \
+        OXIDESFU_MEDIA_EVIDENCE_WARMUP_MS="${media_evidence_warmup_ms}" \
+        OXIDESFU_MEDIA_EVIDENCE_WINDOW_MS="${media_evidence_window_ms}" \
+        OXIDESFU_MEDIA_EVIDENCE_SAMPLE_INTERVAL_MS="${media_evidence_sample_interval_ms}" \
+        cargo test --manifest-path "${WORKSPACE_ROOT}/Cargo.toml" -p oxidesfu-test paired_profile_client_media_evidence_writes_post_warmup_track_stats \
+            -- --ignored --nocapture >"${point_dir}/client-media-evidence.log" 2>&1; then
+        kill "${load_pid}" 2>/dev/null || true
+        wait "${load_pid}" 2>/dev/null || true
+        kill -INT "${perf_pid}" 2>/dev/null || true
+        wait "${perf_pid}" 2>/dev/null || true
+        active_perf_pid=""
+        kill -TERM "${server_pid}" 2>/dev/null || true
+        wait "${server_pid}" 2>/dev/null || true
+        active_server_pid=""
+        echo "${implementation} client media evidence failed; see ${point_dir}/client-media-evidence.log" >&2
+        return 1
+    fi
+    if ! wait "${load_pid}"; then
         kill -INT "${perf_pid}" 2>/dev/null || true
         wait "${perf_pid}" 2>/dev/null || true
         active_perf_pid=""
@@ -309,6 +342,8 @@ fi
 
 printf 'Building profileable OxideSFU server...\n'
 cargo build -p oxidesfu-server --profile profiling --manifest-path "${WORKSPACE_ROOT}/Cargo.toml"
+printf 'Prebuilding Rust SDK client media evidence probe...\n'
+cargo test --manifest-path "${WORKSPACE_ROOT}/Cargo.toml" -p oxidesfu-test paired_profile_client_media_evidence_writes_post_warmup_track_stats --no-run
 printf 'Building Go LiveKit server...\n'
 (
     cd "${livekit_root}"

@@ -34,6 +34,9 @@ assert_contains "${plan}" "point=audio_only video_publishers=0 audio_publishers=
 assert_contains "${plan}" "point=subscribers_10 video_publishers=4 audio_publishers=4 subscribers=10"
 assert_contains "${plan}" "point=subscribers_15 video_publishers=4 audio_publishers=4 subscribers=15"
 assert_contains "${plan}" "run=1 order=go_livekit,oxidesfu"
+assert_contains "${plan}" "client_media_evidence=post-warmup Rust SDK inbound RTP stats"
+assert_contains "${plan}" "client_media_evidence_warmup_ms=5000"
+assert_contains "${plan}" "client_media_evidence_window_ms=5000"
 
 second_run_plan="$("${RUNNER}" --runs 2 --print-plan mixed_room_high_simulcast_large)"
 assert_contains "${second_run_plan}" "run=2 order=oxidesfu,go_livekit"

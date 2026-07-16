@@ -86,6 +86,40 @@ struct RemoteTrackState {
     last_observed_layer_by_ssrc: Mutex<HashMap<u32, ObservedLayerIds>>,
 }
 
+impl RemoteTrackState {
+    fn observe_dependency_descriptor_packet(
+        &self,
+        packet: &rtp::Packet,
+    ) -> Option<rtp::extension::dependency_descriptor_extension::DependencyDescriptorPacketMetadata>
+    {
+        let ssrc = packet.header.ssrc;
+        let metadata = if packet.header.extension {
+            self.dd_parser_by_ssrc.lock().ok().and_then(|mut parsers| {
+                let parser = parsers.entry(ssrc).or_default();
+                packet
+                    .header
+                    .extensions
+                    .iter()
+                    .find_map(|extension| parser.parse_packet_metadata(&extension.payload))
+            })
+        } else {
+            None
+        };
+
+        if let Ok(mut switch_points) = self.last_dd_switch_point_by_ssrc.lock() {
+            match metadata {
+                Some(metadata) => {
+                    switch_points.insert(ssrc, dependency_descriptor_is_switch_point(metadata));
+                }
+                None => {
+                    switch_points.remove(&ssrc);
+                }
+            }
+        }
+        metadata
+    }
+}
+
 /// OxideSFU-owned wrapper around a remote media track.
 #[derive(Clone)]
 pub struct RemoteTrack {
@@ -117,21 +151,7 @@ impl RemoteTrack {
 
     async fn observe_temporal_layer_fps(&self, packet: &rtp::Packet) {
         let ssrc = packet.header.ssrc;
-        let dd_metadata = packet
-            .header
-            .extension
-            .then(|| self.try_parse_dd_packet_metadata(ssrc, packet))
-            .flatten();
-        if let Ok(mut switch_points) = self.state.last_dd_switch_point_by_ssrc.lock() {
-            match dd_metadata {
-                Some(metadata) => {
-                    switch_points.insert(ssrc, dependency_descriptor_is_switch_point(metadata));
-                }
-                None => {
-                    switch_points.remove(&ssrc);
-                }
-            }
-        }
+        let dd_metadata = self.state.observe_dependency_descriptor_packet(packet);
 
         let Some(codec_mime) = self.codec_mime_cached_for_ssrc(ssrc).await else {
             return;
@@ -247,22 +267,6 @@ impl RemoteTrack {
             .and_then(|layers| layers.get(&ssrc).map(|ids| ids.temporal_id))
     }
 
-    fn try_parse_dd_packet_metadata(
-        &self,
-        ssrc: u32,
-        packet: &rtp::Packet,
-    ) -> Option<rtp::extension::dependency_descriptor_extension::DependencyDescriptorPacketMetadata>
-    {
-        let mut parsers = self.state.dd_parser_by_ssrc.lock().ok()?;
-        let parser = parsers.entry(ssrc).or_default();
-
-        packet
-            .header
-            .extensions
-            .iter()
-            .find_map(|extension| parser.parse_packet_metadata(&extension.payload))
-    }
-
     /// Returns remote track identifier.
     pub async fn track_id(&self) -> String {
         self.inner.track_id().await.to_string()
@@ -364,10 +368,97 @@ pub struct LocalRtpTrack {
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)] // LocalRtpTrack implementation follows its focused tests.
 mod tests {
-    use super::{TemporalLayerFpsEstimate, dependency_descriptor_is_switch_point};
-    use rtc::rtp::extension::dependency_descriptor_extension::{
-        DependencyDescriptorLayerIds, DependencyDescriptorPacketMetadata,
+    use super::{
+        RemoteTrackState, TemporalLayerFpsEstimate, dependency_descriptor_is_switch_point,
     };
+    use bytes::Bytes;
+    use rtc::rtp::{
+        Packet,
+        extension::dependency_descriptor_extension::{
+            DependencyDescriptorLayerIds, DependencyDescriptorPacketMetadata,
+        },
+        header::{Extension, Header},
+    };
+
+    #[derive(Default)]
+    struct BitWriter {
+        bits: Vec<bool>,
+    }
+
+    impl BitWriter {
+        fn push(&mut self, value: u64, width: usize) {
+            for bit in (0..width).rev() {
+                self.bits.push((value & (1 << bit)) != 0);
+            }
+        }
+
+        fn push_bool(&mut self, value: bool) {
+            self.bits.push(value);
+        }
+
+        fn into_bytes(self) -> Vec<u8> {
+            let mut bytes = vec![0; self.bits.len().div_ceil(8)];
+            for (index, bit) in self.bits.into_iter().enumerate() {
+                if bit {
+                    bytes[index / 8] |= 1 << (7 - index % 8);
+                }
+            }
+            bytes
+        }
+    }
+
+    fn descriptor_packet(ssrc: u32, sequence_number: u16, payload: Vec<u8>) -> Packet {
+        Packet {
+            header: Header {
+                extension: true,
+                sequence_number,
+                ssrc,
+                extensions: vec![Extension {
+                    id: 1,
+                    payload: Bytes::from(payload),
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn descriptor_with_structure(frame_number: u16) -> Vec<u8> {
+        let mut writer = BitWriter::default();
+        writer.push_bool(true); // first packet in frame
+        writer.push_bool(true); // last packet in frame
+        writer.push(0, 6); // frame dependency template id
+        writer.push(u64::from(frame_number), 16);
+        writer.push_bool(true); // template dependency structure present
+        writer.push_bool(false); // active decode targets present
+        writer.push_bool(false); // custom DTIs
+        writer.push_bool(false); // custom frame differences
+        writer.push_bool(false); // custom chains
+        writer.push(0, 6); // structure id
+        writer.push(0, 5); // one decode target
+        writer.push(3, 2); // one template, no layer transition
+        writer.push(3, 2); // template DTI is required, not Switch
+        writer.push_bool(false); // no frame differences
+        writer.push_bool(false); // no chains
+        writer.push_bool(false); // no resolutions
+        writer.into_bytes()
+    }
+
+    fn descriptor_with_switch_target(frame_number: u16) -> Vec<u8> {
+        let mut writer = BitWriter::default();
+        writer.push_bool(true); // first packet in frame
+        writer.push_bool(true); // last packet in frame
+        writer.push(0, 6); // cached frame dependency template id
+        writer.push(u64::from(frame_number), 16);
+        writer.push_bool(false); // template dependency structure present
+        writer.push_bool(true); // active decode targets present
+        writer.push_bool(true); // custom DTIs
+        writer.push_bool(false); // custom frame differences
+        writer.push_bool(false); // custom chains
+        writer.push(1, 1); // the sole decode target is active
+        writer.push(2, 2); // DTI Switch
+        writer.into_bytes()
+    }
 
     #[test]
     fn dependency_descriptor_switch_requires_frame_start_and_switch_target() {
@@ -394,6 +485,66 @@ mod tests {
                 ..metadata
             }
         ));
+    }
+
+    #[test]
+    fn remote_track_state_tracks_dependency_descriptor_switch_points_across_rtp_packets() {
+        let state = RemoteTrackState::default();
+        let ssrc = 0x1234_5678;
+
+        let non_switch = descriptor_packet(ssrc, 100, descriptor_with_structure(1));
+        assert!(
+            state
+                .observe_dependency_descriptor_packet(&non_switch)
+                .is_some()
+        );
+        assert_eq!(
+            state
+                .last_dd_switch_point_by_ssrc
+                .lock()
+                .expect("dependency descriptor state lock should not be poisoned")
+                .get(&ssrc),
+            Some(&false),
+            "a frame start without DTI Switch must not authorize a source switch"
+        );
+
+        let switch = descriptor_packet(ssrc, 101, descriptor_with_switch_target(2));
+        assert!(
+            state
+                .observe_dependency_descriptor_packet(&switch)
+                .is_some()
+        );
+        assert_eq!(
+            state
+                .last_dd_switch_point_by_ssrc
+                .lock()
+                .expect("dependency descriptor state lock should not be poisoned")
+                .get(&ssrc),
+            Some(&true),
+            "a later frame start with an active DTI Switch target must authorize a source switch"
+        );
+
+        let without_descriptor = Packet {
+            header: Header {
+                sequence_number: 102,
+                ssrc,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(
+            state
+                .observe_dependency_descriptor_packet(&without_descriptor)
+                .is_none()
+        );
+        assert!(
+            !state
+                .last_dd_switch_point_by_ssrc
+                .lock()
+                .expect("dependency descriptor state lock should not be poisoned")
+                .contains_key(&ssrc),
+            "a packet without descriptor metadata must not inherit a prior switch point"
+        );
     }
 
     #[test]
