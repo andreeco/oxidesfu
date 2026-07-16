@@ -20,7 +20,6 @@ pub struct DataChannel {
     pub(crate) inner: Arc<dyn WebRtcDataChannel>,
     detached: Arc<tokio::sync::Mutex<Option<Arc<dyn DetachedDataChannel>>>>,
     buffered_amount_high: Arc<AtomicBool>,
-    slow_reader_backpressured: Arc<AtomicBool>,
     slow_reader_bitrate_threshold_bps: Arc<AtomicU32>,
     slow_reader_threshold_configured: Arc<AtomicBool>,
     send_rate_samples: Arc<tokio::sync::Mutex<SendRateSamples>>,
@@ -44,11 +43,11 @@ struct SendRateSamples {
     active: SendRateWindow,
     last_buffered_amount: u64,
     start: Instant,
+    initialized: bool,
 }
 
-impl Default for SendRateSamples {
-    fn default() -> Self {
-        let now = Instant::now();
+impl SendRateSamples {
+    fn at(now: Instant) -> Self {
         Self {
             bytes_total: 0,
             windows: VecDeque::new(),
@@ -58,12 +57,24 @@ impl Default for SendRateSamples {
             },
             last_buffered_amount: 0,
             start: now,
+            initialized: false,
         }
+    }
+}
+
+impl Default for SendRateSamples {
+    fn default() -> Self {
+        Self::at(Instant::now())
     }
 }
 
 impl SendRateSamples {
     fn add_sample(&mut self, now: Instant, bytes: usize, buffered_amount: u64) {
+        if !self.initialized {
+            *self = Self::at(now);
+            self.initialized = true;
+        }
+
         let buffered_delta = buffered_amount as i128 - self.last_buffered_amount as i128;
         // Match upstream datachannel bitrate semantics: bytes delivered in this sample are
         // written bytes adjusted by buffered-amount movement. When buffered amount grows,
@@ -106,6 +117,10 @@ impl SendRateSamples {
     }
 
     fn bitrate_bps(&self, now: Instant) -> Option<u32> {
+        if !self.initialized {
+            return None;
+        }
+
         let elapsed = now.saturating_duration_since(self.start);
         if elapsed < RELIABLE_SLOW_READER_MIN_BITRATE_SAMPLE_WINDOW {
             return None;
@@ -130,7 +145,6 @@ impl DataChannel {
             inner,
             detached: Arc::new(tokio::sync::Mutex::new(None)),
             buffered_amount_high: Arc::new(AtomicBool::new(false)),
-            slow_reader_backpressured: Arc::new(AtomicBool::new(false)),
             slow_reader_bitrate_threshold_bps: Arc::new(AtomicU32::new(0)),
             slow_reader_threshold_configured: Arc::new(AtomicBool::new(false)),
             send_rate_samples: Arc::new(tokio::sync::Mutex::new(SendRateSamples::default())),
@@ -272,18 +286,6 @@ impl DataChannel {
         let high_threshold_u64 = u64::from(high_threshold);
         let is_unreliable = matches!(self.max_retransmits().await?, Some(0));
 
-        if !is_unreliable
-            && slow_reader_bitrate_threshold.is_some()
-            && self.slow_reader_backpressured.load(Ordering::Relaxed)
-            && self.inner.buffered_amount().await? >= high_threshold_u64
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::WouldBlock,
-                "data dropped by slow reader",
-            )
-            .into());
-        }
-
         if is_unreliable && let Some(bitrate) = self.current_send_rate_bps().await {
             let buffered_amount = self.inner.buffered_amount().await?;
             let buffered_limit = u64::from(bitrate)
@@ -323,8 +325,6 @@ impl DataChannel {
 
             match send_result {
                 Ok(bytes_written) => {
-                    self.slow_reader_backpressured
-                        .store(false, Ordering::Relaxed);
                     let _ = self
                         .sample_send_rate_bps(bytes_written, buffered_amount)
                         .await;
@@ -347,8 +347,6 @@ impl DataChannel {
                         continue;
                     }
 
-                    self.slow_reader_backpressured
-                        .store(true, Ordering::Relaxed);
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::WouldBlock,
                         "data dropped by slow reader",
@@ -447,7 +445,10 @@ mod tests {
         RTCDataChannelState,
     };
 
-    use super::{DataChannel, RELIABLE_SLOW_READER_BITRATE_WINDOW, SendRateSamples};
+    use super::{
+        DataChannel, RELIABLE_SLOW_READER_BITRATE_WINDOW,
+        RELIABLE_SLOW_READER_MIN_BITRATE_SAMPLE_WINDOW, SendRateSamples,
+    };
 
     #[derive(Clone)]
     enum SendOutcome {
@@ -607,6 +608,28 @@ mod tests {
     }
 
     #[test]
+    fn send_rate_samples_starts_at_first_post_open_sample() {
+        let t0 = Instant::now();
+        let mut samples = SendRateSamples::default();
+        let first_post_open_write = t0 + Duration::from_secs(1);
+
+        samples.add_sample(first_post_open_write, 100, 0);
+        samples.add_sample(
+            first_post_open_write + RELIABLE_SLOW_READER_MIN_BITRATE_SAMPLE_WINDOW,
+            300,
+            0,
+        );
+
+        assert_eq!(
+            samples.bitrate_bps(
+                first_post_open_write + RELIABLE_SLOW_READER_MIN_BITRATE_SAMPLE_WINDOW
+            ),
+            Some(32_000),
+            "pre-open idle time must not dilute the reliable writer bitrate"
+        );
+    }
+
+    #[test]
     fn send_rate_samples_stays_above_threshold_for_bursty_above_threshold_pattern() {
         const THRESHOLD_BPS: u32 = 21_024;
         let mut samples = SendRateSamples::default();
@@ -670,15 +693,14 @@ mod tests {
         assert_eq!(io_error.to_string(), "data dropped by slow reader");
 
         let calls_after_slow_reader_drop = mock.call_count();
-        let err = dc
-            .send_bytes(&vec![0; 1000])
+        dc.send_bytes(&vec![0; 1000])
             .await
-            .expect_err("known slow reader should drop without another deadline wait");
-        let io_error = err
-            .downcast_ref::<std::io::Error>()
-            .expect("fast slow-reader drop should map to io::Error");
-        assert_eq!(io_error.kind(), std::io::ErrorKind::WouldBlock);
-        assert_eq!(mock.call_count(), calls_after_slow_reader_drop);
+            .expect("the next reliable packet should receive a fresh write attempt");
+        assert_eq!(
+            mock.call_count(),
+            calls_after_slow_reader_drop + 1,
+            "a previous slow-reader drop must not latch future packets into pre-write dropping"
+        );
     }
 
     #[tokio::test]

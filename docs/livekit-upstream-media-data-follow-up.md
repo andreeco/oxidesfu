@@ -21,9 +21,11 @@ answering the publishing offer.
 `TestMultiNodeUpdateAttributes` failed in the preceding 4-worker full suite,
 but passed in a clean single-worker rerun for `v0`, `v0-single-peer-connection`,
 and `v1`; classify it as shard-load/timing-sensitive until repeated-run evidence
-proves otherwise. `TestDataPublishSlowSubscriber` also passed its latest
-single-worker rerun, so it is a watch item rather than a currently reproducible
-reliable-data compatibility gap.
+proves otherwise. `TestDataPublishSlowSubscriber` passes as an isolated Rust
+port and external LiveKit shard after the reliable writer was fixed to start
+bitrate sampling at the first post-open write attempt. Its all-topology Rust
+port remains explicitly run because parallel WebRTC-heavy crate tests can delay
+its synthetic reader below the intended threshold.
 
 The native Rust port
 `upstream_livekit::singlenode::test_single_node_update_subscription_permissions`
@@ -244,66 +246,38 @@ Relevant upstream files:
 3. Keep the external `TestConnectionStats` shard as the authoritative Go/Pion
    wire-compatibility check.
 
-## Watch item: classic v0 slow reliable-data subscriber
-
-### Contract under observation
+## Resolved: slow reliable-data subscriber contiguity
 
 `livekit/test/singlenode_test.go:TestDataPublishSlowSubscriber` creates a
 publisher, fast subscriber, slow-but-not-dropping subscriber, and
-slow-dropping subscriber. It expects the server to drop for the slow reader,
-report the corresponding writer error/backpressure, and retain ordered delivery
-for the fast and eligible slow subscribers.
+slow-dropping subscriber. It requires a drop and publisher backpressure for the
+below-threshold reader while preserving ordered delivery for the fast and
+above-threshold readers.
 
-### Isolated result
+Oxide created `SendRateSamples` when it created the server `_reliable` channel,
+before SDP negotiation and data-channel open. The first post-open write was
+therefore measured against pre-open idle time; a later timeout could
+misclassify an above-threshold receiver as slow and drop one of its reliable
+packets.
 
-Latest rerun timestamp: `2026-07-15 15:53`; shard log:
-`target/conformance-investigation/isolated-slow-subscriber/livekit-shards-20260715-155318/TestDataPublishSlowSubscriber/go-test.log`.
+`crates/oxidesfu-rtc/src/data_channel.rs` now starts sampling lazily at the
+first post-open write attempt. It also makes every reliable packet take a fresh
+write/deadline/rate decision rather than retaining a prior slow-reader drop as
+pre-write drop state. This matches the upstream writer lifecycle and policy:
 
-```text
-PASS TestDataPublishSlowSubscriber
-```
+- `livekit/pkg/rtc/transport.go` creates reliable writers on data-channel open;
+- `livekit/pkg/sfu/datachannel/datachannel_writer.go` retries each timed-out
+  write while bitrate is unknown or at least the configured threshold;
+- `livekit/test/singlenode_test.go` defines the fast, above-threshold, and
+  below-threshold delivery contract.
 
-The preceding isolated v0 connection failure did not reproduce in this rerun.
-Do not claim that the reliable-writer policy is fixed: retain this as a
-repeat-run watch item, and investigate only if it becomes reproducible again.
-
-### Upstream behavior to preserve
-
-LiveKit enables data-channel block-write when a slow threshold is configured
-and wraps every reliable/unlabeled data channel in a reliable data-channel
-writer. The writer measures slow-reader behavior and surfaces
-`ErrDataDroppedBySlowReader`; its policy must apply regardless of whether the
-reliable channel resides on a separate subscriber PC or a combined PC.
-
-Relevant upstream files:
-
-- `livekit/pkg/rtc/transport.go` — peer connection and channel writer setup;
-- `livekit/pkg/rtc/transportmanager.go` — result handling;
-- `livekit/pkg/sfu/datachannel/datachannel_writer.go` — reliable writer policy;
-- `livekit/test/singlenode_test.go` — contract assertion.
-
-Oxide currently configures buffered thresholds in
-`crates/oxidesfu-signaling/src/router/session.rs` during subscriber channel
-creation and on incoming data-channel registration. That code remains the
-likely next policy area only after the v0 data-only connection setup works;
-the current focused failure does not yet reach the writer path.
-
-### Repair plan
-
-1. If the v0 data-only dual-PC connection failure reappears, capture the
-   initial server subscriber offer and establish whether either slow subscriber
-   timed out before the writer policy was exercised.
-2. Repair or replace the existing ignored real-WebRTC port
-   (`upstream_livekit::singlenode::test_data_publish_slow_subscriber`) so a
-   reproducible connection phase can become a focused Oxide regression.
-3. Once all data-only peers connect, use that regression with a configured slow
-   threshold and an explicit reliable channel on the subscriber PC.
-4. Then verify the server selects the channel used by the v0 forwarding path,
-   not a publisher or stale replacement channel, and that the threshold
-   produces the expected slow-reader/drop signal while the fast subscriber
-   remains ordered.
-5. Run isolated `TestDataPublishSlowSubscriber`, then the complete data-track
-   and data-packet suite.
+The Rust port
+`upstream_livekit::singlenode::test_data_publish_slow_subscriber` passes for
+v0 dual-PC, v0 single-PC, and v1 when run in isolation. It remains explicitly
+run because concurrent WebRTC-heavy crate tests can delay its synthetic reader
+below its intended threshold. The focused three-subscriber relay regression is
+normal signalling test coverage, and the external LiveKit shard is the
+cross-process compatibility gate.
 
 ## Non-goals and safety notes
 

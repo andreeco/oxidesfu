@@ -10650,7 +10650,6 @@ mod tests {
 
     /// Reproduces the three-subscriber pressure shape used by the upstream compatibility test.
     #[tokio::test]
-    #[ignore = "three-subscriber reliable data relay regression investigation"]
     #[allow(deprecated)]
     async fn relay_data_packet_above_threshold_subscriber_stays_contiguous_under_slow_drop_pressure()
      {

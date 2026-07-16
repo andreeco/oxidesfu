@@ -1173,7 +1173,7 @@ async fn test_subscribe_to_codec_unsupported() {
 
 // Upstream: livekit/test/singlenode_test.go::TestDataPublishSlowSubscriber
 #[tokio::test]
-#[ignore = "OxideSFU reliable-data slow-subscriber contiguity remains a documented compatibility gap"]
+#[ignore = "requires isolated execution; covered by normal RTC and relay regressions plus the external LiveKit shard"]
 async fn test_data_publish_slow_subscriber() {
     const PAYLOAD_SIZE: usize = 100;
 
