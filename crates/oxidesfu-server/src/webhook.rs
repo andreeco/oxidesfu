@@ -368,9 +368,11 @@ mod tests {
     use oxidesfu_auth::{ApiKeyStore, TokenVerifier};
     use sha2::Digest;
 
+    type WebhookResponseQueue = HashMap<String, VecDeque<Result<u16, WebhookSendError>>>;
+
     #[derive(Clone, Default)]
     struct FakeWebhookSender {
-        statuses_by_event: Arc<Mutex<HashMap<String, VecDeque<Result<u16, WebhookSendError>>>>>,
+        statuses_by_event: Arc<Mutex<WebhookResponseQueue>>,
         attempt_log: Arc<Mutex<Vec<String>>>,
     }
 

@@ -75,7 +75,6 @@ struct StatsWorker {
     room_id: String,
     room_name: String,
     participant_id: String,
-    participant_identity: String,
     connected: bool,
     outgoing_per_track: HashMap<String, Vec<proto::AnalyticsStat>>,
     incoming_per_track: HashMap<String, Vec<proto::AnalyticsStat>>,
@@ -88,14 +87,12 @@ impl StatsWorker {
         room_id: &str,
         room_name: &str,
         participant_id: &str,
-        participant_identity: &str,
         guard: Option<&mut ReferenceGuard>,
     ) -> Self {
         let mut worker = Self {
             room_id: room_id.to_string(),
             room_name: room_name.to_string(),
             participant_id: participant_id.to_string(),
-            participant_identity: participant_identity.to_string(),
             connected: false,
             outgoing_per_track: HashMap::new(),
             incoming_per_track: HashMap::new(),
@@ -126,10 +123,6 @@ impl StatsWorker {
 
     fn set_connected(&mut self) {
         self.connected = true;
-    }
-
-    fn is_connected(&self) -> bool {
-        self.connected
     }
 
     fn close(&mut self, guard: &mut ReferenceGuard) -> bool {
@@ -286,25 +279,13 @@ impl TelemetryService {
         };
 
         let existed = workers.contains_key(&key);
-        let worker = workers.entry(key).or_insert_with(|| {
-            StatsWorker::new(
-                &room.sid,
-                &room.name,
-                &participant.sid,
-                &participant.identity,
-                None,
-            )
-        });
+        let worker = workers
+            .entry(key)
+            .or_insert_with(|| StatsWorker::new(&room.sid, &room.name, &participant.sid, None));
 
         if let Some(guard) = guard {
             if worker.closed {
-                *worker = StatsWorker::new(
-                    &room.sid,
-                    &room.name,
-                    &participant.sid,
-                    &participant.identity,
-                    Some(guard),
-                );
+                *worker = StatsWorker::new(&room.sid, &room.name, &participant.sid, Some(guard));
             } else {
                 worker.ref_count.activate(guard);
             }
@@ -684,6 +665,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)] // TrackInfo compatibility fixture requires legacy wire fields.
     fn on_track_update_event_is_sent() {
         let fixture = create_fixture();
 
@@ -1363,8 +1345,7 @@ mod tests {
     fn stats_worker_reference_counted_close_works() {
         let mut g0 = ReferenceGuard::default();
         let mut g1 = ReferenceGuard::default();
-        let mut worker =
-            StatsWorker::new("room", "roomName", "participant", "identity", Some(&mut g0));
+        let mut worker = StatsWorker::new("room", "roomName", "participant", Some(&mut g0));
 
         assert!(!worker.closed(Some(&mut g1)));
         assert!(!worker.close(&mut g0));

@@ -1,10 +1,9 @@
+#![cfg(test)]
+
 use std::time::Duration;
 
 use async_trait::async_trait;
 use thiserror::Error;
-
-/// Default interval between WHIP connection notifications.
-pub(crate) const DEFAULT_WHIP_SESSION_NOTIFY_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Minimal participant handle needed by the WHIP notification loop.
 pub(crate) trait WhipParticipant: Send + Sync {
@@ -33,8 +32,6 @@ pub(crate) trait IngressWhipNotifier: Send + Sync {
 pub(crate) enum WhipNotifyError {
     #[error("participant not found")]
     ParticipantNotFound,
-    #[error("notify failed: {message}")]
-    NotifyFailed { message: String },
 }
 
 /// Sends one WHIP connection notification for `participant`.
@@ -57,22 +54,6 @@ pub(crate) async fn send_connection_notify(
         .await
 }
 
-/// Repeatedly sends WHIP connection notifications until participant closure,
-/// context cancellation, or hard notifier failure.
-pub(crate) async fn notify_session(
-    ctx: &tokio::sync::watch::Receiver<bool>,
-    notifier: &dyn IngressWhipNotifier,
-    participant: &dyn WhipParticipant,
-) -> Result<(), WhipNotifyError> {
-    notify_session_with_interval(
-        ctx,
-        notifier,
-        participant,
-        DEFAULT_WHIP_SESSION_NOTIFY_INTERVAL,
-    )
-    .await
-}
-
 async fn notify_session_with_interval(
     ctx: &tokio::sync::watch::Receiver<bool>,
     notifier: &dyn IngressWhipNotifier,
@@ -83,21 +64,15 @@ async fn notify_session_with_interval(
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut ctx = ctx.clone();
 
-    if let Err(err) = send_connection_notify(notifier, participant).await {
-        match err {
-            WhipNotifyError::ParticipantNotFound => return Ok(()),
-            other => return Err(other),
-        }
+    if send_connection_notify(notifier, participant).await.is_err() {
+        return Ok(());
     }
 
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                if let Err(err) = send_connection_notify(notifier, participant).await {
-                    match err {
-                        WhipNotifyError::ParticipantNotFound => return Ok(()),
-                        other => return Err(other),
-                    }
+                if send_connection_notify(notifier, participant).await.is_err() {
+                    return Ok(());
                 }
             }
             changed = ctx.changed() => {
