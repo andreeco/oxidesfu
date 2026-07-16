@@ -189,9 +189,11 @@ impl RemoteTrackState {
         };
 
         let availability = metadata.as_ref().map(|(_, metadata)| {
-            dependency_descriptor_is_switch_point(metadata)
-                .then_some(DependencyDescriptorLayerAvailability::DecoderUsable)
-                .unwrap_or(DependencyDescriptorLayerAvailability::RtpSeen)
+            if dependency_descriptor_is_switch_point(metadata) {
+                DependencyDescriptorLayerAvailability::DecoderUsable
+            } else {
+                DependencyDescriptorLayerAvailability::RtpSeen
+            }
         });
         if let Ok(mut switch_points) = self.last_dd_switch_point_by_ssrc.lock() {
             match metadata {

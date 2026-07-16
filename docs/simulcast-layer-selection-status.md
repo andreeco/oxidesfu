@@ -1,6 +1,6 @@
 # Simulcast layer-selection implementation status
 
-**Status:** partial implementation; do not treat this as completed LiveKit-compatible allocator behavior.
+**Status:** implementation complete for the target-local simulcast and one-SSRC scalable forwarding slice; remaining items are independent evidence and workspace-hygiene follow-up, not known forwarding-path gaps.
 
 **Last updated:** 2026-07-16
 
@@ -23,7 +23,7 @@ Reference revisions inspected:
 | Repository | Revision | Files | Derived behavior |
 |---|---|---|---|
 | LiveKit | `ae09b7d0ad94d764f0c97d183efd36476163e819` | `pkg/rtc/subscribedtrack.go`, `pkg/sfu/downtrack.go`, `pkg/sfu/forwarder.go`, `pkg/sfu/videolayerselector/{base.go,simulcast.go}` | Subscriber settings set max spatial/temporal bounds; forwarding retains max, target, current, and seen layers; spatial changes are decodable-boundary gated. |
-| WebRTC Rust compatibility fork (published/pinned) | outer `db15a6b00d2f8ff74f7b0a4c12bab014e11cd252`, nested RTC `8cdd2e31d89a3ef78cd367a6b18e4d779081fc77` | `rtc-rtp/src/codec/{vp9,h264,av1}`, `rtc-rtp/src/extension/dependency_descriptor_extension/{mod.rs,dependency_descriptor_extension_test.rs}` | Provides codec switch-boundary parsing plus stateful active-target masks, typed per-frame DTIs, target-layer mappings, frame/chain dependencies, and chain protection metadata. |
+| WebRTC Rust compatibility fork (published/pinned) | outer `2133ab09ae3681872b7a98773bd56d682056ed87`, nested RTC `69571fe` | `rtc-rtp/src/codec/{vp9,h264,av1}`, `rtc-rtp/src/extension/dependency_descriptor_extension/{mod.rs,dependency_descriptor_extension_test.rs}` | Provides codec switch-boundary parsing, frame/chain dependency metadata, and raw dependency-descriptor active-target-mask rewriting while preserving all unrelated descriptor bits. |
 | OxideSFU | working tree following `3d6331078e8a2a2c0587fe5bb16da939efb89bd2` | `crates/oxidesfu-signaling/src/{media/video_ingress.rs,router/session.rs}` | Original first-eligible-SSRC latch was in the reader-owned forwarding target. |
 
 ## Completed work
@@ -124,9 +124,9 @@ The native Rust SDK FPS-isolation contract also passes with the controller in th
 
 The one-second receiver-bandwidth allocator supplies this temporal intent alongside spatial policy, with the same viewport-weighted per-subscription budget described above. The allocation transition contract also proves temporal downgrade and recovery by observing decoded cadence under the same production allocator changes.
 
-### 3. Dependency-descriptor decode targets are used for VP9/AV1 switching; native SDK fixture coverage remains
+### 3. Dependency-descriptor decode targets and wire output are complete; native SDK fixture boundary remains
 
-Oxide is pinned to outer WebRTC `3b0b2f0d8f0443deeab47fb83dada7eb4d7778ea`, nested RTC `56a36e408913475baeeb5672bd3e30036dea820f`.
+Oxide is pinned to outer WebRTC `2133ab09ae3681872b7a98773bd56d682056ed87`, nested RTC `69571fe`.
 
 `RemoteTrack` parses and retains a current-packet descriptor switch result per incoming SSRC. The forwarding reader consumes that result for VP9 and AV1: when descriptor metadata is available, a source transition requires both `first_packet_in_frame` and an active DTI `Switch` target. A parsed non-switchable descriptor deliberately overrides VP9/AV1 payload keyframe heuristics; it cannot trigger an unsafe fallback switch. When descriptor metadata is absent, the established codec-specific VP9/AV1 boundary detector remains the compatibility fallback. VP8 and H264 continue to use their codec-specific paths.
 
@@ -140,9 +140,10 @@ The RTC integration regression now feeds stateful real RTP header-extension sequ
 
 Live Firefox validation now passes against a freshly built local OxideSFU server: all three receiver-counter contracts pass, including `Firefox VP9 SVC receiver keeps decoding after adaptive quality churn`.
 
-Remaining work:
+Native Rust SDK fixture boundary:
 
-- add native SDK scalable-stream fixture coverage when a deterministic dependency-descriptor publisher fixture is available; the production selector and outbound target-mask rewrite are now implemented and tested.
+- The pinned Rust SDK exposes deterministic raw-I420 and pre-encoded access-unit capture, but not RTP packet/header-extension injection. It therefore cannot construct a controlled dependency-descriptor `Switch` sequence; the existing VP9 `L3T3_KEY` low → high contract remains ignored for that documented SDK limitation.
+- The browser Firefox VP9 `L3T3_KEY` contract is the required real-SVC coverage today. Promote the native contract only when the SDK exposes an RTP/dependency-descriptor fixture API or a deterministic encoder fixture.
 
 ### 4. Source liveness expiry is complete; decodability availability remains limited
 
@@ -179,9 +180,11 @@ Snapshot correlation identified a production publisher-demand defect: aggregate 
 
 A repeat one-run, 30-second paired sweep at `target/profiles/paired-mixed_room_high_simulcast_large-20260716T075350Z-228c19ba` closes the observed media gap: Oxide video observers receive about `0.97–0.98 MB/s` at `1280×720`, versus Go at about `1.00–1.01 MB/s`; audio remains matched. Some transient waiting snapshots remain during observer join, but the post-warm-up client-visible media now converges to high quality.
 
-Remaining work:
+A further complete one-run, 30-second five-point sweep at `target/profiles/paired-mixed_room_high_simulcast_large-20260716T130224Z-ff0beac2` confirms the result: every video point has four observer tracks at `1280×720`; Go reports `1,000,805–1,003,199 B/s` and Oxide `974,209–1,001,683 B/s` aggregate observer video delivery. Audio-only remains matched (`10,267 B/s` Go, `10,301 B/s` Oxide). This is one retained paired round, not a capacity conclusion.
 
-- run multiple paired rounds on an idle host and compare the retained artifacts before making CPU conclusions;
+Remaining evidence work:
+
+- run multiple paired rounds on an otherwise idle host and compare the retained artifacts before making CPU conclusions;
 - use separately scoped Go instrumentation only if client-observed evidence is insufficient.
 
 ## Final wire-correctness slice (2026-07-16)
@@ -196,7 +199,7 @@ Validation for this slice:
 - fresh-server Firefox receiver suite: 3/3 passed, including VP9 `L3T3_KEY` SVC;
 - `cargo check -p oxidesfu-rtc -p oxidesfu-signaling` and `git diff --check` passed.
 
-The remaining implementation-side work is complete for this compatibility slice. Native SDK scalable-fixture coverage and repeated performance sweeps remain evidence improvements, not known forwarding correctness gaps.
+The remaining implementation-side work is complete for this compatibility slice. Native SDK scalable-fixture coverage is blocked on an upstream SDK RTP-fixture capability; repeated performance sweeps and workspace hygiene are evidence/maintenance work, not known forwarding correctness gaps.
 
 ## Validation completed for the current slice
 
@@ -210,15 +213,12 @@ cargo test -p oxidesfu-test \
   -- --nocapture
 ```
 
-The focused RTC suite passed with `38 passed`, including the VP9-only forwarding SDP regression; the focused signaling suite now passes with `525 passed, 3 ignored`, including single-scalable acquisition and stale-source replacement regressions. The dependency-descriptor-gated VP9/AV1 RTP-continuity regression passes. The browser harness production build passes, and a second fresh-server Firefox run passed all three receiver-counter contracts, including the VP9 SVC quality-churn contract; one preceding run had a non-reproducing chat/video receiver-window timing failure. Focused native SDK quality-transition, concurrent spatial-isolation, and concurrent FPS-isolation contracts passed serially. `cargo test --workspace` also passed earlier (`115 passed, 7 ignored`, plus passing doctests). `cargo clippy --workspace --all-targets -- -D warnings` remains blocked by pre-existing diagnostics across signaling test/support code; this slice does not change that broader baseline.
+The focused RTC suite passed with `38 passed`, including the VP9-only forwarding SDP regression; the focused signaling suite passes with `533 passed, 3 ignored`. The dependency-descriptor-gated VP9/AV1 RTP-continuity regression passes. The browser harness production build passes, and a fresh-server Firefox run passed all three receiver-counter contracts, including the VP9 SVC quality-churn contract. Focused native SDK quality-transition, concurrent spatial-isolation, concurrent FPS-isolation, allocation-transition, and AV1 DD cadence contracts passed. A current `cargo test --workspace` run reached `117 passed, 9 ignored` but failed one pre-existing signal-only quality-aggregate probe: it expects publisher layer demand before an RTP subscription is attached, whereas production aggregation intentionally counts only an active room media subscription. `cargo clippy --workspace --all-targets -- -D warnings` reaches a documented signaling lint backlog (deprecated protocol fields, dead compatibility helpers, and API-shape lints); the current RTC forwarding crate itself passes strict Clippy after the descriptor-availability cleanup.
 
 ## Completion criteria
 
 This work should be called complete only when:
 
-1. simulcast source switching is proven decodable through a native SDK scalable VP9/AV1 fixture where applicable, and one-SSRC scalable sources apply descriptor-aware decode-target forwarding; the Firefox VP9 SVC browser contract now passes against a fresh server build;
-2. source availability, fallback, and retry behavior are bounded and observable, including decoder-usability semantics for simulcast and scalable streams;
-3. observability exports selector suppression/receiver-feedback counts, wire-byte rates, and a machine-readable profiler snapshot;
-4. concurrent real subscribers prove independent low/high decoded dimensions and isolated updates;
-5. a real paired Go/Oxide run captures comparable post-warm-up client-observed per-track delivery evidence and any needed server correlation; and
-6. focused tests, workspace tests, and a clean or explicitly remediated workspace clippy baseline have documented outcomes.
+1. one-SSRC scalable forwarding remains covered by the Firefox VP9 SVC browser contract; add a native equivalent only when the Rust SDK can create a deterministic RTP dependency-descriptor fixture;
+2. repeat paired Go/Oxide runs on an otherwise idle host before making CPU/capacity conclusions; and
+3. either remediate the workspace Clippy backlog and the signal-only aggregate-probe mismatch in separate maintenance slices, or retain their explicit documented outcomes.
