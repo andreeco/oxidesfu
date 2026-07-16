@@ -1292,20 +1292,41 @@ fn allocation_temporal_layer_for_budget(
     )
 }
 
-fn eligible_video_track_count_for_subscriber(
+#[allow(deprecated)]
+fn allocation_layout_weight(
+    track: &proto::TrackInfo,
+    settings: Option<&proto::UpdateTrackSettings>,
+) -> u64 {
+    let requested_area = settings
+        .filter(|settings| settings.width > 0 && settings.height > 0)
+        .map(|settings| u64::from(settings.width) * u64::from(settings.height));
+    requested_area.unwrap_or_else(|| {
+        track
+            .layers
+            .iter()
+            .chain(track.codecs.iter().flat_map(|codec| codec.layers.iter()))
+            .map(|layer| u64::from(layer.width) * u64::from(layer.height))
+            .max()
+            .unwrap_or(1)
+            .max(1)
+    })
+}
+
+fn eligible_video_layout_weight_for_subscriber(
     rooms: &RoomStore,
     media_subscriptions: &MediaSubscriptionStore,
+    track_settings: &crate::media::TrackSettingsStore,
     room_name: &str,
     subscriber_identity: &str,
-) -> usize {
+) -> u64 {
     rooms
         .list_participants(room_name)
         .unwrap_or_default()
         .into_iter()
         .filter(|publisher| publisher.identity != subscriber_identity)
         .flat_map(|publisher| {
-            publisher.tracks.into_iter().filter(move |track| {
-                track.r#type == proto::TrackType::Video as i32
+            publisher.tracks.into_iter().filter_map(move |track| {
+                (track.r#type == proto::TrackType::Video as i32
                     && media_subscriptions.is_subscribed(
                         room_name,
                         &publisher.identity,
@@ -1317,10 +1338,18 @@ fn eligible_video_track_count_for_subscriber(
                         &publisher.identity,
                         &track.sid,
                         subscriber_identity,
+                    ))
+                .then(|| {
+                    allocation_layout_weight(
+                        &track,
+                        track_settings
+                            .get_for_track(room_name, subscriber_identity, &track.sid)
+                            .as_ref(),
                     )
+                })
             })
         })
-        .count()
+        .sum::<u64>()
         .max(1)
 }
 
@@ -6215,13 +6244,22 @@ async fn forward_publisher_remote_track(
                                 );
                                 continue;
                             };
-                            let track_count = eligible_video_track_count_for_subscriber(
+                            let total_layout_weight = eligible_video_layout_weight_for_subscriber(
                                 &rooms,
                                 &media_subscriptions,
+                                &track_settings,
                                 &room_name,
                                 subscriber_identity,
-                            ) as u64;
-                            let budget_bps = available_bitrate_bps / track_count;
+                            );
+                            let target_layout_weight = allocation_layout_weight(
+                                &track_info,
+                                track_settings
+                                    .get_for_track(&room_name, subscriber_identity, &track_sid)
+                                    .as_ref(),
+                            );
+                            let budget_bps = available_bitrate_bps
+                                .saturating_mul(target_layout_weight)
+                                / total_layout_weight;
                             let quality = allocation_quality_for_budget(&track_info, budget_bps);
                             let temporal = quality.and_then(|quality| {
                                 allocation_temporal_layer_for_budget(
@@ -8032,9 +8070,10 @@ mod tests {
 
     use super::{
         ForwardingDecisionRevisions, FpsForwardingState, SubscriberVideoTemporalController,
-        TemporalIngressDecision, TemporalLayer, add_track_response, allocation_quality_for_budget,
-        allocation_temporal_layer_for_budget, apply_publisher_codec_preferences_to_answer,
-        av1_is_keyframe_start, cached_forwarding_decision_for_subscriber,
+        TemporalIngressDecision, TemporalLayer, add_track_response, allocation_layout_weight,
+        allocation_quality_for_budget, allocation_temporal_layer_for_budget,
+        apply_publisher_codec_preferences_to_answer, av1_is_keyframe_start,
+        cached_forwarding_decision_for_subscriber,
         clear_publisher_subscription_active_if_no_remaining_tracks, data_channel_kind_for_label,
         desired_video_quality_from_allocation, filter_h264_from_publisher_answer_for_client,
         force_sendonly_sections_without_msid_recvonly, h264_is_keyframe_start,
@@ -11336,6 +11375,25 @@ mod tests {
             "a nominal 33 ms frame interval must not be dropped for a 30 FPS request"
         );
         assert!(state.should_forward_packet(5_940, 30));
+    }
+
+    #[test]
+    fn allocation_layout_weight_prefers_subscriber_viewport_over_track_default() {
+        let track = proto::TrackInfo {
+            layers: vec![proto::VideoLayer {
+                width: 1280,
+                height: 720,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let settings = proto::UpdateTrackSettings {
+            width: 320,
+            height: 180,
+            ..Default::default()
+        };
+        assert_eq!(allocation_layout_weight(&track, None), 1280 * 720);
+        assert_eq!(allocation_layout_weight(&track, Some(&settings)), 320 * 180);
     }
 
     #[test]
