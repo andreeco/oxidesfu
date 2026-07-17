@@ -25,6 +25,9 @@ impl ForwardTrackReaderLease {
 
 #[derive(Clone, Default)]
 pub(crate) struct ForwardTrackStore {
+    /// Serializes control-plane target lifecycle snapshots and mutations. It is never acquired by
+    /// the RTP/RTCP reader, which forwards from its reader-local target vector.
+    lifecycle: Arc<Mutex<()>>,
     tracks: Arc<Mutex<HashMap<ForwardTrackKey, oxidesfu_rtc::LocalRtpTrack>>>,
     /// Changes whenever a forwarding target is inserted, including same-key replacement.
     /// Reader-local media state may only survive when this value is unchanged.
@@ -167,6 +170,16 @@ impl ForwardTrackStore {
         track: oxidesfu_rtc::LocalRtpTrack,
         active: bool,
     ) {
+        let Ok(_lifecycle) = self.lifecycle.lock() else {
+            tracing::warn!(
+                room,
+                publisher_identity,
+                track_sid,
+                subscriber_identity,
+                "forward_track_insert_lifecycle_lock_failed"
+            );
+            return;
+        };
         let key = (
             room.to_string(),
             publisher_identity.to_string(),
@@ -214,6 +227,9 @@ impl ForwardTrackStore {
 
     #[allow(dead_code)]
     pub(crate) fn activate_subscriber(&self, room: &str, subscriber_identity: &str) {
+        let Ok(_lifecycle) = self.lifecycle.lock() else {
+            return;
+        };
         let Ok(tracks) = self.tracks.lock() else {
             tracing::warn!(
                 room,
@@ -267,6 +283,9 @@ impl ForwardTrackStore {
         if track_sids.is_empty() {
             return;
         }
+        let Ok(_lifecycle) = self.lifecycle.lock() else {
+            return;
+        };
 
         let Ok(tracks) = self.tracks.lock() else {
             tracing::warn!(
@@ -321,6 +340,9 @@ impl ForwardTrackStore {
         publisher_identity: &str,
         track_sid: &str,
     ) -> Vec<(ForwardTrackKey, oxidesfu_rtc::LocalRtpTrack)> {
+        let Ok(_lifecycle) = self.lifecycle.lock() else {
+            return Vec::new();
+        };
         let reader_key = Self::reader_key(room, publisher_identity, track_sid);
         let active_keys = self
             .active_by_track
@@ -347,6 +369,9 @@ impl ForwardTrackStore {
         publisher_identity: &str,
         track_sid: &str,
     ) -> Vec<(ForwardTrackKey, oxidesfu_rtc::LocalRtpTrack, u64)> {
+        let Ok(_lifecycle) = self.lifecycle.lock() else {
+            return Vec::new();
+        };
         let reader_key = Self::reader_key(room, publisher_identity, track_sid);
         let active_keys = self
             .active_by_track
@@ -495,6 +520,9 @@ impl ForwardTrackStore {
         track_sid: &str,
         subscriber_identity: &str,
     ) -> Option<oxidesfu_rtc::LocalRtpTrack> {
+        let Ok(_lifecycle) = self.lifecycle.lock() else {
+            return None;
+        };
         let key = (
             room.to_string(),
             publisher_identity.to_string(),
@@ -514,8 +542,12 @@ impl ForwardTrackStore {
             );
         }
         self.set_active_index_for_key(&key, false);
-        self.bump_revision();
-        self.tracks.lock().ok().and_then(|mut tracks| {
+        let removed_incarnation = self
+            .target_incarnations
+            .lock()
+            .ok()
+            .and_then(|mut incarnations| incarnations.remove(&key));
+        let removed = self.tracks.lock().ok().and_then(|mut tracks| {
             let removed = tracks.remove(&key);
             tracing::debug!(
                 room,
@@ -527,7 +559,11 @@ impl ForwardTrackStore {
                 "forward_track_removed"
             );
             removed
-        })
+        });
+        if removed.is_some() || removed_incarnation.is_some() {
+            self.bump_revision();
+        }
+        removed
     }
 
     pub(crate) fn remove_subscriber_mid(
