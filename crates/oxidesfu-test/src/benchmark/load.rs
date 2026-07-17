@@ -355,12 +355,38 @@ fn benchmark_load_output_accepts_received_audio_fanout() {
     };
     let output = "Track loading:\n\
 │ Sub 0  │ track-a │ audio │ 290 │ 19.5kbps │ 0 (0%) │\n\
-│ Sub 1  │ track-a │ audio │ 291 │ 19.5kbps │ 0 (0%) │\n\
+│        │ track-b │ audio │ 291 │ 19.5kbps │ 0 (0%) │\n\
+│ Sub 1  │ track-a │ audio │ 292 │ 19.5kbps │ 0 (0%) │\n\
+│        │ track-b │ audio │ 293 │ 19.5kbps │ 0 (0%) │\n\
 Subscriber summaries:\n\
 │ Sub 0  │ 2/2    │ 41.2kbps │ 0 │ - │\n\
 │ Sub 1  │ 2/2    │ 41.2kbps │ 0 │ - │\n";
 
     validate_load_test_output(output, scenario).expect("received media should pass");
+}
+
+#[test]
+fn benchmark_load_output_rejects_zero_packets_for_any_expected_track() {
+    let scenario = BenchmarkScenario {
+        name: "audio_fanout_small",
+        duration: "6s",
+        video_publishers: 0,
+        audio_publishers: 2,
+        subscribers: 1,
+        num_per_second: "10",
+        layout: "speaker",
+        video_resolution: "low",
+        no_simulcast: true,
+    };
+    let output = "Track loading:\n\
+│ Sub 0  │ track-a │ audio │ 0 │ 0bps │ 0 (0%) │\n\
+│        │ track-b │ audio │ 290 │ 19.5kbps │ 0 (0%) │\n\
+Subscriber summaries:\n\
+│ Sub 0  │ 2/2    │ 19.5kbps │ 0 │ - │\n";
+
+    let error = validate_load_test_output(output, scenario)
+        .expect_err("every expected track must receive RTP");
+    assert!(error.contains("track-a has no received packets"));
 }
 
 #[test]
@@ -405,7 +431,7 @@ Subscriber summaries:\n\
 │ Sub 0  │ 1/1    │ 0bps │ 0 │ - │\n";
 
     let error = validate_load_test_output(output, scenario).expect_err("zero packets must fail");
-    assert!(error.contains("Sub 0 has no received packets"));
+    assert!(error.contains("Sub 0 track track-a has no received packets"));
 }
 
 #[tokio::test]
@@ -1016,7 +1042,6 @@ fn validate_load_test_output(
     }
 
     let mut subscriber_track_rows = Vec::new();
-    let mut subscriber_packet_rows = std::collections::HashMap::<String, u64>::new();
     for line in output.lines() {
         let mut columns = line
             .split('│')
@@ -1028,23 +1053,18 @@ fn validate_load_test_output(
         if columns.len() < 4 || !columns[0].starts_with("Sub ") {
             continue;
         }
-
-        if let Some((received, expected)) = columns[1].split_once('/') {
-            let received = received.parse::<u16>().map_err(|_| {
-                format!("{} has an invalid track summary {:?}", columns[0], columns[1])
-            })?;
-            let expected = expected.parse::<u16>().map_err(|_| {
-                format!("{} has an invalid track summary {:?}", columns[0], columns[1])
-            })?;
-            subscriber_track_rows.push((columns[0].to_string(), received, expected));
+        let Some((received, expected)) = columns[1].split_once('/') else {
             continue;
-        }
-
-        let packets = columns[3].parse::<u64>().map_err(|_| {
-            format!("{} has an invalid packet count {:?}", columns[0], columns[3])
+        };
+        let received = received.parse::<u16>().map_err(|_| {
+            format!("{} has an invalid track summary {:?}", columns[0], columns[1])
         })?;
-        subscriber_packet_rows.insert(columns[0].to_string(), packets);
+        let expected = expected.parse::<u16>().map_err(|_| {
+            format!("{} has an invalid track summary {:?}", columns[0], columns[1])
+        })?;
+        subscriber_track_rows.push((columns[0].to_string(), received, expected));
     }
+    let received_track_packets = received_track_packets(output);
 
     let expected_subscribers = usize::from(scenario.subscribers);
     if subscriber_track_rows.len() != expected_subscribers {
@@ -1060,8 +1080,15 @@ fn validate_load_test_output(
                 "{subscriber} reports {received}/{reported_expected} tracks, expected {expected_tracks}/{expected_tracks}"
             ));
         }
-        if subscriber_packet_rows.get(&subscriber).copied().unwrap_or(0) == 0 {
-            return Err(format!("{subscriber} has no received packets"));
+        let track_packets = received_track_packets.get(&subscriber).map(Vec::as_slice).unwrap_or_default();
+        if track_packets.len() != usize::from(expected_tracks) {
+            return Err(format!(
+                "{subscriber} has {} RTP track rows, expected {expected_tracks}",
+                track_packets.len()
+            ));
+        }
+        if let Some((track_sid, _)) = track_packets.iter().find(|(_, packets)| *packets == 0) {
+            return Err(format!("{subscriber} track {track_sid} has no received packets"));
         }
     }
 
@@ -1082,7 +1109,20 @@ fn ensure_comparable_packet_delivery(go_output: &str, oxidesfu_output: &str) -> 
 }
 
 fn received_packet_count(output: &str) -> Result<u64, String> {
-    let mut packets = 0u64;
+    let packets = received_track_packets(output)
+        .values()
+        .flatten()
+        .map(|(_, packets)| *packets)
+        .sum::<u64>();
+    if packets == 0 {
+        return Err("no received RTP packets found in load-test output".to_string());
+    }
+    Ok(packets)
+}
+
+fn received_track_packets(output: &str) -> std::collections::HashMap<String, Vec<(String, u64)>> {
+    let mut packets_by_subscriber = std::collections::HashMap::<String, Vec<(String, u64)>>::new();
+    let mut current_subscriber = None::<String>;
     for line in output.lines() {
         let mut columns = line
             .split('│')
@@ -1091,22 +1131,30 @@ fn received_packet_count(output: &str) -> Result<u64, String> {
         if columns.first().is_some_and(|column| column.is_empty()) {
             columns.remove(0);
         }
-        if columns.len() < 4 || columns[1].contains('/') {
+        if columns.len() < 4 {
             continue;
         }
-        let is_track_row = columns[0].starts_with("Sub ") || columns[0].is_empty();
-        if !is_track_row {
+        if columns[0].starts_with("Sub ") {
+            current_subscriber = Some(columns[0].to_string());
+        } else if !columns[0].is_empty() {
+            current_subscriber = None;
+        }
+        if columns[1].contains('/') {
+            current_subscriber = None;
             continue;
         }
+        let Some(subscriber) = current_subscriber.as_ref() else {
+            continue;
+        };
         let Ok(packet_count) = columns[3].parse::<u64>() else {
             continue;
         };
-        packets = packets.saturating_add(packet_count);
+        packets_by_subscriber
+            .entry(subscriber.clone())
+            .or_default()
+            .push((columns[1].to_string(), packet_count));
     }
-    if packets == 0 {
-        return Err("no received RTP packets found in load-test output".to_string());
-    }
-    Ok(packets)
+    packets_by_subscriber
 }
 
 async fn sample_process_resources_until_stopped(
