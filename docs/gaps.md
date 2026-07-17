@@ -4,9 +4,9 @@ This document records known or plausible differences from the upstream LiveKit s
 
 ## Scope and references
 
-- OxideSFU baseline: compatibility work through `a015de68` plus the uncommitted dual-PC ownership slice in this working tree.
+- OxideSFU baseline: compatibility work through `722fb686`.
 - Upstream server reference: LiveKit `ae09b7d0ad94d764f0c97d183efd36476163e819` (`1.13.3`).
-- WebRTC wrapper reference: `a1f15cd14b3ea6555c49702bd1d7c8e3fd793fff`.
+- WebRTC wrapper reference: `andreeco/webrtc` `bede31c8`, including the shared ICE/TCP mux and dispatch hardening.
 - Browser regression client: `livekit-client` `2.20.1` on Firefox.
 
 ## Status levels
@@ -38,6 +38,27 @@ Upstream keeps publisher and subscriber writers independent and routes downstrea
 - Upstream: `livekit/pkg/rtc/transportmanager.go:getTransport(true)` selects the subscriber PC for subscriber-primary sessions.
 - Oxide: `DataChannelStore` now includes a transport target and downstream lookup is subscriber-first with publisher fallback.
 - Related readiness alignment: `_data_track` is now created before the initial subscriber offer, not after a fixed timer.
+
+## Covered in the current transport slice
+
+### Shared fixed-port ICE/TCP listener
+
+**Status:** Covered for implementation and deployment; TCP-only public-browser selection remains environment-dependent.
+
+OxideSFU now owns one shared passive ICE/TCP listener and routes accepted RFC 4571 streams by the destination ICE ufrag. Peer connections register and unregister their routes without binding the fixed port independently.
+
+- WebRTC fork: `andreeco/webrtc` commits `f95d4f56` and `bede31c8`; `TcpMux` owns the listener, dispatches the initial STUN frame, bounds initial dispatch with a timeout and connection limit, and preserves existing per-peer TCP behavior.
+- OxideSFU: `crates/oxidesfu-server/src/main.rs` creates the server-lifetime mux; `crates/oxidesfu-rtc/src/peer_connection.rs` carries it to every compatible peer connection; `crates/oxidesfu-signaling/src/router.rs` filters it by client ICE/TCP support.
+- Tests: WebRTC two-peer fixed-port TCP/data-channel regression; Oxide RTC shared-mux regression; server configuration and router-filtering regressions.
+- Deployment: the VPS advertises the public passive TCP candidate on port `7881`; the hardened image reports healthy.
+- Browser evidence: deployed Firefox publisher/subscriber video and adaptive-quality contracts pass. The opt-in TCP-only browser contract is present but cannot force host TCP through the standard browser/LiveKit API; it must run from a network that independently blocks UDP.
+- Hardening: initial RFC 4571/STUN dispatch has a bounded wait and bounded concurrent dispatch capacity. A future production stress profile may tune these defaults if operational measurements require it.
+
+### LiveKit connection-test generic peer-connection error
+
+**Status:** Not an OxideSFU-specific gap.
+
+The connection-test page can report `could not establish pc connection` while separately reporting successful TURN connectivity and audio/video publishing. The same output was reproduced against a real LiveKit server, so this message is not evidence of an OxideSFU wire-compatibility failure. The stronger contracts are selected candidate/media tests and the explicit TURN check.
 
 ## Open gaps
 
