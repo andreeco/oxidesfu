@@ -606,6 +606,17 @@ fn should_run_scenario_for_mode(config: BenchmarkConfig, scenario: BenchmarkScen
     }
 }
 
+#[test]
+fn perf_profiles_only_the_final_benchmark_run() {
+    assert!(!should_profile_benchmark_run(0, 2));
+    assert!(should_profile_benchmark_run(1, 2));
+    assert!(should_profile_benchmark_run(0, 1));
+}
+
+fn should_profile_benchmark_run(run_index: usize, run_count: usize) -> bool {
+    run_index.saturating_add(1) == run_count
+}
+
 fn metric_stats(values: &[f64]) -> MetricStats {
     let mut sorted = values.to_vec();
     sorted.sort_by(f64::total_cmp);
@@ -766,13 +777,31 @@ async fn run_benchmark_comparison_if_enabled(scenario: BenchmarkScenario) {
 
     let mut go_runs = Vec::with_capacity(config.runs);
     let mut oxidesfu_runs = Vec::with_capacity(config.runs);
-    for _ in 0..config.runs {
+    for run_index in 0..config.runs {
+        let profile_run = should_profile_benchmark_run(run_index, config.runs);
+        let mut go_profiler = if profile_run {
+            start_perf_profiler(go_pid, "OXIDESFU_BENCHMARK_PERF_RECORD_GO")
+                .await
+                .expect("Go perf profiler should start when requested")
+        } else {
+            None
+        };
         let go_run = run_lk_load_benchmark("go_livekit", go_pid, &go_base_url, scenario)
             .await
             .expect("Go LiveKit benchmark run should complete");
+        stop_perf_profiler(go_profiler.as_mut()).await;
+
+        let mut perf_profiler = if profile_run {
+            start_perf_profiler(oxidesfu_pid, "OXIDESFU_BENCHMARK_PERF_RECORD")
+                .await
+                .expect("OxideSFU perf profiler should start when requested")
+        } else {
+            None
+        };
         let mut oxidesfu_run = run_lk_load_benchmark("oxidesfu", oxidesfu_pid, &oxidesfu_base_url, scenario)
             .await
             .expect("OxideSFU benchmark run should complete");
+        stop_perf_profiler(perf_profiler.as_mut()).await;
         if let Err(error) = ensure_comparable_packet_delivery(&go_run.stdout, &oxidesfu_run.stdout) {
             oxidesfu_run.status_success = false;
             if !oxidesfu_run.stderr.is_empty() {
@@ -828,6 +857,41 @@ async fn run_benchmark_comparison_if_enabled(scenario: BenchmarkScenario) {
 
     let _ = oxidesfu.kill().await;
     let _ = go_livekit.kill().await;
+}
+
+async fn start_perf_profiler(
+    server_pid: u32,
+    profile_env: &str,
+) -> Result<Option<tokio::process::Child>, String> {
+    let Some(profile_path) = std::env::var_os(profile_env) else {
+        return Ok(None);
+    };
+    let mut profiler = tokio::process::Command::new("perf");
+    let server_pid = server_pid.to_string();
+    profiler
+        .args(["record", "-F", "99", "--call-graph", "dwarf", "-o"])
+        .arg(profile_path)
+        .args(["-p", server_pid.as_str()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let child = profiler
+        .spawn()
+        .map_err(|err| format!("failed to start perf record: {err}"))?;
+    Ok(Some(child))
+}
+
+async fn stop_perf_profiler(profiler: Option<&mut tokio::process::Child>) {
+    let Some(profiler) = profiler else {
+        return;
+    };
+    let Some(pid) = profiler.id() else {
+        return;
+    };
+    let _ = tokio::process::Command::new("kill")
+        .args(["-INT", &pid.to_string()])
+        .status()
+        .await;
+    let _ = tokio::time::timeout(Duration::from_secs(10), profiler.wait()).await;
 }
 
 fn oxidesfu_benchmark_server_binary_path() -> PathBuf {

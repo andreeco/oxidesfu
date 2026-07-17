@@ -83,6 +83,12 @@ OXIDESFU_ENABLE_BENCHMARKS=1 OXIDESFU_BENCHMARK_MODE=full OXIDESFU_BENCHMARK_RUN
   - Include sanitized stdout/stderr tails in JSON artifacts.
 - `OXIDESFU_BENCHMARK_SERVER_STDIO=1`
   - Show spawned OxideSFU benchmark server stdout/stderr.
+- `OXIDESFU_BENCHMARK_PERF_RECORD=<path>`
+  - Attach `perf record` to the OxideSFU server PID during the final benchmark run and write a profile at `<path>`.
+- `OXIDESFU_BENCHMARK_PERF_RECORD_GO=<path>`
+  - Attach `perf record` to the Go LiveKit server PID during the final benchmark run and write a matching profile.
+
+When both are set, the harness profiles Go and OxideSFU sequentially, avoiding concurrent PMU sampling. Profiling requires user-space perf access (for example `kernel.perf_event_paranoid=1`).
 
 ## Prerequisites
 
