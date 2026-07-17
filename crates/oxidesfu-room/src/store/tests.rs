@@ -13,8 +13,8 @@ use livekit_protocol as proto;
 use super::{RoomStore, now_unix_ms};
 use crate::{
     NodeSelectorConfig, NodeSelectorKind, RedisHashStore, RedisRoomNodeDirectory, RegisteredNode,
-    RoomInternalCompat, RoomNodeDirectory, RoomNodeRegistry, RoomNodeRegistryError, RoomStoreError,
-    SelectorRegion,
+    RoomDefaults, RoomInternalCompat, RoomNodeDirectory, RoomNodeRegistry, RoomNodeRegistryError,
+    RoomStoreError, SelectorRegion,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -1545,6 +1545,42 @@ fn update_participant_attributes_accept_64_kib_combined_size() {
         updated.attributes.get("k").map(|value| value.len()),
         Some(64 * 1024 - 1)
     );
+}
+
+#[test]
+fn configured_room_defaults_apply_to_auto_created_and_service_created_rooms() {
+    let store = RoomStore::with_defaults(RoomDefaults {
+        max_participants: 1,
+        empty_timeout: 90,
+        departure_timeout: 45,
+    });
+
+    let (auto_created, _, _) = store
+        .join_participant(
+            "auto-defaults",
+            "alice",
+            "Alice",
+            String::new(),
+            HashMap::new(),
+        )
+        .expect("first participant should create the room");
+    assert_eq!(auto_created.max_participants, 1);
+    assert_eq!(auto_created.empty_timeout, 90);
+    assert_eq!(auto_created.departure_timeout, 45);
+    assert_eq!(
+        store.join_participant("auto-defaults", "bob", "Bob", String::new(), HashMap::new()),
+        Err(RoomStoreError::MaxParticipantsExceeded)
+    );
+
+    let service_created = store
+        .create_room(proto::CreateRoomRequest {
+            name: "service-defaults".to_string(),
+            ..Default::default()
+        })
+        .expect("service room should use configured defaults");
+    assert_eq!(service_created.max_participants, 1);
+    assert_eq!(service_created.empty_timeout, 90);
+    assert_eq!(service_created.departure_timeout, 45);
 }
 
 #[test]

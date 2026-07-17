@@ -71,8 +71,9 @@ impl RoomStore {
             let room = proto::Room {
                 sid: format!("RM_{:016x}", inner.next_room_id),
                 name: room_name.to_string(),
-                empty_timeout: 300,
-                departure_timeout: 20,
+                empty_timeout: self.defaults.empty_timeout,
+                departure_timeout: self.defaults.departure_timeout,
+                max_participants: self.defaults.max_participants,
                 creation_time: now_ms / 1000,
                 creation_time_ms: now_ms,
                 ..Default::default()

@@ -263,6 +263,12 @@ pub struct ServerConfig {
     pub empty_room_max_age: Duration,
     /// Whether a signal join implicitly creates a missing room.
     pub room_auto_create: bool,
+    /// Default maximum participants for rooms without an explicit service value; zero is unlimited.
+    pub room_max_participants: u32,
+    /// Default empty-room timeout in seconds for rooms without an explicit service value.
+    pub room_empty_timeout_seconds: u32,
+    /// Default post-departure timeout in seconds for rooms without an explicit service value.
+    pub room_departure_timeout_seconds: u32,
     /// Backend used for room-node directory state.
     pub room_node_directory_backend: RoomNodeDirectoryBackend,
     /// Redis URL used when the room-node directory backend is `redis`.
@@ -550,6 +556,9 @@ impl ServerConfig {
             room_cleanup_interval: Duration::from_secs(30),
             empty_room_max_age: Duration::from_secs(60),
             room_auto_create: true,
+            room_max_participants: 0,
+            room_empty_timeout_seconds: 300,
+            room_departure_timeout_seconds: 20,
             room_node_directory_backend: RoomNodeDirectoryBackend::Memory,
             redis_url: None,
             reject_non_local_room_placement: false,

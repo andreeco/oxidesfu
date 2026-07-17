@@ -232,8 +232,9 @@ before being claimed as compatibility support.
 | `debug_handler_port` / Go pprof | Unsupported | OxideSFU exposes `/debug/forwarding-snapshots`, not Go pprof/debug endpoints. |
 | `logging.*` | Different | Use `RUST_LOG`; no LiveKit YAML logging, Pion logging, JSON mode, or sampling equivalence currently exists. |
 | `room.auto_create` | Translate | `OXIDESFU_ROOM_AUTO_CREATE`. |
-| `room.empty_timeout`, `room.departure_timeout` | Different | OxideSFU has cleanup interval and empty-room maximum age. Map only after a lifecycle contract proves equivalent semantics. |
-| Room max participants, default codec policy, remote unmute, playout delay, stream sync | Unsupported | These require room/publish/subscribe runtime policies, not just parsing. |
+| `room.empty_timeout`, `room.departure_timeout` | Translate | Defaults for auto-created and unspecified RoomService rooms; per-room RoomService values still override them. |
+| `room.max_participants` | Translate | Default cap for auto-created and unspecified RoomService rooms; enforced by `RoomStore` before a new identity joins. |
+| Default codec policy, remote unmute, playout delay, stream sync | Unsupported | These require room/publish/subscribe runtime policies, not just parsing. |
 | `webhook.api_key`, `webhook.urls` | Translate | `OXIDESFU_WEBHOOK_API_KEY`, `OXIDESFU_WEBHOOK_URLS`; test signature/event parity independently. |
 | `signal_relay.*`, `psrpc.*` | Unsupported / internal difference | OxideSFU has its own relay mechanism. Never pretend its tuning is equivalent without resilience and delivery contracts. |
 | `audio.*` | Unsupported | Active-speaker and RED settings have no configuration equivalence. |
@@ -433,15 +434,17 @@ that the SDK receives the selected owner’s ICE entry. The same process contrac
 uses RoomService list/get through the origin to prove management-plane forwarding
 to the owner.
 
-### Slice F — room policy/limit functionality
+### Slice F — room policy/limit functionality ✅ (enforceable subset)
 
-**Work:**
+**Completed:** YAML `room.max_participants`, `room.empty_timeout`, and
+`room.departure_timeout` translate into `RoomStore` defaults. They apply to both
+auto-created rooms and RoomService creation when that request omits an explicit
+value; the RoomService request remains authoritative when explicit. The
+participant cap is enforced before a new identity joins.
 
-Implement deployment-relevant room defaults and limits that operators rely on
-for safety (participants/metadata/identity/name and lifecycle policies).
-
-**Done when:** unsupported room-policy fields move to translated with runtime
-contracts.
+Metadata, identity/name, codec, remote-unmute, playout-delay, and stream-sync
+policies remain unsupported because the corresponding LiveKit configuration
+semantics do not have a complete Oxide runtime model.
 
 ## Open questions
 

@@ -10,7 +10,7 @@ use oxidesfu_api::ApiState;
 use oxidesfu_core::{RoomNodeDirectoryBackend, ServerConfig};
 use oxidesfu_room::{
     NodeSelectorAlgorithm, NodeSelectorConfig, NodeSelectorKind, NodeSelectorSortBy,
-    RedisRoomNodeDirectory, RegisteredNode, RoomNodeDirectory, RoomNodeRegistry,
+    RedisRoomNodeDirectory, RegisteredNode, RoomDefaults, RoomNodeDirectory, RoomNodeRegistry,
     RoomNodeRegistryError, SelectorRegion,
 };
 use rtc_stun::{
@@ -26,7 +26,11 @@ pub fn api_state_from_config(config: &ServerConfig) -> ApiState {
     }
     keys.insert(config.api_key.clone(), config.api_secret.clone());
     ApiState {
-        rooms: oxidesfu_room::RoomStore::default(),
+        rooms: oxidesfu_room::RoomStore::with_defaults(RoomDefaults {
+            max_participants: config.room_max_participants,
+            empty_timeout: config.room_empty_timeout_seconds,
+            departure_timeout: config.room_departure_timeout_seconds,
+        }),
         auth: oxidesfu_auth::TokenVerifier::new(keys),
         data_channels: oxidesfu_rtc::DataChannelStore::default(),
         media_subscription_runtime: None,

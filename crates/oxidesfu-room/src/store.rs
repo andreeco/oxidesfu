@@ -6,10 +6,48 @@ use std::{
 
 use livekit_protocol as proto;
 
+/// Defaults applied when rooms are created without explicit room-service values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RoomDefaults {
+    /// Maximum participants in auto-created rooms; zero is unlimited.
+    pub max_participants: u32,
+    /// Empty-room cleanup timeout in seconds.
+    pub empty_timeout: u32,
+    /// Post-departure cleanup timeout in seconds.
+    pub departure_timeout: u32,
+}
+
+impl Default for RoomDefaults {
+    fn default() -> Self {
+        Self {
+            max_participants: 0,
+            empty_timeout: 300,
+            departure_timeout: 20,
+        }
+    }
+}
+
 /// Thread-safe in-memory room store.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct RoomStore {
     pub(crate) inner: Arc<RwLock<RoomStoreInner>>,
+    pub(crate) defaults: RoomDefaults,
+}
+
+impl Default for RoomStore {
+    fn default() -> Self {
+        Self::with_defaults(RoomDefaults::default())
+    }
+}
+
+impl RoomStore {
+    /// Creates a store with defaults for auto-created and unspecified rooms.
+    pub fn with_defaults(defaults: RoomDefaults) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(RoomStoreInner::default())),
+            defaults,
+        }
+    }
 }
 
 #[derive(Debug, Default)]

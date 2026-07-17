@@ -274,6 +274,18 @@ pub fn translate_livekit_yaml(
             config.room_auto_create = value;
             translated.push("room.auto_create");
         }
+        if let Some(value) = room.max_participants {
+            config.room_max_participants = value;
+            translated.push("room.max_participants");
+        }
+        if let Some(value) = room.empty_timeout {
+            config.room_empty_timeout_seconds = value;
+            translated.push("room.empty_timeout");
+        }
+        if let Some(value) = room.departure_timeout {
+            config.room_departure_timeout_seconds = value;
+            translated.push("room.departure_timeout");
+        }
     }
     if let Some(webhook) = source.webhook {
         if let Some(value) = webhook.api_key {
@@ -511,6 +523,9 @@ struct Turn {
 #[serde(deny_unknown_fields)]
 struct Room {
     auto_create: Option<bool>,
+    max_participants: Option<u32>,
+    empty_timeout: Option<u32>,
+    departure_timeout: Option<u32>,
     #[serde(flatten)]
     unsupported: BTreeMap<String, serde_yaml_ng::Value>,
 }
@@ -541,7 +556,7 @@ keys: { key1: secret1, key2: secret2 }
 redis: { address: redis:6379 }
 rtc: { port_range_start: 50000, port_range_end: 50100, tcp_port: 7881, stun_servers: [stun.example.net:3478] }
 turn: { enabled: true, udp_port: 3479, relay_range_start: 55000, relay_range_end: 55100, domain: turn.example.net }
-room: { auto_create: false }
+room: { auto_create: false, max_participants: 3, empty_timeout: 120, departure_timeout: 30 }
 webhook: { api_key: key1, urls: [https://events.example.net/livekit] }
 region: eu-west
 node_selector: { kind: any, sort_by: clients, algorithm: lowest, sysload_limit: 0.7 }
@@ -554,6 +569,10 @@ node_selector: { kind: any, sort_by: clients, algorithm: lowest, sysload_limit: 
             config.ice_servers[0].urls,
             vec!["stun:stun.example.net:3478"]
         );
+        assert_eq!(config.room_max_participants, 3);
+        assert_eq!(config.room_empty_timeout_seconds, 120);
+        assert_eq!(config.room_departure_timeout_seconds, 30);
+        assert!(report.translated.contains(&"room.max_participants"));
         assert!(report.translated.contains(&"turn.domain"));
     }
 

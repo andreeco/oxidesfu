@@ -61,16 +61,20 @@ impl RoomStore {
             sid: format!("RM_{:016x}", inner.next_room_id),
             name: room_name,
             empty_timeout: if room_empty_timeout == 0 {
-                300
+                self.defaults.empty_timeout
             } else {
                 room_empty_timeout
             },
             departure_timeout: if room_departure_timeout == 0 {
-                20
+                self.defaults.departure_timeout
             } else {
                 room_departure_timeout
             },
-            max_participants: room_max_participants,
+            max_participants: if room_max_participants == 0 {
+                self.defaults.max_participants
+            } else {
+                room_max_participants
+            },
             creation_time: now_ms / 1000,
             creation_time_ms: now_ms,
             metadata: room_metadata,

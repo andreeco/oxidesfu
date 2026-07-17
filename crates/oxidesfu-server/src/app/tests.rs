@@ -1278,6 +1278,40 @@ fn api_state_from_config_uses_configured_api_credentials() {
     assert_eq!(auth.claims.sub, "alice");
 }
 
+#[test]
+fn api_state_from_config_applies_room_policy_defaults() {
+    let mut config = ServerConfig::development();
+    config.room_max_participants = 1;
+    config.room_empty_timeout_seconds = 90;
+    config.room_departure_timeout_seconds = 45;
+
+    let state = api_state_from_config(&config);
+    let (room, _, _) = state
+        .rooms
+        .join_participant(
+            "configured-defaults",
+            "alice",
+            "Alice",
+            String::new(),
+            HashMap::new(),
+        )
+        .expect("first participant should create the room");
+
+    assert_eq!(room.max_participants, 1);
+    assert_eq!(room.empty_timeout, 90);
+    assert_eq!(room.departure_timeout, 45);
+    assert!(matches!(
+        state.rooms.join_participant(
+            "configured-defaults",
+            "bob",
+            "Bob",
+            String::new(),
+            HashMap::new(),
+        ),
+        Err(oxidesfu_room::RoomStoreError::MaxParticipantsExceeded)
+    ));
+}
+
 #[tokio::test]
 async fn healthz_echoes_request_id_header() {
     let response = app()
