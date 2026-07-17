@@ -173,6 +173,15 @@ fn from_lookup_applies_environment_overrides() {
         ("OXIDESFU_TURN_DOMAIN", "turn.example.net".to_string()),
         ("OXIDESFU_TURN_UDP_PORT", "3478".to_string()),
         ("OXIDESFU_TURN_TLS_PORT", "5349".to_string()),
+        ("OXIDESFU_TURN_TLS_BIND", "0.0.0.0:6349".to_string()),
+        (
+            "OXIDESFU_TURN_TLS_CERT_FILE",
+            "/run/secrets/turn-cert.pem".to_string(),
+        ),
+        (
+            "OXIDESFU_TURN_TLS_KEY_FILE",
+            "/run/secrets/turn-key.pem".to_string(),
+        ),
         ("OXIDESFU_TURN_USERNAME", "turn-user".to_string()),
         ("OXIDESFU_TURN_CREDENTIAL", "turn-pass".to_string()),
         ("OXIDESFU_TURN_REQUIRE_REACHABLE", "true".to_string()),
@@ -245,6 +254,18 @@ fn from_lookup_applies_environment_overrides() {
     assert_eq!(config.turn_domain.as_deref(), Some("turn.example.net"));
     assert_eq!(config.turn_udp_port, Some(3478));
     assert_eq!(config.turn_tls_port, Some(5349));
+    assert_eq!(
+        config.turn_tls_bind,
+        Some("0.0.0.0:6349".parse().expect("test address should parse"))
+    );
+    assert_eq!(
+        config.turn_tls_cert_file.as_deref(),
+        Some("/run/secrets/turn-cert.pem")
+    );
+    assert_eq!(
+        config.turn_tls_key_file.as_deref(),
+        Some("/run/secrets/turn-key.pem")
+    );
     assert_eq!(config.turn_username.as_deref(), Some("turn-user"));
     assert_eq!(config.turn_credential.as_deref(), Some("turn-pass"));
     assert!(config.turn_require_reachable);
@@ -1037,6 +1058,16 @@ fn from_lookup_parses_owned_turn_runtime_configuration() {
         ("OXIDESFU_TURN_BIND", "127.0.0.1".to_string()),
         ("OXIDESFU_TURN_EXTERNAL_IP", "203.0.113.10".to_string()),
         ("OXIDESFU_TURN_UDP_PORT", "3478".to_string()),
+        ("OXIDESFU_TURN_TLS_PORT", "443".to_string()),
+        ("OXIDESFU_TURN_TLS_BIND", "0.0.0.0:5349".to_string()),
+        (
+            "OXIDESFU_TURN_TLS_CERT_FILE",
+            "/run/oxidesfu-secrets/turn-cert.pem".to_string(),
+        ),
+        (
+            "OXIDESFU_TURN_TLS_KEY_FILE",
+            "/run/oxidesfu-secrets/turn-key.pem".to_string(),
+        ),
         ("OXIDESFU_TURN_RELAY_PORT_RANGE_START", "40000".to_string()),
         ("OXIDESFU_TURN_RELAY_PORT_RANGE_END", "40010".to_string()),
         ("OXIDESFU_TURN_CREDENTIAL_TTL_SECONDS", "7200".to_string()),
@@ -1054,6 +1085,19 @@ fn from_lookup_parses_owned_turn_runtime_configuration() {
     assert_eq!(config.turn_bind, "127.0.0.1");
     assert_eq!(config.turn_external_ip.as_deref(), Some("203.0.113.10"));
     assert_eq!(config.turn_udp_port, Some(3478));
+    assert_eq!(config.turn_tls_port, Some(443));
+    assert_eq!(
+        config.turn_tls_bind,
+        Some("0.0.0.0:5349".parse().expect("test address should parse"))
+    );
+    assert_eq!(
+        config.turn_tls_cert_file.as_deref(),
+        Some("/run/oxidesfu-secrets/turn-cert.pem")
+    );
+    assert_eq!(
+        config.turn_tls_key_file.as_deref(),
+        Some("/run/oxidesfu-secrets/turn-key.pem")
+    );
     assert_eq!(config.turn_relay_port_range_start, Some(40000));
     assert_eq!(config.turn_relay_port_range_end, Some(40010));
     assert_eq!(config.turn_credential_ttl_seconds, 7200);
@@ -1075,6 +1119,21 @@ fn from_lookup_accepts_an_ip_turn_domain_for_owned_local_runtime() {
     let config = ServerConfig::from_lookup(|key| env.get(key).cloned())
         .expect("an owned local TURN endpoint should accept an IP URL host");
     assert_eq!(config.turn_domain.as_deref(), Some("127.0.0.1"));
+}
+
+#[test]
+fn from_lookup_rejects_incomplete_owned_tls_turn_configuration() {
+    let env = HashMap::from([
+        ("OXIDESFU_TURN_ENABLED", "true".to_string()),
+        ("OXIDESFU_TURN_DOMAIN", "turn.example.net".to_string()),
+        ("OXIDESFU_TURN_UDP_PORT", "3479".to_string()),
+        ("OXIDESFU_TURN_TLS_PORT", "443".to_string()),
+    ]);
+
+    let error = ServerConfig::from_lookup(|key| env.get(key).cloned())
+        .expect_err("owned TLS TURN needs listener and certificate material");
+
+    assert!(matches!(error, ConfigError::InvalidTransportConfig { .. }));
 }
 
 #[test]

@@ -17,8 +17,9 @@ use super::{
     log_request_completion, register_local_room_node, request_id_from_headers,
     room_node_directory_from_config, room_node_directory_from_config_with_factory,
     rtc_transport_config_from_server_config, set_local_room_node_draining,
-    signal_ice_servers_from_config, spawn_relay_intent_worker, spawn_room_cleanup_task,
-    spawn_room_cleanup_task_with_room_finished_handler, validate_turn_runtime_from_config,
+    signal_ice_servers_for_participant, signal_ice_servers_from_config, spawn_relay_intent_worker,
+    spawn_room_cleanup_task, spawn_room_cleanup_task_with_room_finished_handler,
+    validate_turn_runtime_from_config,
 };
 use axum::{
     body::Body,
@@ -207,6 +208,31 @@ fn signal_ice_servers_from_config_appends_turn_servers_with_expected_credentials
     );
     assert_eq!(turn.username, "turn-user");
     assert_eq!(turn.credential, "turn-pass");
+}
+
+#[test]
+fn owned_turn_ice_servers_include_udp_and_tls_urls_with_minted_credentials() {
+    let mut config = ServerConfig::development();
+    config.turn_enabled = true;
+    config.turn_domain = Some("turn.example.net".to_string());
+    config.turn_udp_port = Some(3479);
+    config.turn_tls_port = Some(443);
+
+    let servers = signal_ice_servers_for_participant(&config, "PA_tls_turn");
+    let turn = servers
+        .iter()
+        .find(|server| server.urls.iter().any(|url| url.starts_with("turn:")))
+        .expect("owned TURN server entry should be present");
+
+    assert_eq!(
+        turn.urls,
+        vec![
+            "turn:turn.example.net:3479?transport=udp",
+            "turns:turn.example.net:443?transport=tcp",
+        ]
+    );
+    assert!(!turn.username.is_empty());
+    assert!(!turn.credential.is_empty());
 }
 
 #[test]

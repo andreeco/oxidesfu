@@ -54,6 +54,8 @@ RUN chmod +x /app/oxidesfu-server /usr/local/bin/oxidesfu-entrypoint && \
 # value (for example, `OXIDESFU_BIND=0.0.0.0:7885`) without a CLI argument
 # taking precedence.
 EXPOSE 7880/tcp
+# Internal TLS TURN listener for a Caddy layer-4 SNI passthrough.
+EXPOSE 5349/tcp
 
 ENV RUST_LOG=info \
     OXIDESFU_BIND=0.0.0.0:7880

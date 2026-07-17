@@ -22,4 +22,14 @@ if [ -n "${OXIDESFU_API_SECRET_FILE:-}" ]; then
   export OXIDESFU_API_SECRET_FILE
 fi
 
+if [ -n "${OXIDESFU_TURN_TLS_CERT_FILE:-}" ]; then
+  OXIDESFU_TURN_TLS_CERT_FILE="$(copy_secret_file "$OXIDESFU_TURN_TLS_CERT_FILE" turn-cert.pem)"
+  export OXIDESFU_TURN_TLS_CERT_FILE
+fi
+
+if [ -n "${OXIDESFU_TURN_TLS_KEY_FILE:-}" ]; then
+  OXIDESFU_TURN_TLS_KEY_FILE="$(copy_secret_file "$OXIDESFU_TURN_TLS_KEY_FILE" turn-key.pem)"
+  export OXIDESFU_TURN_TLS_KEY_FILE
+fi
+
 exec setpriv --reuid=oxidesfu --regid=oxidesfu --init-groups "$@"

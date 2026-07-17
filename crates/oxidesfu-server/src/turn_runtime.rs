@@ -13,7 +13,7 @@ use turn_server::{
         crypto::{Password, generate_password},
         message::{attributes::PasswordAlgorithm, methods::Method},
     },
-    config::{Config, Interface, Server},
+    config::{Config, Interface, Server, Ssl},
     service::{
         ServiceHandler,
         session::{Identifier, ports::PortRange},
@@ -174,18 +174,12 @@ fn turn_external_address(config: &ServerConfig, port: u16) -> anyhow::Result<Soc
     ))
 }
 
-/// Starts the configured UDP TURN runtime, or returns `None` when TURN is disabled.
-pub async fn start_turn_runtime(config: &ServerConfig) -> anyhow::Result<Option<TurnRuntime>> {
-    if !config.turn_enabled {
-        return Ok(None);
-    }
-
+fn turn_engine_config(config: &ServerConfig) -> anyhow::Result<Config> {
     let bind_ip = config.turn_bind.parse::<IpAddr>()?;
-    let port = config
+    let udp_port = config
         .turn_udp_port
         .ok_or_else(|| anyhow::anyhow!("enabled TURN requires a UDP port"))?;
-    let listen = SocketAddr::new(bind_ip, port);
-    let external = turn_external_address(config, port)?;
+    let udp_listen = SocketAddr::new(bind_ip, udp_port);
     let relay_port_range = match (
         config.turn_relay_port_range_start,
         config.turn_relay_port_range_end,
@@ -198,6 +192,65 @@ pub async fn start_turn_runtime(config: &ServerConfig) -> anyhow::Result<Option<
             ));
         }
     };
+    let mut interfaces = vec![Interface::Udp {
+        listen: udp_listen,
+        external: turn_external_address(config, udp_port)?,
+        idle_timeout: 20,
+        mtu: 1500,
+    }];
+
+    if let Some(tls_port) = config.turn_tls_port {
+        let listen = config
+            .turn_tls_bind
+            .ok_or_else(|| anyhow::anyhow!("owned TLS TURN requires a listener address"))?;
+        let certificate_chain = config
+            .turn_tls_cert_file
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("owned TLS TURN requires a certificate file"))?;
+        let private_key = config
+            .turn_tls_key_file
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("owned TLS TURN requires a private key file"))?;
+        interfaces.push(Interface::Tcp {
+            listen,
+            external: turn_external_address(config, tls_port)?,
+            idle_timeout: 20,
+            ssl: Some(Ssl {
+                private_key,
+                certificate_chain,
+            }),
+        });
+    }
+
+    Ok(Config {
+        server: Server {
+            realm: LIVEKIT_REALM.to_string(),
+            port_range: relay_port_range,
+            interfaces,
+            ..Server::default()
+        },
+        ..Config::default()
+    })
+}
+
+/// Starts the configured UDP and optional TLS TURN runtime, or returns `None` when TURN is disabled.
+pub async fn start_turn_runtime(config: &ServerConfig) -> anyhow::Result<Option<TurnRuntime>> {
+    if !config.turn_enabled {
+        return Ok(None);
+    }
+
+    let engine_config = turn_engine_config(config)?;
+    for interface in &engine_config.server.interfaces {
+        match interface {
+            Interface::Udp { listen, .. } => {
+                std::net::UdpSocket::bind(listen)?;
+            }
+            Interface::Tcp { listen, .. } => {
+                std::net::TcpListener::bind(listen)?;
+            }
+        }
+    }
+
     let mut secrets = HashMap::from_iter(
         config
             .api_keys
@@ -205,32 +258,12 @@ pub async fn start_turn_runtime(config: &ServerConfig) -> anyhow::Result<Option<
             .map(|(key, secret)| (key.clone(), secret.clone())),
     );
     secrets.insert(config.api_key.clone(), config.api_secret.clone());
-
-    // `turn-rs` starts its listener in a background task. Bind once here so a
-    // conflicting UDP port fails OxideSFU startup instead of silently leaving
-    // an advertised TURN endpoint unreachable.
-    std::net::UdpSocket::bind(listen)?;
-
     let handler = OxideTurnHandler {
         auth: TurnAuthHandler::new(secrets),
         peer_policy: PeerPolicy::new(
             &config.turn_allow_restricted_peer_cidrs,
             &config.turn_deny_peer_cidrs,
         )?,
-    };
-    let engine_config = Config {
-        server: Server {
-            realm: LIVEKIT_REALM.to_string(),
-            port_range: relay_port_range,
-            interfaces: vec![Interface::Udp {
-                listen,
-                external,
-                idle_timeout: 20,
-                mtu: 1500,
-            }],
-            ..Server::default()
-        },
-        ..Config::default()
     };
 
     let handle = turn_server::spawn_server_with_handler(engine_config, handler).await?;
@@ -239,7 +272,7 @@ pub async fn start_turn_runtime(config: &ServerConfig) -> anyhow::Result<Option<
 
 #[cfg(test)]
 mod tests {
-    use super::{PeerPolicy, start_turn_runtime, turn_external_address};
+    use super::{PeerPolicy, start_turn_runtime, turn_engine_config, turn_external_address};
     use oxidesfu_core::ServerConfig;
 
     #[test]
@@ -271,6 +304,34 @@ mod tests {
                 .parse::<std::net::SocketAddr>()
                 .expect("test address should parse")
         );
+    }
+
+    #[test]
+    fn owned_turn_builds_tls_listener_with_distinct_public_endpoint() {
+        let mut config = ServerConfig::development();
+        config.turn_enabled = true;
+        config.turn_domain = Some("turn.example.net".to_string());
+        config.turn_bind = "0.0.0.0".to_string();
+        config.turn_external_ip = Some("203.0.113.10".to_string());
+        config.turn_udp_port = Some(3479);
+        config.turn_tls_port = Some(443);
+        config.turn_tls_bind = Some("0.0.0.0:5349".parse().expect("test address should parse"));
+        config.turn_tls_cert_file = Some("/run/oxidesfu-secrets/turn-cert.pem".to_string());
+        config.turn_tls_key_file = Some("/run/oxidesfu-secrets/turn-key.pem".to_string());
+
+        let engine_config = turn_engine_config(&config).expect("TURN engine config should build");
+
+        assert_eq!(engine_config.server.interfaces.len(), 2);
+        assert!(engine_config.server.interfaces.iter().any(|interface| matches!(
+            interface,
+            turn_server::config::Interface::Tcp {
+                listen,
+                external,
+                ssl: Some(_),
+                ..
+            } if *listen == "0.0.0.0:5349".parse::<std::net::SocketAddr>().expect("test address should parse")
+                && *external == "203.0.113.10:443".parse::<std::net::SocketAddr>().expect("test address should parse")
+        )));
     }
 
     #[tokio::test]

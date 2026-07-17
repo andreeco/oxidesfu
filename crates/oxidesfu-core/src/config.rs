@@ -44,6 +44,9 @@ const ENV_TURN_CREDENTIAL_TTL_SECONDS: &str = "OXIDESFU_TURN_CREDENTIAL_TTL_SECO
 const ENV_TURN_ALLOW_RESTRICTED_PEER_CIDRS: &str = "OXIDESFU_TURN_ALLOW_RESTRICTED_PEER_CIDRS";
 const ENV_TURN_DENY_PEER_CIDRS: &str = "OXIDESFU_TURN_DENY_PEER_CIDRS";
 const ENV_TURN_TLS_PORT: &str = "OXIDESFU_TURN_TLS_PORT";
+const ENV_TURN_TLS_BIND: &str = "OXIDESFU_TURN_TLS_BIND";
+const ENV_TURN_TLS_CERT_FILE: &str = "OXIDESFU_TURN_TLS_CERT_FILE";
+const ENV_TURN_TLS_KEY_FILE: &str = "OXIDESFU_TURN_TLS_KEY_FILE";
 const ENV_TURN_USERNAME: &str = "OXIDESFU_TURN_USERNAME";
 const ENV_TURN_CREDENTIAL: &str = "OXIDESFU_TURN_CREDENTIAL";
 const ENV_TURN_REQUIRE_REACHABLE: &str = "OXIDESFU_TURN_REQUIRE_REACHABLE";
@@ -309,8 +312,14 @@ pub struct ServerConfig {
     pub turn_external_ip: Option<String>,
     /// Optional TURN UDP port used to synthesize `turn:` URLs.
     pub turn_udp_port: Option<u16>,
-    /// Optional TURN TLS port used to synthesize `turns:` URLs.
+    /// Public TURN TLS port used to synthesize `turns:` URLs.
     pub turn_tls_port: Option<u16>,
+    /// Internal TCP listener for the owned TLS TURN runtime.
+    pub turn_tls_bind: Option<SocketAddr>,
+    /// PEM certificate chain used by the owned TLS TURN runtime.
+    pub turn_tls_cert_file: Option<String>,
+    /// PEM private key used by the owned TLS TURN runtime.
+    pub turn_tls_key_file: Option<String>,
     /// Optional inclusive relay port range start for the owned TURN runtime.
     pub turn_relay_port_range_start: Option<u16>,
     /// Optional inclusive relay port range end for the owned TURN runtime.
@@ -356,6 +365,13 @@ pub struct ServerConfig {
 pub enum ConfigError {
     #[error("invalid bind address in {ENV_BIND}: {value}")]
     InvalidBind { value: String },
+    #[error("invalid socket address in {key}: {value}")]
+    InvalidSocketAddress {
+        key: &'static str,
+        value: String,
+        #[source]
+        source: std::net::AddrParseError,
+    },
     #[error("invalid integer millis in {key}: {value}")]
     InvalidMillis {
         key: &'static str,
@@ -580,6 +596,9 @@ impl ServerConfig {
             turn_external_ip: None,
             turn_udp_port: None,
             turn_tls_port: None,
+            turn_tls_bind: None,
+            turn_tls_cert_file: None,
+            turn_tls_key_file: None,
             turn_relay_port_range_start: None,
             turn_relay_port_range_end: None,
             turn_credential_ttl_seconds: 86_400,
@@ -757,6 +776,15 @@ impl ServerConfig {
         }
         if let Some(turn_tls_port) = lookup(ENV_TURN_TLS_PORT) {
             config.apply_kv(ENV_TURN_TLS_PORT, turn_tls_port)?;
+        }
+        if let Some(value) = lookup(ENV_TURN_TLS_BIND) {
+            config.apply_kv(ENV_TURN_TLS_BIND, value)?;
+        }
+        if let Some(value) = lookup(ENV_TURN_TLS_CERT_FILE) {
+            config.apply_kv(ENV_TURN_TLS_CERT_FILE, value)?;
+        }
+        if let Some(value) = lookup(ENV_TURN_TLS_KEY_FILE) {
+            config.apply_kv(ENV_TURN_TLS_KEY_FILE, value)?;
         }
         if let Some(value) = lookup(ENV_TURN_RELAY_PORT_RANGE_START) {
             config.apply_kv(ENV_TURN_RELAY_PORT_RANGE_START, value)?;
@@ -1144,6 +1172,19 @@ impl ServerConfig {
             {
                 return Err(ConfigError::InvalidTransportConfig {
                     message: "OXIDESFU_TURN_EXTERNAL_IP must be an IP address".to_string(),
+                });
+            }
+            let tls_runtime_configured = self.turn_tls_bind.is_some()
+                || self.turn_tls_cert_file.is_some()
+                || self.turn_tls_key_file.is_some();
+            if (self.turn_tls_port.is_some() || tls_runtime_configured)
+                && (self.turn_tls_port.is_none()
+                    || self.turn_tls_bind.is_none()
+                    || self.turn_tls_cert_file.is_none()
+                    || self.turn_tls_key_file.is_none())
+            {
+                return Err(ConfigError::InvalidTransportConfig {
+                    message: "owned TLS TURN requires OXIDESFU_TURN_TLS_PORT, OXIDESFU_TURN_TLS_BIND, OXIDESFU_TURN_TLS_CERT_FILE, and OXIDESFU_TURN_TLS_KEY_FILE".to_string(),
                 });
             }
             if self.turn_credential_ttl_seconds == 0 {
@@ -1553,6 +1594,23 @@ impl ServerConfig {
                                 source,
                             })?,
                     );
+            }
+            ENV_TURN_TLS_BIND => {
+                self.turn_tls_bind = Some(value.parse::<SocketAddr>().map_err(|source| {
+                    ConfigError::InvalidSocketAddress {
+                        key: ENV_TURN_TLS_BIND,
+                        value,
+                        source,
+                    }
+                })?);
+            }
+            ENV_TURN_TLS_CERT_FILE => {
+                self.turn_tls_cert_file =
+                    (!value.trim().is_empty()).then(|| value.trim().to_string());
+            }
+            ENV_TURN_TLS_KEY_FILE => {
+                self.turn_tls_key_file =
+                    (!value.trim().is_empty()).then(|| value.trim().to_string());
             }
             ENV_TURN_RELAY_PORT_RANGE_START | ARG_TURN_RELAY_PORT_RANGE_START => {
                 self.turn_relay_port_range_start = Some(value.parse::<u16>().map_err(

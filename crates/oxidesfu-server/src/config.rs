@@ -102,9 +102,16 @@ pub fn signal_ice_servers_for_participant(
     let Some(domain) = config.turn_domain.as_deref() else {
         return ice_servers;
     };
-    let Some(udp_port) = config.turn_udp_port else {
+    let mut turn_urls = Vec::new();
+    if let Some(udp_port) = config.turn_udp_port {
+        turn_urls.push(format!("turn:{domain}:{udp_port}?transport=udp"));
+    }
+    if let Some(tls_port) = config.turn_tls_port {
+        turn_urls.push(format!("turns:{domain}:{tls_port}?transport=tcp"));
+    }
+    if turn_urls.is_empty() {
         return ice_servers;
-    };
+    }
 
     let mut secrets = std::collections::HashMap::from_iter(
         config
@@ -127,7 +134,7 @@ pub fn signal_ice_servers_for_participant(
     };
 
     ice_servers.push(proto::IceServer {
-        urls: vec![format!("turn:{domain}:{udp_port}?transport=udp")],
+        urls: turn_urls,
         username,
         credential,
     });
