@@ -32,4 +32,7 @@ if [ -n "${OXIDESFU_TURN_TLS_KEY_FILE:-}" ]; then
   export OXIDESFU_TURN_TLS_KEY_FILE
 fi
 
-exec setpriv --reuid=oxidesfu --regid=oxidesfu --init-groups "$@"
+# Retain only the capability needed to bind the Docker-network TLS TURN
+# listener on :443, preserving the existing Caddy L4 upstream contract.
+exec setpriv --reuid=oxidesfu --regid=oxidesfu --init-groups \
+  --inh-caps +net_bind_service --ambient-caps +net_bind_service "$@"

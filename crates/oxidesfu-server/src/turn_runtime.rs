@@ -163,6 +163,10 @@ impl TurnRuntime {
     }
 }
 
+fn install_tls_crypto_provider() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+}
+
 fn turn_external_address(config: &ServerConfig, port: u16) -> anyhow::Result<SocketAddr> {
     Ok(SocketAddr::new(
         config
@@ -240,6 +244,9 @@ pub async fn start_turn_runtime(config: &ServerConfig) -> anyhow::Result<Option<
     }
 
     let engine_config = turn_engine_config(config)?;
+    if config.turn_tls_port.is_some() {
+        install_tls_crypto_provider();
+    }
     for interface in &engine_config.server.interfaces {
         match interface {
             Interface::Udp { listen, .. } => {
@@ -272,7 +279,10 @@ pub async fn start_turn_runtime(config: &ServerConfig) -> anyhow::Result<Option<
 
 #[cfg(test)]
 mod tests {
-    use super::{PeerPolicy, start_turn_runtime, turn_engine_config, turn_external_address};
+    use super::{
+        PeerPolicy, install_tls_crypto_provider, start_turn_runtime, turn_engine_config,
+        turn_external_address,
+    };
     use oxidesfu_core::ServerConfig;
 
     #[test]
@@ -288,6 +298,13 @@ mod tests {
         let default_policy = PeerPolicy::new(&[], &[]).expect("empty lists should parse");
         assert!(!default_policy.allows("127.0.0.1".parse().expect("IP should parse")));
         assert!(default_policy.allows("8.8.8.8".parse().expect("IP should parse")));
+    }
+
+    #[test]
+    fn owned_tls_turn_selects_the_aws_lc_crypto_provider() {
+        install_tls_crypto_provider();
+
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
     }
 
     #[test]
@@ -307,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn owned_turn_builds_tls_listener_with_distinct_public_endpoint() {
+    fn owned_turn_builds_tls_listener_on_legacy_caddy_upstream_port() {
         let mut config = ServerConfig::development();
         config.turn_enabled = true;
         config.turn_domain = Some("turn.example.net".to_string());
@@ -315,7 +332,7 @@ mod tests {
         config.turn_external_ip = Some("203.0.113.10".to_string());
         config.turn_udp_port = Some(3479);
         config.turn_tls_port = Some(443);
-        config.turn_tls_bind = Some("0.0.0.0:5349".parse().expect("test address should parse"));
+        config.turn_tls_bind = Some("0.0.0.0:443".parse().expect("test address should parse"));
         config.turn_tls_cert_file = Some("/run/oxidesfu-secrets/turn-cert.pem".to_string());
         config.turn_tls_key_file = Some("/run/oxidesfu-secrets/turn-key.pem".to_string());
 
@@ -329,7 +346,7 @@ mod tests {
                 external,
                 ssl: Some(_),
                 ..
-            } if *listen == "0.0.0.0:5349".parse::<std::net::SocketAddr>().expect("test address should parse")
+            } if *listen == "0.0.0.0:443".parse::<std::net::SocketAddr>().expect("test address should parse")
                 && *external == "203.0.113.10:443".parse::<std::net::SocketAddr>().expect("test address should parse")
         )));
     }

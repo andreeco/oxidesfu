@@ -59,6 +59,9 @@ serde_json = "1.0.150"
 serde_yaml_ng = "0.10.0"
 redis = "1.3.0"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
+# turn-rs uses rustls for its owned TLS TURN listener. Select AWS-LC explicitly
+# because the wider WebRTC dependency graph also enables rustls' ring provider.
+rustls = { version = "0.23.41", default-features = false, features = ["aws_lc_rs", "std"] }
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
 tokio-tungstenite = "0.29.0"
