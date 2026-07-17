@@ -7,6 +7,9 @@ use thiserror::Error;
 
 use crate::{ApiKey, ApiSecret};
 
+mod livekit_yaml;
+pub use livekit_yaml::{LiveKitConfigError, LiveKitConfigReport, translate_livekit_yaml};
+
 const ENV_BIND: &str = "OXIDESFU_BIND";
 const ENV_API_KEY: &str = "OXIDESFU_API_KEY";
 const ENV_API_KEY_FILE: &str = "OXIDESFU_API_KEY_FILE";

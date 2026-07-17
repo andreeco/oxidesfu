@@ -1,12 +1,96 @@
-use std::{error::Error, sync::Arc, time::Duration};
+use std::{error::Error, fs, io, sync::Arc, time::Duration};
 
-use oxidesfu_core::{RoomNodeDirectoryBackend, ServerConfig};
+use oxidesfu_core::{RoomNodeDirectoryBackend, ServerConfig, translate_livekit_yaml};
+
+enum Invocation {
+    Serve(Vec<String>),
+    ServeLiveKit(String),
+    CheckLiveKit(String),
+    TranslateLiveKit(String),
+}
+
+fn parse_invocation(args: Vec<String>) -> Result<Invocation, io::Error> {
+    let Some(first) = args.first() else {
+        return Ok(Invocation::Serve(args));
+    };
+    if first == "--livekit-config" {
+        let [_, path] = args.as_slice() else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "usage: oxidesfu-server --livekit-config <livekit.yaml>",
+            ));
+        };
+        return Ok(Invocation::ServeLiveKit(path.clone()));
+    }
+    if first != "config" {
+        return Ok(Invocation::Serve(args));
+    }
+    let [_, command, path] = args.as_slice() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "usage: oxidesfu-server config <check-livekit|translate-livekit> <livekit.yaml>",
+        ));
+    };
+    match command.as_str() {
+        "check-livekit" => Ok(Invocation::CheckLiveKit(path.clone())),
+        "translate-livekit" => Ok(Invocation::TranslateLiveKit(path.clone())),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "unknown config command; expected check-livekit or translate-livekit",
+        )),
+    }
+}
+
+fn run_config_command(invocation: &Invocation) -> Result<bool, Box<dyn Error>> {
+    let (path, translate) = match invocation {
+        Invocation::Serve(_) | Invocation::ServeLiveKit(_) => return Ok(false),
+        Invocation::CheckLiveKit(path) => (path, false),
+        Invocation::TranslateLiveKit(path) => (path, true),
+    };
+    let yaml = fs::read_to_string(path)?;
+    let (config, report) = translate_livekit_yaml(&yaml)?;
+    if translate {
+        // Deliberately omit API secrets. Generated output is a review aid, not a
+        // secret-export mechanism; operators should continue using Docker secrets.
+        println!("OXIDESFU_BIND={}", config.bind);
+        println!("OXIDESFU_ROOM_AUTO_CREATE={}", config.room_auto_create);
+        println!("OXIDESFU_RTC_TCP_PORT={}", config.rtc_tcp_port);
+        if let Some(url) = config.redis_url {
+            println!("OXIDESFU_REDIS_URL={url}");
+        }
+        println!(
+            "# translated LiveKit fields: {}",
+            report.translated.join(", ")
+        );
+    } else {
+        println!("LiveKit configuration is supported by the current strict migration subset.");
+        println!("Translated fields: {}", report.translated.join(", "));
+    }
+    Ok(true)
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    let invocation = parse_invocation(std::env::args().skip(1).collect())?;
+    if run_config_command(&invocation)? {
+        return Ok(());
+    }
+    let config = match invocation {
+        Invocation::Serve(args) => ServerConfig::from_env_args_or_development(args)?,
+        Invocation::ServeLiveKit(path) => {
+            let yaml = fs::read_to_string(path)?;
+            let (config, report) = translate_livekit_yaml(&yaml)?;
+            eprintln!(
+                "starting from strict LiveKit YAML compatibility subset; translated fields: {}",
+                report.translated.join(", ")
+            );
+            config
+        }
+        Invocation::CheckLiveKit(_) | Invocation::TranslateLiveKit(_) => {
+            unreachable!("config commands return before server startup")
+        }
+    };
     oxidesfu_server::init_tracing()?;
-
-    let config = ServerConfig::from_env_args_or_development(std::env::args().skip(1))?;
     oxidesfu_server::validate_turn_runtime_from_config(&config).await?;
     let turn_runtime = oxidesfu_server::start_turn_runtime(&config).await?;
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
@@ -183,4 +267,38 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Invocation, parse_invocation};
+
+    #[test]
+    fn config_check_command_is_dispatched_before_server_startup() {
+        let invocation = parse_invocation(vec![
+            "config".to_string(),
+            "check-livekit".to_string(),
+            "livekit.yaml".to_string(),
+        ])
+        .expect("config command should parse");
+        assert!(matches!(invocation, Invocation::CheckLiveKit(path) if path == "livekit.yaml"));
+    }
+
+    #[test]
+    fn livekit_config_startup_mode_requires_only_the_yaml_path() {
+        let invocation = parse_invocation(vec![
+            "--livekit-config".to_string(),
+            "livekit.yaml".to_string(),
+        ])
+        .expect("LiveKit startup mode should parse");
+        assert!(matches!(invocation, Invocation::ServeLiveKit(path) if path == "livekit.yaml"));
+        assert!(parse_invocation(vec!["--livekit-config".to_string()]).is_err());
+    }
+
+    #[test]
+    fn ordinary_server_arguments_remain_unchanged() {
+        let args = vec!["--bind".to_string(), "127.0.0.1:7880".to_string()];
+        let invocation = parse_invocation(args.clone()).expect("server arguments should parse");
+        assert!(matches!(invocation, Invocation::Serve(actual) if actual == args));
+    }
 }
