@@ -322,7 +322,7 @@ Before implementation:
 This phase is useful even before new server behaviour: it prevents unsafe
 migrations and tells an operator exactly why a project cannot move yet.
 
-### Phase 2 — deterministic single-node translation 🚧
+### Phase 2 — deterministic single-node translation 🚧 (management-plane proof complete)
 
 1. Implement a translation output suitable for Compose, such as an escaped
    `.env` file or structured JSON; do not use shell interpolation as the API.
@@ -362,7 +362,7 @@ TURN/TLS, Redis HA, and ingress/egress are separate larger projects.
 The strategy is to run and close one migration/runtime slice at a time, each
 with tests and conformance evidence before moving on.
 
-### Slice A — make upstream sample pass checker (highest priority)
+### Slice A — external-IP YAML compatibility ✅
 
 **Current blocker discovered:**
 
@@ -378,10 +378,13 @@ with tests and conformance evidence before moving on.
 3. Add startup diagnostics and failure classification when discovery fails.
 4. Add unit tests plus integration coverage for candidate advertisement.
 
-**Done when:** upstream sample no longer fails this mismatch for that field and
-candidate behavior is tested.
+**Completed:** the upstream sample passes the checker; explicit `node_ip` is
+preserved as the override; missing node IP performs startup STUN discovery;
+and host ICE candidates advertise the configured/discovered external address
+while retaining their local socket address for packet routing. See the active
+record below for commits and remaining multi-interface/network validation.
 
-### Slice B — real process + YAML + `lk` room API smoke
+### Slice B — real process + YAML + `lk` room API smoke ✅
 
 **Work:**
 
@@ -389,7 +392,10 @@ candidate behavior is tested.
 2. Add black-box test: healthz + `lk room create/list/delete` against the YAML
    startup process.
 
-**Done when:** one redacted single-node fixture passes repeatably.
+**Completed:** `crates/oxidesfu-test/src/harness/livekit_yaml_process.rs`
+writes a secret-free temporary fixture, starts the compiled server with
+`--livekit-config`, waits for health readiness, and uses `lk` with explicit
+URL/key/secret to create, list, and delete a room.
 
 ### Slice C — Redis + YAML single-node deployment contract
 
@@ -446,13 +452,15 @@ contracts.
 
 ## Active handoff: Slice A external-IP compatibility
 
-**State at handoff:** investigation and a partial OxideSFU implementation are
-present in the working tree. Do not claim `rtc.use_external_ip` compatibility
-complete yet.
+**Status (2026-07-17):** the candidate-mapping pipeline is committed and its
+nested dependencies are published. Slice A is complete for the current
+single-bind listener topology. Do not claim multi-interface or public-network
+parity yet.
 
-### What is implemented locally but not committed
+### Completed implementation and published revisions
 
-The current OxideSFU working tree contains these Slice A changes:
+The completed Slice A changes are recorded in OxideSFU commits
+`248d3dd3` and `f8ad87db`:
 
 - `ServerConfig` no longer rejects `rtc_use_external_ip=true` solely because
   `rtc_node_ip` is absent.
@@ -479,31 +487,33 @@ cargo run -p oxidesfu-server -- \
 The upstream sample now passes the **configuration checker**, but that does not
 prove usable public ICE candidates.
 
-### Critical WebRTC finding
+### Resolved WebRTC mapping finding
 
-The currently pinned outer WebRTC fork is:
+OxideSFU now pins the published outer WebRTC fork:
 
 ```text
-andreeco/webrtc @ a1f15cd14b3ea6555c49702bd1d7c8e3fd793fff
+andreeco/webrtc @ 6180766670e5a72a37a5b57ece067e021d69f443
 ```
 
-Local inspection found that the existing setting API is currently ineffective:
+Its nested RTC dependency is `andreeco/rtc @ 4018164`, both published on
+`oxidesfu/external-ip-candidate-mappings`.
 
-1. OxideSFU calls `SettingEngine::set_nat_1to1_ips` in
-   `crates/oxidesfu-rtc/src/peer_connection.rs`.
-2. The outer WebRTC setting engine stores these strings in
-   `setting_engine.candidates.nat_1to1_ips`:
-   `webrtc/rtc/rtc/src/peer_connection/configuration/setting_engine.rs`.
-3. `RTCPeerConnection::new` constructs `rtc_ice::AgentConfig` without
-   forwarding those NAT settings:
-   `webrtc/rtc/rtc/src/peer_connection/internal.rs`.
-4. `rtc_ice::AgentConfig` has no NAT mapping field:
-   `webrtc/rtc/rtc-ice/src/agent/agent_config.rs`.
+The prior public-IP-only `set_nat_1to1_ips(Vec<String>, CandidateType)` API
+was stored but never reached the ICE agent and could not represent an interface
+mapping. The published replacement is `Nat1To1IpMapping { local_ip,
+external_ip }`:
 
-Therefore neither the old static OxideSFU `rtc_node_ip` path nor the new
-STUN-discovered address is currently proven to rewrite ICE host candidates.
-The current public-IP-only `set_nat_1to1_ips(Vec<String>, CandidateType)` API
-also cannot represent LiveKit-style per-interface mappings.
+1. `rtc-ice::AgentConfig` owns typed mappings.
+2. outer `SettingEngine::set_nat_1to1_ip_mappings` forwards them through
+   `RTCPeerConnection::new`.
+3. matching host candidates replace only their advertised address; their
+   `resolved_addr` remains the local socket address used for ICE I/O.
+4. Oxide derives mappings from each configured UDP bind address and its
+   configured/discovered external address.
+
+Nested ICE, outer peer-connection event, and Oxide emitted-candidate tests
+prove that mapped host candidates serialize the external address and do not
+leak the wildcard/private advertised address.
 
 ### Upstream behavior reference
 
@@ -527,47 +537,21 @@ Relevant source map from that revision and its pinned
   - unresolved mapping discovery degrades to a discovered/configured node-IP
     fallback, while invalid setup/bind conditions remain fatal.
 
-### Required next implementation: WebRTC mapping pipeline
+### Remaining external-IP work
 
 Do **not** merely remove validation or advertise one discovered address
 blindly. Implement this sequence:
 
-1. In the nested `webrtc/rtc` repository, add a typed NAT mapping model to
-   `rtc-ice::AgentConfig`, representing at minimum:
-
-   ```text
-   local IP -> external IP
-   candidate mode: host replacement or server-reflexive
-   ```
-
-2. Carry mappings from the outer WebRTC `SettingEngine` through
-   `RTCPeerConnection::new` into `AgentConfig`.
-
-3. Apply mappings during host candidate gathering. A candidate must retain its
-   local socket/base address for packets and connectivity while advertising the
-   mapped external address in signalling/SDP.
-
-4. Add nested RTC tests for:
-   - one local/external host mapping;
-   - multiple independent mappings;
-   - unmapped local interface behavior;
-   - invalid/missing local mapping rejection;
-   - candidate serialization proving no private host address leaks in host
-     replacement mode.
-
-5. Commit and publish the nested RTC change, update the outer WebRTC submodule,
-   then commit and publish the outer fork. OxideSFU must pin only the published
-   outer commit, never a local path dependency.
-
-6. In OxideSFU, replace the temporary global STUN result with source-bound,
-   per-interface mapping discovery and pass mappings into the new WebRTC API.
-
-7. Add OxideSFU tests:
-   - deterministic mock-STUN success/retry/timeout tests;
-   - explicit `node_ip` override behavior;
-   - RTC transport mapping handoff;
-   - real external deployment candidate/connection contract from a separate
-     host, VM, or network namespace.
+1. Enumerate each concrete local interface when the RTC listener uses a
+   wildcard bind, then perform source-bound STUN discovery and pass one mapping
+   per interface. The current implementation source-binds discovery for a
+   concrete configured RTC bind and maps the current wildcard listener shape,
+   but it does not enumerate interfaces.
+2. Add deterministic STUN retry/timeout and explicit-node-IP regression tests.
+3. Add a real external deployment contract from a separate host, VM, or network
+   namespace proving public candidate connectivity.
+4. Add server-reflexive mapping mode only when a compatibility contract requires
+   it; current LiveKit-compatible host replacement is deliberately explicit.
 
 ### Handoff cautions
 
