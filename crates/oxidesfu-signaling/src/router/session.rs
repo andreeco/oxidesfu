@@ -8846,9 +8846,11 @@ pub(super) async fn reconcile_publisher_media_tracks_after_answer(
         .iter()
         .filter_map(|section| section.kind.map(|kind| (section.mid.clone(), kind)))
         .collect::<HashMap<_, _>>();
-    let explicitly_removed_mids = offer_sections
+    let sender_removed_mids = offer_sections
         .iter()
-        .filter(|section| section.direction == "inactive")
+        .filter(|section| {
+            section.direction == "inactive" || (!single_pc_mode && section.direction == "recvonly")
+        })
         .map(|section| section.mid.clone())
         .collect::<HashSet<_>>();
 
@@ -8927,7 +8929,7 @@ pub(super) async fn reconcile_publisher_media_tracks_after_answer(
                 && track.codecs.iter().any(|codec| !codec.sdp_cid.is_empty())
                 && offered_mids.contains(&track.mid)
                 && !active_mids.contains(&track.mid)
-                && explicitly_removed_mids.contains(&track.mid);
+                && sender_removed_mids.contains(&track.mid);
 
             let is_uniquely_unbound_dual_pc_track = !single_pc_mode
                 && track.mid.is_empty()
@@ -8939,7 +8941,7 @@ pub(super) async fn reconcile_publisher_media_tracks_after_answer(
                         } else {
                             ReceiveSectionKind::Audio
                         })
-                        && explicitly_removed_mids.contains(&section.mid)
+                        && sender_removed_mids.contains(&section.mid)
                 })
                 && publisher
                     .tracks
@@ -8969,7 +8971,7 @@ pub(super) async fn reconcile_publisher_media_tracks_after_answer(
             track_mid = %track.mid,
             active_mids = ?active_mids,
             offered_mids = ?offered_mids,
-            explicitly_removed_mids = ?explicitly_removed_mids,
+            sender_removed_mids = ?sender_removed_mids,
             offer_sections = ?offer_sections.iter().map(|section| (&section.mid, &section.direction, section.is_rejected)).collect::<Vec<_>>(),
             "removing_stale_publisher_track"
         );
@@ -9152,8 +9154,20 @@ async fn relay_data_track_packet_with_rooms(
             );
             continue;
         };
-        channel.send_bytes(&packet).await?;
-        sent += 1;
+        match channel.send_bytes(&packet).await {
+            Ok(()) => sent += 1,
+            Err(error) => {
+                tracing::debug!(
+                    room = %room_name,
+                    publisher_identity,
+                    pub_handle,
+                    subscriber_identity,
+                    sub_handle,
+                    error = %error,
+                    "data_track_relay_subscriber_send_failed"
+                );
+            }
+        }
     }
     tracing::trace!(
         room = %room_name,
@@ -9194,8 +9208,18 @@ async fn relay_data_track_packet(
         let Some(packet) = rewrite_data_track_packet_handle(&bytes, sub_handle) else {
             continue;
         };
-        channel.send_bytes(&packet).await?;
-        sent += 1;
+        match channel.send_bytes(&packet).await {
+            Ok(()) => sent += 1,
+            Err(error) => {
+                tracing::debug!(
+                    room = %room_name,
+                    publisher_identity,
+                    sub_handle,
+                    error = %error,
+                    "data_track_relay_subscriber_send_failed"
+                );
+            }
+        }
     }
 
     Ok(sent)

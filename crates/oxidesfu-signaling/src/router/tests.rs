@@ -6767,6 +6767,58 @@ async fn reconcile_publisher_media_tracks_after_answer_removes_dual_pc_track_whe
 }
 
 #[tokio::test]
+async fn reconcile_publisher_media_tracks_removes_dual_pc_track_when_sender_becomes_recvonly() {
+    let state = state();
+    let room = "reconcile-recvonly-removes-negotiated-room";
+    let publisher = "publisher";
+
+    join_participant_for_data_track_test(&state, room, publisher);
+    let response = add_track_response(
+        &state,
+        room,
+        publisher,
+        proto::AddTrackRequest {
+            cid: "audio-cid-reconcile-recvonly".to_string(),
+            name: "mic".to_string(),
+            r#type: proto::TrackType::Audio as i32,
+            source: proto::TrackSource::Microphone as i32,
+            ..Default::default()
+        },
+    )
+    .await;
+    let Some(proto::signal_response::Message::TrackPublished(track_published)) = response.message
+    else {
+        panic!("expected TrackPublished response");
+    };
+    let published_track = track_published.track.expect("track info should be present");
+
+    let unpublish_offer_sdp = "v=0\r\n\
+            m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+            a=mid:0\r\n\
+            a=recvonly\r\n";
+    reconcile_publisher_media_tracks_after_answer(
+        &state,
+        room,
+        publisher,
+        unpublish_offer_sdp,
+        &HashMap::new(),
+        &HashMap::new(),
+        false,
+    )
+    .await;
+
+    let participant_after = state
+        .rooms
+        .get_participant(room, publisher)
+        .expect("publisher should still exist");
+    assert!(
+        participant_after.tracks.is_empty(),
+        "a dual-PC publisher's recvonly section must unpublish its uniquely matching unbound track; expected removal of {}",
+        published_track.sid
+    );
+}
+
+#[tokio::test]
 async fn reconcile_publisher_media_tracks_keeps_single_pc_unbound_track_for_inactive_reserve() {
     let state = state();
     let room = "reconcile-single-pc-recvonly-reserve-room";

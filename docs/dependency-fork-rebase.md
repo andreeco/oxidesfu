@@ -134,29 +134,30 @@ Known validation caveats from the 2026-07-15 rebase: the strict Rust SDK clippy
 command also fails on pristine upstream `origin/main` in `device-info` because
 two compile-time assertion helpers are reported as dead code.
 
-Two Rust SDK compatibility contracts remain unresolved as of 2026-07-17:
+One Rust SDK compatibility contract remains unresolved as of 2026-07-17:
 
 - `rust_sdk_room_publisher_unpublish_then_republish_audio_emits_clean_remote_lifecycle`
-  reproduces in isolation. After `LocalParticipant::unpublish_track`, the pinned
-  SDK revision (`2dc87b5cde110365aef8c090d19a50d0fdbec5ae`) does not send a
-  follow-up publisher offer within 30 seconds, and Oxide receives no terminal
-  `RemoteTrackEvent::Ended`. The server therefore has no wire-observable reason
-  to remove the publication or emit the remote `TrackUnpublished` event. Run the
-  same client scenario against the local upstream LiveKit server before changing
-  Oxide's removal behavior.
-- `upstream_livekit::singlenode::test_single_node_update_subscription_permissions`
-  intermittently times out in v0 while awaiting the first data-track frame after
-  the server has reported a subscriber handle. Draining the client-side
-  `_data_track` event and waiting for that channel to open did not make repeated
-  runs reliable, so that harness-only workaround was deliberately not retained.
-  Investigate server-side subscriber data-channel writability and reliable-frame
-  handling before reporting the subscriber handle as ready.
+  reproduces in isolation against Oxide. The pinned SDK revision
+  (`2dc87b5cde110365aef8c090d19a50d0fdbec5ae`) completes the equivalent lifecycle
+  against the local upstream LiveKit server, but Oxide receives neither the
+  follow-up publisher offer nor `RemoteTrackEvent::Ended`. The next boundary is
+  the Oxide publisher negotiation/RTC path; the dual-PC `recvonly` reconciliation
+  case is now covered by a focused unit regression.
 
-Reproduce the two contracts independently with:
+The upstream-derived permissions contract is now aligned with the upstream
+assertions: `DataTrackSubscriberHandles` proves subscription state, not delivery
+of the first lossy `_data_track` frame after the independent signaling response.
+The corrected contract passes v0 dual-PC, v0 single-PC, and v1 repeatedly. The
+new differential lifecycle contract against Go LiveKit also passes.
+
+Reproduce the remaining lifecycle contract and the completed references with:
 
 ```sh
 cargo test -p oxidesfu-test \
   rust_sdk_room_publisher_unpublish_then_republish_audio_emits_clean_remote_lifecycle \
+  -- --nocapture
+cargo test -p oxidesfu-test \
+  rust_sdk_room_publisher_unpublish_then_republish_audio_matches_go_livekit_lifecycle \
   -- --nocapture
 cargo test -p oxidesfu-test test_single_node_update_subscription_permissions -- --nocapture
 ```

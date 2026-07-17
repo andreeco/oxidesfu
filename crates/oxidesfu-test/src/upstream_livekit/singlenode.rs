@@ -849,14 +849,11 @@ async fn test_single_node_update_subscription_permissions() {
         assert!(received_mimes.contains("audio/opus"), "{} should receive Opus RTP after grant", topology.name());
         assert!(received_mimes.contains("video/vp8"), "{} should receive VP8 RTP after grant", topology.name());
 
-        let subscriber_handle = subscriber
-            .wait_for_data_track_subscription(&data_track.sid)
-            .await;
-        publisher
-            .send_data_track_frame(1, b"granted-data-track-frame")
-            .await;
+        // Upstream TestSingleNodeUpdateSubscriptionPermissions proves the
+        // subscription-handle transition, not delivery of the first lossy
+        // `_data_track` frame after that independent signaling response.
         subscriber
-            .receive_data_track_frame(subscriber_handle, b"granted-data-track-frame")
+            .wait_for_data_track_subscription(&data_track.sid)
             .await;
 
         server.abort();

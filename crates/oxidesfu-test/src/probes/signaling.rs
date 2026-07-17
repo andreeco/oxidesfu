@@ -971,6 +971,192 @@ use super::*;
         let _ = bob_room.close().await;
         server.abort();
     }
+
+    #[tokio::test]
+    async fn rust_sdk_room_publisher_unpublish_then_republish_audio_matches_go_livekit_lifecycle() {
+        let Some((mut go_livekit, go_base_url)) =
+            spawn_ready_go_livekit_server_with_single_respawn()
+                .await
+                .expect("go livekit server should become ready for audio lifecycle contract")
+        else {
+            eprintln!("skipping Go LiveKit audio lifecycle contract because go is not on PATH");
+            return;
+        };
+
+        let room_name = format!("go-sdk-audio-unpublish-republish-{}", unique_suffix());
+        let alice_token = AccessToken::with_api_key(API_KEY, API_SECRET)
+            .with_identity("go-sdk-audio-unpublish-republish-alice")
+            .with_name("Go SDK Audio Unpublish Republish Alice")
+            .with_grants(VideoGrants {
+                room_join: true,
+                room: room_name.clone(),
+                can_publish: true,
+                can_subscribe: true,
+                ..Default::default()
+            })
+            .to_jwt()
+            .expect("alice token should encode");
+        let bob_token = AccessToken::with_api_key(API_KEY, API_SECRET)
+            .with_identity("go-sdk-audio-unpublish-republish-bob")
+            .with_name("Go SDK Audio Unpublish Republish Bob")
+            .with_grants(VideoGrants {
+                room_join: true,
+                room: room_name,
+                can_publish: true,
+                can_subscribe: true,
+                ..Default::default()
+            })
+            .to_jwt()
+            .expect("bob token should encode");
+
+        let mut options = RoomOptions::default();
+        options.single_peer_connection = false;
+        options.connect_timeout = Duration::from_secs(10);
+
+        let (alice_room, mut alice_events) = Room::connect(&go_base_url, &alice_token, options.clone())
+            .await
+            .expect("alice room should connect to Go LiveKit");
+        let (bob_room, mut bob_events) = Room::connect(&go_base_url, &bob_token, options)
+            .await
+            .expect("bob room should connect to Go LiveKit");
+        wait_for_room_connected(&mut alice_events).await;
+        wait_for_room_connected(&mut bob_events).await;
+
+        let source = NativeAudioSource::new(AudioSourceOptions::default(), 48_000, 1, 1_000);
+        let first_track =
+            LocalAudioTrack::create_audio_track("mic-1", RtcAudioSource::Native(source.clone()));
+        let first_publication = alice_room
+            .local_participant()
+            .publish_track(
+                LocalTrack::Audio(first_track),
+                TrackPublishOptions::default(),
+            )
+            .await
+            .expect("alice should publish first audio track to Go LiveKit");
+        let first_sid = first_publication.sid();
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let event = bob_events
+                    .recv()
+                    .await
+                    .expect("bob room events should stay open");
+                if let RoomEvent::TrackSubscribed { publication, .. } = event
+                    && publication.sid() == first_sid
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("bob should subscribe to first Go LiveKit track");
+
+        let _ = alice_room
+            .local_participant()
+            .unpublish_track(&first_sid)
+            .await
+            .expect("alice should unpublish first Go LiveKit track");
+
+        let unpublished_sid = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let event = bob_events
+                    .recv()
+                    .await
+                    .expect("bob room events should stay open");
+                if let RoomEvent::TrackUnpublished { publication, .. } = event {
+                    break publication.sid();
+                }
+            }
+        })
+        .await
+        .expect("bob should receive TrackUnpublished for first Go LiveKit track");
+        assert_eq!(unpublished_sid, first_sid);
+
+        let second_track =
+            LocalAudioTrack::create_audio_track("mic-2", RtcAudioSource::Native(source.clone()));
+        let second_publication = alice_room
+            .local_participant()
+            .publish_track(
+                LocalTrack::Audio(second_track),
+                TrackPublishOptions::default(),
+            )
+            .await
+            .expect("alice should republish second audio track to Go LiveKit");
+        let second_sid = second_publication.sid();
+        assert_ne!(second_sid, first_sid);
+
+        let second_audio_track = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let event = bob_events
+                    .recv()
+                    .await
+                    .expect("bob room events should stay open");
+                if let RoomEvent::TrackSubscribed {
+                    track, publication, ..
+                } = event
+                    && publication.sid() == second_sid
+                    && let livekit::track::RemoteTrack::Audio(audio_track) = track
+                {
+                    break audio_track;
+                }
+            }
+        })
+        .await
+        .expect("bob should subscribe to republished Go LiveKit audio track");
+
+        let duplicate_second_subscribed = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let event = bob_events
+                    .recv()
+                    .await
+                    .expect("bob room events should stay open");
+                if let RoomEvent::TrackSubscribed { publication, .. } = event
+                    && publication.sid() == second_sid
+                {
+                    break true;
+                }
+            }
+        })
+        .await;
+        assert!(
+            duplicate_second_subscribed.is_err(),
+            "Go LiveKit republish cycle should not create duplicate TrackSubscribed events"
+        );
+
+        let mut second_stream = NativeAudioStream::new(second_audio_track.rtc_track(), 48_000, 1);
+        let second_frame = AudioFrame {
+            data: vec![725_i16; 480].into(),
+            sample_rate: 48_000,
+            num_channels: 1,
+            samples_per_channel: 480,
+        };
+        let second_received = tokio::time::timeout(Duration::from_secs(5), async {
+            for _ in 0..40 {
+                source
+                    .capture_frame(&second_frame)
+                    .await
+                    .expect("audio frame should be accepted by source");
+                if let Ok(next) =
+                    tokio::time::timeout(Duration::from_millis(100), second_stream.next()).await
+                    && next.is_some()
+                {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .expect("Go LiveKit republished audio frame probe should finish");
+        assert!(
+            second_received,
+            "Go LiveKit republished audio should deliver media"
+        );
+
+        let _ = alice_room.close().await;
+        let _ = bob_room.close().await;
+        let _ = go_livekit.kill().await;
+    }
+
     #[tokio::test]
     async fn wait_for_room_service_ready_with_retry_handles_delayed_server_start() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
