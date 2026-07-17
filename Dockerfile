@@ -16,10 +16,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /src
 COPY . .
 
+# The target directory is a BuildKit cache mount, so copy the finished binary
+# outside it for the runtime stage after the build completes.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \
-    cargo build -p oxidesfu-server --bin oxidesfu-server --release --locked
+    cargo build -p oxidesfu-server --bin oxidesfu-server --release --locked && \
+    install -D /src/target/release/oxidesfu-server /out/oxidesfu-server
 
 ############################
 # Runtime stage
@@ -35,11 +38,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN useradd --system --create-home --uid 10001 --shell /usr/sbin/nologin oxidesfu
 
 WORKDIR /app
-COPY --from=builder /src/target/release/oxidesfu-server /app/oxidesfu-server
+COPY --from=builder /out/oxidesfu-server /app/oxidesfu-server
+COPY docker-entrypoint.sh /usr/local/bin/oxidesfu-entrypoint
 
-RUN chmod +x /app/oxidesfu-server && chown -R oxidesfu:oxidesfu /app
+RUN chmod +x /app/oxidesfu-server /usr/local/bin/oxidesfu-entrypoint && \
+    chown -R oxidesfu:oxidesfu /app
 
-USER oxidesfu:oxidesfu
+# Start as root only long enough to copy Docker secret mounts into an
+# oxidesfu-owned private directory; docker-entrypoint.sh then drops privileges
+# before executing the server.
 
 # HTTP/Twirp/WebSocket signaling endpoint. The native development default is
 # loopback-only, so the image supplies a container-safe default through the
@@ -54,4 +61,4 @@ ENV RUST_LOG=info \
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
     CMD ["curl", "--fail", "--silent", "http://127.0.0.1:7880/healthz"]
 
-ENTRYPOINT ["/usr/bin/tini", "--", "/app/oxidesfu-server"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/oxidesfu-entrypoint", "/app/oxidesfu-server"]
