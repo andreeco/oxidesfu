@@ -17,7 +17,7 @@ use rtc::{
     media_stream::MediaStreamTrack,
     peer_connection::configuration::media_engine::{
         MIME_TYPE_AV1, MIME_TYPE_H264, MIME_TYPE_OPUS, MIME_TYPE_PCMA, MIME_TYPE_PCMU,
-        MIME_TYPE_VP8, MIME_TYPE_VP9,
+        MIME_TYPE_RED, MIME_TYPE_VP8, MIME_TYPE_VP9,
     },
     rtp_transceiver::{
         RTCRtpTransceiverDirection, RTCRtpTransceiverInit,
@@ -567,6 +567,70 @@ impl PeerConnection {
         Ok(())
     }
 
+    /// Prefers RED before Opus for the specified publisher audio media sections.
+    ///
+    /// Call this after applying a remote offer and before creating its answer. The preference is
+    /// installed on the underlying transceiver, keeping its negotiated codec state aligned with
+    /// the generated SDP.
+    pub async fn prefer_audio_red_by_mid<'a>(
+        &self,
+        mids: impl IntoIterator<Item = &'a str>,
+    ) -> RtcResult<()> {
+        let mids = mids.into_iter().collect::<std::collections::HashSet<_>>();
+        if mids.is_empty() {
+            return Ok(());
+        }
+
+        for transceiver in self.inner.get_transceivers().await {
+            let Some(mid) = transceiver.mid().await? else {
+                continue;
+            };
+            if !mids.contains(mid.as_str()) {
+                continue;
+            }
+            let Some(receiver) = transceiver.receiver().await? else {
+                continue;
+            };
+            let mut codecs = receiver.get_parameters().await?.rtp_parameters.codecs;
+            let has_opus = codecs.iter().any(|codec| {
+                codec
+                    .rtp_codec
+                    .mime_type
+                    .eq_ignore_ascii_case(MIME_TYPE_OPUS)
+            });
+            let has_red = codecs.iter().any(|codec| {
+                codec
+                    .rtp_codec
+                    .mime_type
+                    .eq_ignore_ascii_case(MIME_TYPE_RED)
+            });
+            if !has_opus || !has_red {
+                continue;
+            }
+
+            codecs.sort_by_key(|codec| {
+                if codec
+                    .rtp_codec
+                    .mime_type
+                    .eq_ignore_ascii_case(MIME_TYPE_RED)
+                {
+                    0
+                } else if codec
+                    .rtp_codec
+                    .mime_type
+                    .eq_ignore_ascii_case(MIME_TYPE_OPUS)
+                {
+                    1
+                } else {
+                    2
+                }
+            });
+            transceiver.set_codec_preferences(codecs).await?;
+        }
+
+        Ok(())
+    }
+
     /// Forces existing transceivers with the provided MIDs to receive-only.
     pub async fn set_transceivers_recvonly_by_mid<'a>(
         &self,
@@ -947,6 +1011,51 @@ mod tests {
         assert!(offer.to_ascii_lowercase().contains("h264/90000"));
         assert!(offer.contains("profile-level-id=42e01f"));
         assert!(offer.contains("packetization-mode=1"));
+    }
+
+    #[tokio::test]
+    async fn publisher_audio_red_preference_is_applied_before_answer_generation() {
+        let publisher = create_peer_connection()
+            .await
+            .expect("publisher peer connection should create");
+        let answerer = create_peer_connection()
+            .await
+            .expect("answerer peer connection should create");
+
+        let offer_sdp = publisher
+            .create_audio_offer()
+            .await
+            .expect("audio offer should create");
+        answerer
+            .set_remote_offer(offer_sdp)
+            .await
+            .expect("remote audio offer should apply");
+        answerer
+            .prefer_audio_red_by_mid(["0"])
+            .await
+            .expect("RED preference should apply");
+
+        let answer_sdp = answerer
+            .create_answer()
+            .await
+            .expect("answer should create");
+        let audio_media_line = answer_sdp
+            .lines()
+            .find(|line| line.starts_with("m=audio "))
+            .expect("answer should contain audio media line");
+        let payloads = audio_media_line.split_whitespace().collect::<Vec<_>>();
+        let red_position = payloads
+            .iter()
+            .position(|payload| *payload == "63")
+            .expect("answer should negotiate RED payload type");
+        let opus_position = payloads
+            .iter()
+            .position(|payload| *payload == "111")
+            .expect("answer should negotiate Opus payload type");
+        assert!(red_position < opus_position, "{answer_sdp}");
+
+        publisher.close().await.expect("publisher should close");
+        answerer.close().await.expect("answerer should close");
     }
 
     #[tokio::test]

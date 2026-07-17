@@ -3126,6 +3126,42 @@ fn offer_advertises_ice_trickle(offer_sdp: &str) -> bool {
         .any(|line| line.trim() == "a=ice-options:trickle")
 }
 
+fn audio_red_mids_from_offer_sdp(offer_sdp: &str) -> Vec<String> {
+    offer_sdp
+        .split("m=")
+        .skip(1)
+        .filter_map(|section| {
+            let mut lines = section.lines();
+            lines.next()?.starts_with("audio ").then_some(())?;
+            let lines = lines.collect::<Vec<_>>();
+            let mid = lines.iter().find_map(|line| line.strip_prefix("a=mid:"))?;
+            let opus_payload_type = lines.iter().find_map(|line| {
+                let value = line.strip_prefix("a=rtpmap:")?;
+                let (payload_type, codec) = value.split_once(char::is_whitespace)?;
+                codec
+                    .split('/')
+                    .next()?
+                    .eq_ignore_ascii_case("opus")
+                    .then_some(payload_type)
+            })?;
+            let red_payload_type = lines.iter().find_map(|line| {
+                let value = line.strip_prefix("a=rtpmap:")?;
+                let (payload_type, codec) = value.split_once(char::is_whitespace)?;
+                codec
+                    .split('/')
+                    .next()?
+                    .eq_ignore_ascii_case("red")
+                    .then_some(payload_type)
+            })?;
+            lines
+                .iter()
+                .find_map(|line| line.strip_prefix(&format!("a=fmtp:{red_payload_type} ")))
+                .is_some_and(|fmtp| fmtp.split('/').any(|payload| payload == opus_payload_type))
+                .then_some(mid.to_string())
+        })
+        .collect()
+}
+
 fn sdp_line_without_ending(raw_line: &str) -> &str {
     raw_line.trim_end_matches(['\r', '\n'])
 }
@@ -5401,6 +5437,11 @@ pub(crate) async fn answer_publisher_offer(
             .set_transceivers_recvonly_by_mid(publisher_mids.iter().map(String::as_str))
             .await
             .map_err(|err| prost::DecodeError::new(err.to_string()))?;
+        let red_mids = audio_red_mids_from_offer_sdp(&offer_sdp);
+        existing_peer_connection
+            .prefer_audio_red_by_mid(red_mids.iter().map(String::as_str))
+            .await
+            .map_err(|err| prost::DecodeError::new(err.to_string()))?;
         let attached_mid_to_track_id = attach_receive_section_forwarding_to_single_pc(
             state,
             room_name,
@@ -5568,6 +5609,11 @@ pub(crate) async fn answer_publisher_offer(
         .collect::<Vec<_>>();
     peer_connection
         .set_transceivers_recvonly_by_mid(publisher_mids.iter().map(String::as_str))
+        .await
+        .map_err(|err| prost::DecodeError::new(err.to_string()))?;
+    let red_mids = audio_red_mids_from_offer_sdp(&offer_sdp);
+    peer_connection
+        .prefer_audio_red_by_mid(red_mids.iter().map(String::as_str))
         .await
         .map_err(|err| prost::DecodeError::new(err.to_string()))?;
     let attached_mid_to_track_id = attach_receive_section_forwarding_to_single_pc(
@@ -8966,7 +9012,12 @@ pub(super) async fn reconcile_publisher_media_tracks_after_answer(
         .tracks
         .iter()
         .filter(|track| {
-            let is_bound_to_removed_mid = !track.mid.is_empty()
+            // A single-PC client reserves and repurposes media sections while
+            // it negotiates subscriber forwarding. SDP direction alone is not
+            // authoritative evidence that its published sender ended; remove
+            // that publication when its remote WebRTC track closes instead.
+            let is_bound_to_removed_mid = !single_pc_mode
+                && !track.mid.is_empty()
                 && track.codecs.iter().any(|codec| !codec.sdp_cid.is_empty())
                 && offered_mids.contains(&track.mid)
                 && !active_mids.contains(&track.mid)
