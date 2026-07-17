@@ -730,11 +730,14 @@ async fn spawn_oxidesfu_benchmark_server(
     }
 
     let bind = format!("127.0.0.1:{bind_port}");
+    let rtc_tcp_port = reserve_local_port();
     let mut command = tokio::process::Command::new(oxidesfu_benchmark_server_binary_path());
     command.kill_on_drop(true);
     command
         .arg("--bind")
         .arg(&bind)
+        .arg("--rtc-tcp-port")
+        .arg(rtc_tcp_port.to_string())
         .arg("--api-key")
         .arg(API_KEY)
         .arg("--api-secret")
