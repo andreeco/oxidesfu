@@ -3413,6 +3413,9 @@ fn reorder_section_media_line_payloads_for_preferred_codec(
         .collect::<Vec<_>>();
 
     if preferred_payload_types.is_empty() {
+        if preferred_codec == "red" {
+            reorder_section_media_line_payloads_for_preferred_codec(section, "audio/opus");
+        }
         return;
     }
 
@@ -3437,12 +3440,34 @@ fn reorder_section_media_line_payloads_for_preferred_codec(
         return;
     }
 
-    let mut reordered = preferred;
-    reordered.extend(
-        payloads
-            .into_iter()
-            .filter(|payload| !preferred_payload_types.contains(payload)),
-    );
+    let dependent_payload_types = if preferred_codec == "red" {
+        section
+            .iter()
+            .filter_map(|line| {
+                let value = sdp_line_without_ending(line).strip_prefix("a=fmtp:")?;
+                let (payload_type, parameters) = value.split_once(char::is_whitespace)?;
+                preferred_payload_types
+                    .contains(&payload_type.to_string())
+                    .then_some(parameters)
+            })
+            .flat_map(|parameters| parameters.split('/'))
+            .map(str::trim)
+            .filter(|payload_type| payloads.iter().any(|payload| payload == payload_type))
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
+    let mut reordered = payloads
+        .iter()
+        .filter(|payload| dependent_payload_types.contains(*payload))
+        .cloned()
+        .collect::<Vec<_>>();
+    reordered.extend(preferred);
+    reordered.extend(payloads.into_iter().filter(|payload| {
+        !preferred_payload_types.contains(payload) && !dependent_payload_types.contains(payload)
+    }));
 
     let mut updated_media_line = parts;
     updated_media_line.extend(reordered);
@@ -9664,15 +9689,38 @@ mod tests {
     }
 
     #[test]
-    fn reorder_section_media_line_payloads_for_preferred_codec_prioritizes_matching_payload() {
+    fn reorder_section_media_line_payloads_falls_back_to_opus_when_red_is_unavailable() {
         let mut section = vec![
-            "m=audio 9 UDP/TLS/RTP/SAVPF 111 63\r\n".to_string(),
+            "m=audio 9 UDP/TLS/RTP/SAVPF 8 0 9 111\r\n".to_string(),
+            "a=mid:1\r\n".to_string(),
+            "a=recvonly\r\n".to_string(),
+            "a=rtpmap:8 PCMA/8000\r\n".to_string(),
+            "a=rtpmap:0 PCMU/8000\r\n".to_string(),
+            "a=rtpmap:9 G722/8000\r\n".to_string(),
             "a=rtpmap:111 opus/48000/2\r\n".to_string(),
-            "a=rtpmap:63 red/48000/2\r\n".to_string(),
+            "a=fmtp:111 minptime=10;useinbandfec=1\r\n".to_string(),
         ];
 
         reorder_section_media_line_payloads_for_preferred_codec(&mut section, "audio/red");
-        assert_eq!(section[0], "m=audio 9 UDP/TLS/RTP/SAVPF 63 111\r\n");
+        assert_eq!(section[0], "m=audio 9 UDP/TLS/RTP/SAVPF 111 8 0 9\r\n");
+    }
+
+    #[test]
+    fn reorder_section_media_line_payloads_keeps_red_after_its_primary_payload() {
+        let mut section = vec![
+            "m=audio 9 UDP/TLS/RTP/SAVPF 111 63 9 0 8\r\n".to_string(),
+            "a=mid:1\r\n".to_string(),
+            "a=recvonly\r\n".to_string(),
+            "a=rtpmap:111 opus/48000/2\r\n".to_string(),
+            "a=rtpmap:63 red/48000/2\r\n".to_string(),
+            "a=fmtp:63 111/111\r\n".to_string(),
+            "a=rtpmap:9 G722/8000\r\n".to_string(),
+            "a=rtpmap:0 PCMU/8000\r\n".to_string(),
+            "a=rtpmap:8 PCMA/8000\r\n".to_string(),
+        ];
+
+        reorder_section_media_line_payloads_for_preferred_codec(&mut section, "audio/red");
+        assert_eq!(section[0], "m=audio 9 UDP/TLS/RTP/SAVPF 111 63 9 0 8\r\n");
     }
 
     fn test_signal_state() -> SignalState {
