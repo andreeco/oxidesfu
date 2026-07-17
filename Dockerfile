@@ -41,14 +41,17 @@ RUN chmod +x /app/oxidesfu-server && chown -R oxidesfu:oxidesfu /app
 
 USER oxidesfu:oxidesfu
 
-# HTTP/Twirp/WebSocket signaling endpoint. The server's development default
-# binds loopback-only, so the image explicitly binds all container interfaces.
+# HTTP/Twirp/WebSocket signaling endpoint. The native development default is
+# loopback-only, so the image supplies a container-safe default through the
+# normal environment-based configuration path. Deployments can override this
+# value (for example, `OXIDESFU_BIND=0.0.0.0:7885`) without a CLI argument
+# taking precedence.
 EXPOSE 7880/tcp
 
-ENV RUST_LOG=info
+ENV RUST_LOG=info \
+    OXIDESFU_BIND=0.0.0.0:7880
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
     CMD ["curl", "--fail", "--silent", "http://127.0.0.1:7880/healthz"]
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/app/oxidesfu-server"]
-CMD ["--dev", "--bind", "0.0.0.0:7880"]
