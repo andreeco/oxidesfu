@@ -6917,6 +6917,75 @@ async fn reconcile_publisher_media_tracks_keeps_single_pc_unbound_track_for_inac
     assert_eq!(participant_after.tracks[0].sid, published_track.sid);
 }
 
+#[tokio::test]
+async fn reconcile_publisher_media_tracks_keeps_single_pc_bound_track_when_offer_is_inactive() {
+    let state = state();
+    let room = "reconcile-single-pc-bound-inactive-room";
+    let publisher = "publisher";
+
+    join_participant_for_data_track_test(&state, room, publisher);
+    let response = add_track_response(
+        &state,
+        room,
+        publisher,
+        proto::AddTrackRequest {
+            cid: "firefox-video-cid".to_string(),
+            name: "camera".to_string(),
+            r#type: proto::TrackType::Video as i32,
+            source: proto::TrackSource::Camera as i32,
+            ..Default::default()
+        },
+    )
+    .await;
+    let Some(proto::signal_response::Message::TrackPublished(track_published)) = response.message
+    else {
+        panic!("expected TrackPublished response");
+    };
+    let published_track = track_published
+        .track
+        .expect("video track should be present");
+    state
+        .rooms
+        .set_participant_track_mid(room, publisher, &published_track.sid, "7")
+        .expect("track MID should be set");
+    state
+        .rooms
+        .set_participant_track_sdp_cid(
+            room,
+            publisher,
+            &published_track.sid,
+            "{firefox-browser-track-id}",
+        )
+        .expect("browser SDP track ID should be set");
+
+    let inactive_offer_sdp = "v=0\r\n\
+            m=video 9 UDP/TLS/RTP/SAVPF 96\r\n\
+            a=mid:7\r\n\
+            a=inactive\r\n";
+    reconcile_publisher_media_tracks_after_answer(
+        &state,
+        room,
+        publisher,
+        inactive_offer_sdp,
+        &HashMap::new(),
+        &HashMap::new(),
+        true,
+    )
+    .await;
+
+    let participant_after = state
+        .rooms
+        .get_participant(room, publisher)
+        .expect("publisher should still exist");
+    assert!(
+        participant_after
+            .tracks
+            .iter()
+            .any(|track| track.sid == published_track.sid),
+        "a single-PC inactive m-line must not unpublish an already-bound browser track"
+    );
+}
+
 #[test]
 fn requested_media_track_sids_merges_top_level_and_participant_tracks() {
     let request = proto::UpdateSubscription {

@@ -149,6 +149,41 @@ async function waitForReceiverSample(
   throw new Error(`${label} did not produce inbound video RTP within ${timeoutMs}ms: ${lastError}`);
 }
 
+test('Firefox single-PC publisher delivers video to a subscriber', async ({ browser }) => {
+  const serverUrl = process.env.OXIDESFU_URL ?? process.env.LIVEKIT_URL;
+  const room = `browser-video-delivery-${randomUUID()}`;
+  const publisherContext = await browser.newContext();
+  const subscriberContext = await browser.newContext();
+  const publisher = await publisherContext.newPage();
+  const subscriber = await subscriberContext.newPage();
+  const publisherUrl = `/?role=publisher&url=${encodeURIComponent(serverUrl!)}&token=${encodeURIComponent(token('browser-publisher', room))}`;
+  const subscriberUrl = `/?role=subscriber&url=${encodeURIComponent(serverUrl!)}&token=${encodeURIComponent(token('browser-subscriber', room))}`;
+
+  await publisher.goto(publisherUrl);
+  await waitForHarnessReady(publisher, 'publisher');
+  await subscriber.goto(subscriberUrl);
+  await waitForHarnessReady(subscriber, 'subscriber');
+  await expect.poll(
+    () => subscriber.evaluate(() => document.querySelector('video[data-testid="remote-video"]')?.srcObject !== null),
+  ).toBe(true);
+  await expect.poll(
+    async () => {
+      try {
+        return (await subscriber.evaluate(() => window.oxidesfuReceiverSample()) as ReceiverSample)
+          .framesDecoded;
+      } catch {
+        return 0;
+      }
+    },
+    { timeout: 10_000 },
+  ).toBeGreaterThan(0);
+
+  await publisher.evaluate(() => window.oxidesfuClose());
+  await subscriber.evaluate(() => window.oxidesfuClose());
+  await publisherContext.close();
+  await subscriberContext.close();
+});
+
 test('final adaptive low request keeps the active Firefox receiver advancing', async ({ browser }) => {
   const serverUrl = process.env.OXIDESFU_URL ?? process.env.LIVEKIT_URL;
 
