@@ -252,7 +252,11 @@ impl SignalState {
         self
     }
 
-    pub(crate) fn ice_servers(&self, participant_sid: &str) -> Vec<proto::IceServer> {
+    /// Resolves advertised ICE servers for a participant SID.
+    ///
+    /// A configured per-participant provider takes precedence over static
+    /// configuration, including when relay ownership handles the join.
+    pub fn ice_servers_for_participant(&self, participant_sid: &str) -> Vec<proto::IceServer> {
         self.ice_server_provider
             .as_ref()
             .map(|provider| provider(participant_sid))
@@ -503,6 +507,16 @@ impl SignalState {
         }
     }
 
+    /// Preserves client metadata received by a relay origin for owner-side policy resolution.
+    pub fn remember_relay_participant_client_info(
+        &self,
+        room_name: &str,
+        identity: &str,
+        client_info: Option<proto::ClientInfo>,
+    ) {
+        self.remember_participant_client_info(room_name, identity, client_info);
+    }
+
     pub(crate) fn remember_participant_client_info(
         &self,
         room_name: &str,
@@ -517,6 +531,35 @@ impl SignalState {
                 infos.remove(&key);
             }
         }
+    }
+
+    /// Resolves the client configuration for local and relayed join responses.
+    pub fn client_configuration_for_participant(
+        &self,
+        room_name: &str,
+        identity: &str,
+    ) -> Option<proto::ClientConfiguration> {
+        let force_relay = self
+            .candidate_protocol_preference(room_name, identity)
+            .filter(|protocol| *protocol == proto::CandidateProtocol::Tls as i32)
+            .map(|_| proto::ClientConfigSetting::Enabled as i32)
+            .unwrap_or_default();
+        let disabled_codecs =
+            self.participant_client_info(room_name, identity)
+                .and_then(|client_info| {
+                    crate::client_configuration::static_configuration_for_client_info(&client_info)
+                        .and_then(|config| config.disabled_codecs)
+                });
+
+        if force_relay == 0 && disabled_codecs.is_none() {
+            return None;
+        }
+
+        Some(proto::ClientConfiguration {
+            disabled_codecs,
+            force_relay,
+            ..Default::default()
+        })
     }
 
     pub(crate) fn participant_client_info(

@@ -290,32 +290,7 @@ fn effective_rtc_transport_for_join_request(
     transport
 }
 
-fn client_configuration_for_participant(
-    state: &SignalState,
-    room_name: &str,
-    identity: &str,
-) -> Option<proto::ClientConfiguration> {
-    let force_relay = state
-        .candidate_protocol_preference(room_name, identity)
-        .filter(|protocol| *protocol == proto::CandidateProtocol::Tls as i32)
-        .map(|_| proto::ClientConfigSetting::Enabled as i32)
-        .unwrap_or_default();
-
-    let disabled_codecs = state
-        .participant_client_info(room_name, identity)
-        .and_then(|client_info| disabled_codecs_for_client_info(&client_info));
-
-    if force_relay == 0 && disabled_codecs.is_none() {
-        return None;
-    }
-
-    Some(proto::ClientConfiguration {
-        disabled_codecs,
-        force_relay,
-        ..Default::default()
-    })
-}
-
+#[cfg(test)]
 fn disabled_codecs_for_client_info(
     client_info: &proto::ClientInfo,
 ) -> Option<proto::DisabledCodecs> {
@@ -1029,10 +1004,9 @@ async fn run_join_socket(
         proto::SignalResponse {
             message: Some(proto::signal_response::Message::Reconnect(
                 proto::ReconnectResponse {
-                    ice_servers: state.ice_servers(&reconnect_participant_sid),
-                    client_configuration: client_configuration_for_participant(
-                        &state, &room_name, &identity,
-                    ),
+                    ice_servers: state.ice_servers_for_participant(&reconnect_participant_sid),
+                    client_configuration: state
+                        .client_configuration_for_participant(&room_name, &identity),
                     server_info: Some(join_server_info()),
                     ..Default::default()
                 },
@@ -1181,10 +1155,9 @@ async fn run_join_socket(
                 // preference. Oxide does not currently model fallback preferences, so every
                 // publish-authorized join must establish its publisher transport eagerly.
                 fast_publish: auth.claims.video.get_can_publish(),
-                ice_servers: state.ice_servers(&participant.sid),
-                client_configuration: client_configuration_for_participant(
-                    &state, &room_name, &identity,
-                ),
+                ice_servers: state.ice_servers_for_participant(&participant.sid),
+                client_configuration: state
+                    .client_configuration_for_participant(&room_name, &identity),
                 server_info: Some(join_server_info()),
                 ..Default::default()
             })),

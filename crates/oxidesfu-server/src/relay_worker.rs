@@ -169,6 +169,18 @@ impl RelayJoinIntentExecutor for RoomStoreRelayJoinIntentExecutor {
         &self,
         intent: &oxidesfu_signaling::NonLocalRelayJoinIntent,
     ) -> oxidesfu_signaling::NonLocalRelayJoinResponse {
+        let relay_client_info = match intent.client_info.as_deref() {
+            Some(bytes) => match livekit_protocol::ClientInfo::decode(bytes) {
+                Ok(client_info) => Some(client_info),
+                Err(error) => {
+                    return oxidesfu_signaling::NonLocalRelayJoinResponse::Rejected {
+                        code: "invalid_argument".to_string(),
+                        msg: format!("relay join client_info decode failed: {error}"),
+                    };
+                }
+            },
+            None => None,
+        };
         let requested_permission = livekit_protocol::ParticipantPermission {
             can_subscribe: intent.can_subscribe,
             can_publish: intent.can_publish,
@@ -258,6 +270,11 @@ impl RelayJoinIntentExecutor for RoomStoreRelayJoinIntentExecutor {
                     &intent.identity,
                     intent.subscriber_primary,
                 );
+                signal_state.remember_relay_participant_client_info(
+                    &intent.room,
+                    &intent.identity,
+                    relay_client_info.clone(),
+                );
                 signal_state.remember_participant_auth_context(
                     &intent.room,
                     &intent.identity,
@@ -296,6 +313,16 @@ impl RelayJoinIntentExecutor for RoomStoreRelayJoinIntentExecutor {
                                         other_participants: Vec<
             livekit_protocol::ParticipantInfo,
         >| {
+            let (ice_servers, client_configuration) = self
+                .signal_state
+                .as_ref()
+                .map(|state| {
+                    (
+                        state.ice_servers_for_participant(&participant.sid),
+                        state.client_configuration_for_participant(&intent.room, &intent.identity),
+                    )
+                })
+                .unwrap_or_else(|| (Self::default_ice_servers(), None));
             let join = livekit_protocol::JoinResponse {
                 room: Some(room),
                 participant: Some(participant),
@@ -303,7 +330,8 @@ impl RelayJoinIntentExecutor for RoomStoreRelayJoinIntentExecutor {
                 server_version: env!("CARGO_PKG_VERSION").to_string(),
                 ping_interval: 5,
                 ping_timeout: 15,
-                ice_servers: Self::default_ice_servers(),
+                ice_servers,
+                client_configuration,
                 subscriber_primary: Self::effective_subscriber_primary(intent),
                 fast_publish: intent.can_publish,
                 server_info: Some(livekit_protocol::ServerInfo {

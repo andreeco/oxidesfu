@@ -14253,6 +14253,7 @@ fn redis_relay_dispatch_roundtrip_delivers_join_intent_and_response() {
         kind_details: Vec::new(),
         destination_room: String::new(),
         room_config: None,
+        client_info: None,
     };
 
     let receipt = mailbox
@@ -14311,6 +14312,7 @@ fn redis_relay_mailbox_claims_next_intent_for_selected_node() {
         kind_details: Vec::new(),
         destination_room: String::new(),
         room_config: None,
+        client_info: None,
     };
     let remote_1 = NonLocalRelayJoinIntent {
         room: "relay-room".to_string(),
@@ -14331,6 +14333,7 @@ fn redis_relay_mailbox_claims_next_intent_for_selected_node() {
         kind_details: Vec::new(),
         destination_room: String::new(),
         room_config: None,
+        client_info: None,
     };
     let remote_2 = NonLocalRelayJoinIntent {
         room: "relay-room".to_string(),
@@ -14351,6 +14354,7 @@ fn redis_relay_mailbox_claims_next_intent_for_selected_node() {
         kind_details: Vec::new(),
         destination_room: String::new(),
         room_config: None,
+        client_info: None,
     };
 
     mailbox
@@ -14409,6 +14413,7 @@ fn redis_relay_mailbox_concurrent_claim_consumes_each_intent_once() {
                 kind_details: Vec::new(),
                 destination_room: String::new(),
                 room_config: None,
+                client_info: None,
             })
             .expect("intent should store");
     }
@@ -14488,6 +14493,7 @@ fn redis_mailbox_dispatcher_returns_remote_response_after_driver_executes_intent
             kind_details: Vec::new(),
             destination_room: String::new(),
             room_config: None,
+            client_info: None,
         })
         .expect("dispatch should succeed");
 
@@ -14539,6 +14545,7 @@ fn redis_mailbox_dispatcher_retries_transient_dispatch_failure_and_succeeds() {
             kind_details: Vec::new(),
             destination_room: String::new(),
             room_config: None,
+            client_info: None,
         })
         .expect("dispatch should succeed after one retry");
 
@@ -14571,6 +14578,7 @@ fn redis_mailbox_dispatcher_applies_backpressure_limit_before_dispatch() {
             kind_details: Vec::new(),
             destination_room: String::new(),
             room_config: None,
+            client_info: None,
         })
         .expect("seed pending intent should store");
 
@@ -14604,6 +14612,7 @@ fn redis_mailbox_dispatcher_applies_backpressure_limit_before_dispatch() {
             kind_details: Vec::new(),
             destination_room: String::new(),
             room_config: None,
+            client_info: None,
         })
         .expect_err("dispatch should fail when mailbox is backpressured");
 

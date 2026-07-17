@@ -2045,6 +2045,7 @@ async fn relay_worker_claims_intent_and_dispatcher_receives_response() {
             kind_details: Vec::new(),
             destination_room: String::new(),
             room_config: None,
+            client_info: None,
         })
     })
     .await
@@ -2092,6 +2093,7 @@ fn relay_executor_join_response_advertises_default_ice_and_effective_subscriber_
         kind_details: Vec::new(),
         destination_room: String::new(),
         room_config: None,
+        client_info: None,
     });
 
     let join = match response {
@@ -2114,6 +2116,68 @@ fn relay_executor_join_response_advertises_default_ice_and_effective_subscriber_
     assert!(
         join.client_configuration.is_none(),
         "the default local join response has no client-specific configuration"
+    );
+}
+
+#[test]
+fn relay_executor_uses_owner_ice_and_client_configuration_resolution() {
+    let config = ServerConfig::development();
+    let api_state = api_state_from_config(&config);
+    let signal_state = oxidesfu_signaling::SignalState::new(api_state.rooms, api_state.auth)
+        .with_ice_server_provider(|participant_sid| {
+            vec![livekit_protocol::IceServer {
+                urls: vec!["turn:turn.example.net:3478?transport=udp".to_string()],
+                username: format!("turn-{participant_sid}"),
+                credential: format!("credential-{participant_sid}"),
+            }]
+        });
+    let executor = RoomStoreRelayJoinIntentExecutor::with_signal_state(signal_state);
+    let response = executor.execute_join(&NonLocalRelayJoinIntent {
+        room: "relay-configured-room".to_string(),
+        identity: "safari-alice".to_string(),
+        name: "Safari Alice".to_string(),
+        client_info: Some(
+            livekit_protocol::ClientInfo {
+                browser: "safari".to_string(),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        ),
+        ..Default::default()
+    });
+
+    let join = match response {
+        NonLocalRelayJoinResponse::AcceptedWithJoin { join_response } => {
+            livekit_protocol::JoinResponse::decode(join_response.as_slice())
+                .expect("relay join response should decode as JoinResponse")
+        }
+        other => panic!("expected AcceptedWithJoin relay response, got {other:?}"),
+    };
+    let participant_sid = join
+        .participant
+        .as_ref()
+        .expect("relay join should contain participant")
+        .sid
+        .clone();
+
+    assert_eq!(join.ice_servers.len(), 1);
+    assert_eq!(
+        join.ice_servers[0].username,
+        format!("turn-{participant_sid}")
+    );
+    assert_eq!(
+        join.ice_servers[0].credential,
+        format!("credential-{participant_sid}")
+    );
+    assert_eq!(
+        join.client_configuration
+            .and_then(|configuration| configuration.disabled_codecs)
+            .expect("Safari policy should disable a codec")
+            .codecs,
+        vec![livekit_protocol::Codec {
+            mime: "video/AV1".to_string(),
+            ..Default::default()
+        }]
     );
 }
 
@@ -2142,6 +2206,7 @@ async fn relay_executor_v0_subscriber_topology_is_disabled_without_subscribe_per
                 kind_details: Vec::new(),
                 destination_room: String::new(),
                 room_config: None,
+                client_info: None,
             },
             outbound_tx,
         )
@@ -2187,6 +2252,7 @@ async fn relay_executor_reconnect_with_matching_sid_resumes_existing_participant
         kind_details: Vec::new(),
         destination_room: String::new(),
         room_config: None,
+        client_info: None,
     });
 
     let join = match response {
@@ -2461,6 +2527,7 @@ async fn relay_worker_readiness_transitions_not_ready_on_outage_and_recovers_aft
             kind_details: Vec::new(),
             destination_room: String::new(),
             room_config: None,
+            client_info: None,
         })
         .expect("dispatch should succeed after backend recovers");
 

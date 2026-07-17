@@ -113,6 +113,7 @@ pub(crate) fn non_local_relay_intent_from_outcome(
                 kind_details: auth.claims.kind_details.clone(),
                 destination_room: auth.claims.video.destination_room.clone(),
                 room_config: auth.claims.room_config.clone(),
+                client_info: request.client_info.as_ref().map(Message::encode_to_vec),
             })
         }
         RoomNodePlacementOutcome::LocalHandling

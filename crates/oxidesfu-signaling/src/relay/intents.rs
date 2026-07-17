@@ -49,6 +49,11 @@ pub struct NonLocalRelayJoinIntent {
     pub destination_room: String,
     /// Optional room config claim from original token.
     pub room_config: Option<serde_json::Value>,
+    /// Encoded protobuf client metadata from the original join request.
+    ///
+    /// This preserves owner-side browser policy resolution without requiring
+    /// generated protocol types to be mailbox-serialization types.
+    pub client_info: Option<Vec<u8>>,
 }
 
 /// Relay intent emitted when a non-local relayed session is terminated on the origin node.
