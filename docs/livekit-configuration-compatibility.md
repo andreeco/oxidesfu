@@ -222,7 +222,7 @@ before being claimed as compatibility support.
 | `rtc.use_external_ip` | Different | OxideSFU supports `OXIDESFU_RTC_USE_EXTERNAL_IP`, but remote Docker deployments should explicitly set `OXIDESFU_RTC_NODE_IP` to the public IP and prove candidates from outside the host. |
 | `rtc.node_ip` | Translate with validation | `OXIDESFU_RTC_NODE_IP`; reject non-IP values and require compatible `use_external_ip` semantics. |
 | `rtc.stun_servers` | Translate | Emit `OXIDESFU_ICE_SERVERS_JSON`. |
-| `rtc.turn_servers` | Translate with validation | Emit `OXIDESFU_ICE_SERVERS_JSON`; preserve URL, username, and credential only where the source mode can be represented safely. |
+| `rtc.turn_servers` | Translate with validation | Static `host`/`port`/`protocol` (`udp`, `tcp`, `tls`) plus username/credential translate into advertised ICE servers. Dynamic `secret`, `secret_file`, and `ttl` credentials fail closed until participant-specific credential generation exists. |
 | `rtc.allow_tcp_fallback` | Translate | `OXIDESFU_RTC_ALLOW_TCP_FALLBACK`. |
 | `rtc.tcp_fallback_rtt_threshold` | Translate | `OXIDESFU_RTC_TCP_FALLBACK_RTT_THRESHOLD_MS`. |
 | `rtc.allow_udp_unstable_fallback` | Translate | `OXIDESFU_RTC_ALLOW_UDP_UNSTABLE_FALLBACK`. |
@@ -409,15 +409,15 @@ real local Redis instance, starts the binary from a YAML `redis.address`
 fixture, proves RoomService create/list/delete, and connects a Rust SDK
 participant through the Redis-backed signalling path.
 
-### Slice D — external TURN mapping for deployment parity
+### Slice D — external TURN mapping for deployment parity ✅
 
-**Work:**
-
-1. Translate supported `rtc.turn_servers` forms into OxideSFU ICE server model.
-2. Keep owned TURN/TLS unsupported unless implemented.
-3. Add external TURN black-box validation contract.
-
-**Done when:** a YAML-configured external TURN deployment is proven by tests.
+**Completed:** `rtc.turn_servers` static credential entries now translate into
+advertised ICE server entries, preserving `udp`, `tcp`, and `tls` protocol URL
+shapes plus username and credential. A Rust SDK process contract starts the
+binary from YAML and verifies the exact external TURN ICE entry in the join
+response. Dynamic TURN credentials (`secret`, `secret_file`, `ttl`) remain
+fail-closed because they require participant-specific HMAC credential
+issuance; owned TURN/TLS remains unsupported.
 
 ### Slice E — multi-node relay parity blockers from gaps register
 

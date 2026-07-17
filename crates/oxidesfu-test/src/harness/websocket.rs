@@ -289,10 +289,11 @@
         listed_after_create: usize,
         listed_after_delete: usize,
     }
-    #[derive(Debug, PartialEq, Eq)]
+    #[derive(Debug, PartialEq)]
     struct SignalJoinVisibilityResult {
         joined_room_name: String,
         joined_identity: String,
+        ice_servers: Vec<proto::IceServer>,
         joined_display_name: String,
         listed_participant_count: usize,
         fetched_identity: String,
@@ -488,7 +489,7 @@
         DataTrackMultiSubscriberReconnectUnderLoad,
         DataTrackPublisherDropLifecycle,
     }
-    #[derive(Debug, PartialEq, Eq)]
+    #[derive(Debug, PartialEq)]
     enum DifferentialCaseResult {
         TwirpRoomLifecycle(RoomLifecycleResult),
         ValidateV1NegativePaths(ValidateNegativePathsResult),
@@ -1194,6 +1195,7 @@
         SignalJoinVisibilityResult {
             joined_room_name: joined_room.name,
             joined_identity: joined.identity,
+            ice_servers: join.ice_servers,
             joined_display_name: joined.name,
             listed_participant_count: participants.len(),
             fetched_identity: participant.identity,

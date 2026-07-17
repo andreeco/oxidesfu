@@ -79,6 +79,54 @@ async fn livekit_yaml_startup_process_supports_cli_room_lifecycle() {
 }
 
 #[tokio::test]
+async fn livekit_yaml_process_advertises_static_external_turn_servers() {
+    let reservation = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("port reservation should bind");
+    let port = reservation
+        .local_addr()
+        .expect("reservation should expose address")
+        .port();
+    drop(reservation);
+
+    let config_path = std::env::temp_dir().join(format!(
+        "oxidesfu-livekit-yaml-turn-{}-{}.yaml",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::write(
+        &config_path,
+        format!(
+            "port: {port}\nkeys:\n  {API_KEY}: {API_SECRET}\nrtc:\n  turn_servers:\n    - host: turn.example.net\n      port: 3478\n      protocol: udp\n      username: turn-user\n      credential: turn-pass\n"
+        ),
+    )
+    .expect("external TURN YAML fixture should write");
+
+    let (mut server, url) = spawn_oxidesfu_server_process_with_livekit_config(port, &config_path)
+        .await
+        .expect("external TURN YAML server should start")
+        .expect("server binary should be available");
+    let join = run_signal_join_participant_visibility(
+        &url,
+        &format!("yaml-turn-{}", unique_suffix()),
+        "yaml-turn-alice",
+        "YAML TURN Alice",
+    )
+    .await;
+
+    assert_eq!(join.ice_servers.len(), 1);
+    assert_eq!(
+        join.ice_servers[0].urls,
+        vec!["turn:turn.example.net:3478?transport=udp"]
+    );
+    assert_eq!(join.ice_servers[0].username, "turn-user");
+    assert_eq!(join.ice_servers[0].credential, "turn-pass");
+
+    let _ = server.kill().await;
+    let _ = std::fs::remove_file(config_path);
+}
+
+#[tokio::test]
 async fn livekit_yaml_redis_process_supports_room_api_and_join() {
     let Some((mut redis, redis_url)) = spawn_ready_redis_server_for_distributed_tests().await else {
         eprintln!("skipping YAML Redis process contract because Redis is unavailable");

@@ -199,11 +199,14 @@ pub fn translate_livekit_yaml(
             .map_err(LiveKitConfigError::Native)?;
             translated.push("rtc.stun_servers");
         }
-        reject_present(
-            rtc.turn_servers,
-            "rtc.turn_servers",
-            "external TURN server translation is not implemented; configure OXIDESFU_ICE_SERVERS_JSON natively",
-        )?;
+        if let Some(servers) = rtc.turn_servers {
+            config.ice_servers = normalize_ice_servers(
+                "livekit.rtc.turn_servers",
+                translate_external_turn_servers(servers)?,
+            )
+            .map_err(LiveKitConfigError::Native)?;
+            translated.push("rtc.turn_servers");
+        }
     }
 
     if let Some(turn) = source.turn {
@@ -343,6 +346,68 @@ pub fn translate_livekit_yaml(
     Ok((config, LiveKitConfigReport { translated }))
 }
 
+fn translate_external_turn_servers(
+    servers: Vec<ExternalTurnServer>,
+) -> Result<Vec<IceServerConfig>, LiveKitConfigError> {
+    servers
+        .into_iter()
+        .map(|server| {
+            reject_present(
+                server.secret,
+                "rtc.turn_servers.secret",
+                "dynamic TURN credentials are not implemented",
+            )?;
+            reject_present(
+                server.secret_file,
+                "rtc.turn_servers.secret_file",
+                "dynamic TURN credentials are not implemented",
+            )?;
+            reject_present(
+                server.ttl,
+                "rtc.turn_servers.ttl",
+                "dynamic TURN credentials are not implemented",
+            )?;
+
+            let host = server
+                .host
+                .map(|host| host.trim().to_string())
+                .filter(|host| !host.is_empty())
+                .ok_or(LiveKitConfigError::InvalidValue {
+                    path: "rtc.turn_servers.host",
+                    reason: "must not be empty",
+                })?;
+            let port = server.port.ok_or(LiveKitConfigError::InvalidValue {
+                path: "rtc.turn_servers.port",
+                reason: "must be set",
+            })?;
+            if port == 0 {
+                return Err(LiveKitConfigError::InvalidValue {
+                    path: "rtc.turn_servers.port",
+                    reason: "must be greater than zero",
+                });
+            }
+
+            let (scheme, transport) = match server.protocol.as_deref().unwrap_or("tcp") {
+                "udp" => ("turn", "udp"),
+                "tcp" => ("turn", "tcp"),
+                "tls" => ("turns", "tcp"),
+                _ => {
+                    return Err(LiveKitConfigError::InvalidValue {
+                        path: "rtc.turn_servers.protocol",
+                        reason: "must be udp, tcp, or tls",
+                    });
+                }
+            };
+
+            Ok(IceServerConfig {
+                urls: vec![format!("{scheme}:{host}:{port}?transport={transport}")],
+                username: server.username.unwrap_or_default().trim().to_string(),
+                credential: server.credential.unwrap_or_default().trim().to_string(),
+            })
+        })
+        .collect()
+}
+
 fn reject_present<T>(
     value: Option<T>,
     path: &'static str,
@@ -407,12 +472,24 @@ struct Rtc {
     use_external_ip: Option<bool>,
     node_ip: Option<String>,
     stun_servers: Option<Vec<String>>,
-    turn_servers: Option<serde_yaml_ng::Value>,
+    turn_servers: Option<Vec<ExternalTurnServer>>,
     allow_tcp_fallback: Option<bool>,
     tcp_fallback_rtt_threshold: Option<u32>,
     allow_udp_unstable_fallback: Option<bool>,
     #[serde(flatten)]
     unsupported: BTreeMap<String, serde_yaml_ng::Value>,
+}
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExternalTurnServer {
+    host: Option<String>,
+    port: Option<u16>,
+    protocol: Option<String>,
+    username: Option<String>,
+    credential: Option<String>,
+    secret: Option<serde_yaml_ng::Value>,
+    secret_file: Option<serde_yaml_ng::Value>,
+    ttl: Option<serde_yaml_ng::Value>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -478,6 +555,69 @@ node_selector: { kind: any, sort_by: clients, algorithm: lowest, sysload_limit: 
             vec!["stun:stun.example.net:3478"]
         );
         assert!(report.translated.contains(&"turn.domain"));
+    }
+
+    #[test]
+    fn translates_static_external_turn_servers() {
+        let (config, report) = translate_livekit_yaml(
+            r#"
+rtc:
+  turn_servers:
+    - host: turn-udp.example.net
+      port: 3478
+      protocol: udp
+      username: udp-user
+      credential: udp-pass
+    - host: turn-tcp.example.net
+      port: 443
+      protocol: tcp
+      username: tcp-user
+      credential: tcp-pass
+    - host: turn-tls.example.net
+      port: 5349
+      protocol: tls
+      username: tls-user
+      credential: tls-pass
+"#,
+        )
+        .expect("static external TURN YAML should translate");
+
+        assert_eq!(
+            config.ice_servers,
+            vec![
+                IceServerConfig {
+                    urls: vec!["turn:turn-udp.example.net:3478?transport=udp".to_string()],
+                    username: "udp-user".to_string(),
+                    credential: "udp-pass".to_string(),
+                },
+                IceServerConfig {
+                    urls: vec!["turn:turn-tcp.example.net:443?transport=tcp".to_string()],
+                    username: "tcp-user".to_string(),
+                    credential: "tcp-pass".to_string(),
+                },
+                IceServerConfig {
+                    urls: vec!["turns:turn-tls.example.net:5349?transport=tcp".to_string()],
+                    username: "tls-user".to_string(),
+                    credential: "tls-pass".to_string(),
+                },
+            ]
+        );
+        assert!(report.translated.contains(&"rtc.turn_servers"));
+    }
+
+    #[test]
+    fn rejects_dynamic_external_turn_credentials() {
+        let error = translate_livekit_yaml(
+            "rtc: { turn_servers: [{ host: turn.example.net, port: 3478, secret: shared-secret }] }",
+        )
+        .expect_err("dynamic external TURN credentials must block migration");
+        assert!(matches!(
+            error,
+            LiveKitConfigError::Unsupported {
+                path: "rtc.turn_servers.secret",
+                ..
+            }
+        ));
     }
 
     #[test]
