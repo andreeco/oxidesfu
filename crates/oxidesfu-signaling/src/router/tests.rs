@@ -77,7 +77,7 @@ fn state_with_webhook_collector() -> (SignalState, Arc<Mutex<Vec<proto::WebhookE
 }
 
 #[test]
-fn pending_media_section_request_is_retried_after_offer_omits_matching_receive_section() {
+fn pending_media_section_request_does_not_synthetically_retry_after_an_unresolved_offer() {
     let pending = crate::stores::PendingMediaSectionRequestStore::default();
     let room = "pending-media-section-retry-room";
     let publisher = "publisher";
@@ -98,15 +98,7 @@ fn pending_media_section_request_is_retried_after_offer_omits_matching_receive_s
     assert_eq!(
         pending.take_unrequested_counts(room, subscriber).audios,
         0,
-        "the request remains in flight until the client answers with a receive section"
-    );
-
-    pending.release_requested_for_unresolved(room, subscriber);
-
-    assert_eq!(
-        pending.take_unrequested_counts(room, subscriber).audios,
-        1,
-        "an offer that omitted the requested receive section must allow the requirement to retry"
+        "an unresolved offer must not cause another requirement without a state change"
     );
 }
 
@@ -7753,15 +7745,25 @@ async fn unsupported_bound_video_track_emits_one_error_and_is_removed() {
 
 #[tokio::test]
 async fn single_pc_sender_removal_requests_renegotiation_without_a_server_offer() {
+    let state = state();
     let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::unbounded_channel();
 
     session::signal_single_pc_sender_removal_negotiation(
+        &state,
         "single-pc-sender-removal-room",
         "subscriber",
         &outbound_tx,
     )
     .await
     .expect("single-PC sender removal should request renegotiation");
+    session::signal_single_pc_sender_removal_negotiation(
+        &state,
+        "single-pc-sender-removal-room",
+        "subscriber",
+        &outbound_tx,
+    )
+    .await
+    .expect("overlapping single-PC sender removal should coalesce");
 
     let response = outbound_rx
         .recv()
@@ -7776,7 +7778,7 @@ async fn single_pc_sender_removal_requests_renegotiation_without_a_server_offer(
     assert_eq!(requirement.num_videos, 0);
     assert!(
         outbound_rx.try_recv().is_err(),
-        "single-PC sender removal should emit one renegotiation request"
+        "overlapping single-PC sender removals should emit one renegotiation request"
     );
 }
 

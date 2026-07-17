@@ -712,6 +712,7 @@ pub(crate) async fn signal_response_for_request(
                     completed_offer_id,
                 ) {
                     crate::router::session::signal_single_pc_sender_removal_negotiation(
+                        state,
                         room_name,
                         identity,
                         outbound_tx,

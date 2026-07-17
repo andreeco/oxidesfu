@@ -4206,6 +4206,7 @@ async fn remove_subscriber_media_forwarding_for_track_with_negotiation(
 
     if connection_kind == MediaForwardingConnectionKind::SinglePcPublisher {
         signal_single_pc_sender_removal_negotiation(
+            state,
             room_name,
             subscriber_identity,
             &subscriber_outbound_tx,
@@ -8662,7 +8663,6 @@ async fn signal_pending_media_section_requirement(
     outbound_tx: &OutboundSignalSender,
 ) -> oxidesfu_rtc::RtcResult<()> {
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    pending_media_section_requests.release_requested_for_unresolved(room_name, subscriber_identity);
     let counts =
         pending_media_section_requests.take_unrequested_counts(room_name, subscriber_identity);
     tracing::debug!(
@@ -8707,10 +8707,13 @@ fn schedule_pending_media_section_requirement_after_answer(
     );
     tokio::spawn(async move {
         tokio::task::yield_now().await;
-        if !state
+        let has_pending_sections = state
             .pending_media_section_requests
-            .has_for_subscriber(&room_name, &subscriber_identity)
-        {
+            .has_for_subscriber(&room_name, &subscriber_identity);
+        let has_coalesced_removal = state
+            .pending_media_section_requests
+            .take_coalesced_renegotiation(&room_name, &subscriber_identity);
+        if !has_pending_sections && !has_coalesced_removal {
             tracing::debug!(
                 room = %room_name,
                 subscriber_identity = %subscriber_identity,
@@ -8729,13 +8732,22 @@ fn schedule_pending_media_section_requirement_after_answer(
             );
             return;
         };
-        let _ = signal_pending_media_section_requirement(
-            &state.pending_media_section_requests,
-            &room_name,
-            &subscriber_identity,
-            &outbound_tx,
-        )
-        .await;
+        let _ = if has_pending_sections {
+            signal_pending_media_section_requirement(
+                &state.pending_media_section_requests,
+                &room_name,
+                &subscriber_identity,
+                &outbound_tx,
+            )
+            .await
+        } else {
+            send_single_pc_sender_removal_requirement(
+                &room_name,
+                &subscriber_identity,
+                &outbound_tx,
+            )
+            .await
+        };
     });
 }
 
@@ -8791,6 +8803,22 @@ async fn emit_claimed_subscriber_forwarding_offer(
 }
 
 pub(crate) async fn signal_single_pc_sender_removal_negotiation(
+    state: &SignalState,
+    room_name: &str,
+    subscriber_identity: &str,
+    outbound_tx: &OutboundSignalSender,
+) -> oxidesfu_rtc::RtcResult<()> {
+    if !state
+        .pending_media_section_requests
+        .request_renegotiation_if_idle(room_name, subscriber_identity)
+    {
+        return Ok(());
+    }
+
+    send_single_pc_sender_removal_requirement(room_name, subscriber_identity, outbound_tx).await
+}
+
+async fn send_single_pc_sender_removal_requirement(
     room_name: &str,
     subscriber_identity: &str,
     outbound_tx: &OutboundSignalSender,

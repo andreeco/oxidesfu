@@ -495,6 +495,7 @@ pub(crate) struct PendingMediaSectionRequestStore {
     keys: Arc<Mutex<HashMap<MediaForwardingKey, PendingMediaSectionKind>>>,
     requested_keys: Arc<Mutex<HashSet<MediaForwardingKey>>>,
     negotiating_subscribers: Arc<Mutex<HashSet<PendingMediaSectionSubscriberKey>>>,
+    coalesced_renegotiations: Arc<Mutex<HashSet<PendingMediaSectionSubscriberKey>>>,
 }
 
 impl PendingMediaSectionRequestStore {
@@ -680,33 +681,51 @@ impl PendingMediaSectionRequestStore {
             .unwrap_or(false)
     }
 
-    /// Releases in-flight request markers for media sections that remain unresolved.
-    ///
-    /// A client may send a publish offer that omits a previously requested receive
-    /// section when publishing and subscribing are negotiated concurrently. Those
-    /// pending tracks need another `MediaSectionsRequirement` after that answer.
-    pub(crate) fn release_requested_for_unresolved(&self, room: &str, subscriber_identity: &str) {
-        let unresolved = self.pending_keys_for_subscriber(room, subscriber_identity);
-        if unresolved.is_empty() {
-            return;
-        }
-
-        let unresolved_keys = unresolved
-            .into_iter()
-            .map(|(key, _kind)| key)
-            .collect::<HashSet<_>>();
-        let Ok(mut requested_keys) = self.requested_keys.lock() else {
-            return;
+    /// Claims a subscriber renegotiation, or records that one must follow the active exchange.
+    pub(crate) fn request_renegotiation_if_idle(
+        &self,
+        room: &str,
+        subscriber_identity: &str,
+    ) -> bool {
+        let subscriber_key = (room.to_string(), subscriber_identity.to_string());
+        let Ok(mut subscribers) = self.negotiating_subscribers.lock() else {
+            return false;
         };
-        let before = requested_keys.len();
-        requested_keys.retain(|key| !unresolved_keys.contains(key));
-        tracing::debug!(
-            room,
-            subscriber_identity,
-            released_requested_keys = before.saturating_sub(requested_keys.len()),
-            requested_keys = requested_keys.len(),
-            "pending_media_section_request_release_unresolved_requested_markers"
-        );
+        if subscribers.insert(subscriber_key.clone()) {
+            return true;
+        }
+        drop(subscribers);
+        if let Ok(mut coalesced) = self.coalesced_renegotiations.lock() {
+            coalesced.insert(subscriber_key);
+        }
+        false
+    }
+
+    /// Returns whether a request made during the active exchange needs one follow-up offer.
+    pub(crate) fn take_coalesced_renegotiation(
+        &self,
+        room: &str,
+        subscriber_identity: &str,
+    ) -> bool {
+        self.coalesced_renegotiations
+            .lock()
+            .map(|mut coalesced| {
+                coalesced.remove(&(room.to_string(), subscriber_identity.to_string()))
+            })
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn has_coalesced_renegotiation(
+        &self,
+        room: &str,
+        subscriber_identity: &str,
+    ) -> bool {
+        self.coalesced_renegotiations
+            .lock()
+            .map(|coalesced| {
+                coalesced.contains(&(room.to_string(), subscriber_identity.to_string()))
+            })
+            .unwrap_or(false)
     }
 
     pub(crate) fn clear_negotiation(&self, room: &str, subscriber_identity: &str) {
@@ -720,6 +739,9 @@ impl PendingMediaSectionRequestStore {
                 negotiating_subscribers = subscribers.len(),
                 "pending_media_section_request_clear_negotiation"
             );
+        }
+        if let Ok(mut coalesced) = self.coalesced_renegotiations.lock() {
+            coalesced.remove(&subscriber_key);
         }
         if let Ok(mut requested_keys) = self.requested_keys.lock() {
             let before = requested_keys.len();
@@ -739,7 +761,9 @@ impl PendingMediaSectionRequestStore {
     }
 
     pub(crate) fn clear_negotiation_if_no_pending(&self, room: &str, subscriber_identity: &str) {
-        if self.has_for_subscriber(room, subscriber_identity) {
+        if self.has_for_subscriber(room, subscriber_identity)
+            || self.has_coalesced_renegotiation(room, subscriber_identity)
+        {
             return;
         }
         self.clear_negotiation(room, subscriber_identity);
@@ -764,6 +788,11 @@ impl PendingMediaSectionRequestStore {
         }
         if let Ok(mut subscribers) = self.negotiating_subscribers.lock() {
             subscribers.retain(|(candidate_room, subscriber_identity)| {
+                candidate_room != room || subscriber_identity != identity
+            });
+        }
+        if let Ok(mut coalesced) = self.coalesced_renegotiations.lock() {
+            coalesced.retain(|(candidate_room, subscriber_identity)| {
                 candidate_room != room || subscriber_identity != identity
             });
         }
@@ -983,6 +1012,31 @@ mod tests {
         store.remove("room", "pub", "TR_audio", "sub");
         store.clear_negotiation_if_no_pending("room", "sub");
         assert!(store.begin_negotiation_if_idle("room", "sub"));
+    }
+
+    #[test]
+    fn pending_media_section_request_store_coalesces_removal_until_current_negotiation_finishes() {
+        let store = PendingMediaSectionRequestStore::default();
+
+        assert!(store.request_renegotiation_if_idle("room", "sub"));
+        assert!(
+            !store.request_renegotiation_if_idle("room", "sub"),
+            "a removal during an in-flight negotiation must not trigger another offer"
+        );
+        assert!(store.has_coalesced_renegotiation("room", "sub"));
+
+        store.clear_negotiation_if_no_pending("room", "sub");
+        assert!(
+            !store.request_renegotiation_if_idle("room", "sub"),
+            "the coalesced removal must keep the current negotiation claimed"
+        );
+        assert!(store.take_coalesced_renegotiation("room", "sub"));
+
+        store.clear_negotiation_if_no_pending("room", "sub");
+        assert!(
+            store.request_renegotiation_if_idle("room", "sub"),
+            "the next request may proceed once the coalesced removal is consumed"
+        );
     }
 
     #[test]
