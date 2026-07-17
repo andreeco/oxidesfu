@@ -88,7 +88,7 @@ Before relying on behavior from any moving repository, verify current commits an
 
 Git history is the durable progress record.
 
-At the beginning of a session, inspect the full messages for the latest 20–30 commits (if it makes sense):
+At the beginning of a session, inspect the full messages for the latest 20–50 commits (if it makes sense):
 
 ```bash
 git --no-pager log -n 30
