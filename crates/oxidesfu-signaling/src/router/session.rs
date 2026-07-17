@@ -8239,6 +8239,20 @@ async fn forward_publisher_remote_track(
                         is_video_track,
                         "forward_track_reader_remote_track_ended"
                     );
+                    if remove_published_media_track(
+                        &state,
+                        &room_name,
+                        &publisher_identity,
+                        &track_info,
+                    ) {
+                        cleanup_publisher_forwarding_for_track(
+                            &state,
+                            &room_name,
+                            &publisher_identity,
+                            &track_info,
+                        )
+                        .await;
+                    }
                     break;
                 }
                 Err(error) => {
@@ -8849,7 +8863,9 @@ pub(super) async fn reconcile_publisher_media_tracks_after_answer(
     let sender_removed_mids = offer_sections
         .iter()
         .filter(|section| {
-            section.direction == "inactive" || (!single_pc_mode && section.direction == "recvonly")
+            section.is_rejected
+                || section.direction == "inactive"
+                || (!single_pc_mode && section.direction == "recvonly")
         })
         .map(|section| section.mid.clone())
         .collect::<HashSet<_>>();
@@ -8975,34 +8991,48 @@ pub(super) async fn reconcile_publisher_media_tracks_after_answer(
             offer_sections = ?offer_sections.iter().map(|section| (&section.mid, &section.direction, section.is_rejected)).collect::<Vec<_>>(),
             "removing_stale_publisher_track"
         );
-        cleanup_publisher_forwarding_for_track(state, room_name, publisher_identity, &track).await;
-        state
-            .media_track_cids
-            .remove_track_sid(room_name, publisher_identity, &track.sid);
-        if let Ok(participant) =
-            state
-                .rooms
-                .remove_participant_track(room_name, publisher_identity, &track.sid)
-        {
-            if let Some(room) = state
-                .rooms
-                .list_rooms(&[room_name.to_string()])
-                .ok()
-                .and_then(|mut rooms| rooms.pop())
-            {
-                state.emit_webhook_event(proto::WebhookEvent {
-                    event: "track_unpublished".to_string(),
-                    room: Some(super::reduced_room_for_track_event(&room)),
-                    participant: Some(super::reduced_participant_for_track_event(&participant)),
-                    track: Some(track.clone()),
-                    id: super::next_webhook_event_id(),
-                    created_at: super::webhook_created_at_unix_seconds(),
-                    ..Default::default()
-                });
-            }
-            state.updates.broadcast_update(room_name, participant);
+        if remove_published_media_track(state, room_name, publisher_identity, &track) {
+            cleanup_publisher_forwarding_for_track(state, room_name, publisher_identity, &track)
+                .await;
         }
     }
+}
+
+fn remove_published_media_track(
+    state: &SignalState,
+    room_name: &str,
+    publisher_identity: &str,
+    track: &proto::TrackInfo,
+) -> bool {
+    let Ok(participant) =
+        state
+            .rooms
+            .remove_participant_track(room_name, publisher_identity, &track.sid)
+    else {
+        return false;
+    };
+
+    state
+        .media_track_cids
+        .remove_track_sid(room_name, publisher_identity, &track.sid);
+    if let Some(room) = state
+        .rooms
+        .list_rooms(&[room_name.to_string()])
+        .ok()
+        .and_then(|mut rooms| rooms.pop())
+    {
+        state.emit_webhook_event(proto::WebhookEvent {
+            event: "track_unpublished".to_string(),
+            room: Some(super::reduced_room_for_track_event(&room)),
+            participant: Some(super::reduced_participant_for_track_event(&participant)),
+            track: Some(track.clone()),
+            id: super::next_webhook_event_id(),
+            created_at: super::webhook_created_at_unix_seconds(),
+            ..Default::default()
+        });
+    }
+    state.updates.broadcast_update(room_name, participant);
+    true
 }
 
 fn publisher_mids_from_offer(offer_sdp: &str) -> HashSet<String> {
