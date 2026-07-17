@@ -397,14 +397,17 @@ writes a secret-free temporary fixture, starts the compiled server with
 `--livekit-config`, waits for health readiness, and uses `lk` with explicit
 URL/key/secret to create, list, and delete a room.
 
-### Slice C — Redis + YAML single-node deployment contract
+### Slice C — Redis + YAML single-node deployment contract ✅
 
 **Work:**
 
 1. Add YAML fixture with `redis.address` and API keys.
 2. Prove room create/list/delete and join path through Redis-backed mode.
 
-**Done when:** process-level test passes with Redis-backed room-node backend.
+**Completed:** `livekit_yaml_redis_process_supports_room_api_and_join` starts a
+real local Redis instance, starts the binary from a YAML `redis.address`
+fixture, proves RoomService create/list/delete, and connects a Rust SDK
+participant through the Redis-backed signalling path.
 
 ### Slice D — external TURN mapping for deployment parity
 
