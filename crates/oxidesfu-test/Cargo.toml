@@ -32,13 +32,14 @@ oxidesfu-signaling = { path = "../oxidesfu-signaling" }
 futures-util = { workspace = true }
 hmac = "0.13.0"
 # Pinned rust-sdks revision used by the in-process compatibility tests.
-livekit = { git = "https://github.com/andreeco/rust-sdks.git", rev = "2dc87b5cde110365aef8c090d19a50d0fdbec5ae", default-features = false, features = ["tokio"] }
+livekit = { git = "https://github.com/andreeco/rust-sdks.git", rev = "2dc87b5cde110365aef8c090d19a50d0fdbec5ae", default-features = false, features = ["tokio", "rustls-tls-native-roots"] }
 livekit-api = { git = "https://github.com/andreeco/rust-sdks.git", rev = "2dc87b5cde110365aef8c090d19a50d0fdbec5ae", default-features = false, features = ["access-token", "services-tokio", "signal-client-tokio"] }
 livekit-protocol = { git = "https://github.com/andreeco/rust-sdks.git", rev = "2dc87b5cde110365aef8c090d19a50d0fdbec5ae" }
 md-5 = { workspace = true }
 prost = { workspace = true }
 rtc = { workspace = true }
 redis = { workspace = true }
+rustls = { workspace = true }
 serde_json = { workspace = true }
 sha1 = "0.11.0"
 sha2 = { workspace = true }

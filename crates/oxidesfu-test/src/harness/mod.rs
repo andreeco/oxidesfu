@@ -66,6 +66,13 @@ pub(crate) mod support {
     include!("tokens.rs");
     include!("websocket.rs");
 
+    mod external_deployment {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/external_deployment.rs"
+        ));
+    }
+
     mod benchmark_load {
         include!(concat!(
             env!("CARGO_MANIFEST_DIR"),
