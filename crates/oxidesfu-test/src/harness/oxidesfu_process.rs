@@ -110,6 +110,49 @@
             }
         }
     }
+    async fn spawn_oxidesfu_server_process_with_livekit_config(
+        bind_port: u16,
+        config_path: &Path,
+    ) -> Result<Option<(tokio::process::Child, String)>, String> {
+        if !ensure_oxidesfu_server_binary_built().await? {
+            return Ok(None);
+        }
+
+        let binary_path = oxidesfu_server_binary_path();
+        let mut command = tokio::process::Command::new(&binary_path);
+        command.kill_on_drop(true);
+        command.arg("--livekit-config").arg(config_path);
+        command.current_dir(oxidesfu_workspace_root());
+
+        if std::env::var_os("OXIDESFU_TEST_SERVER_STDIO").is_some() {
+            command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+        } else {
+            command.stdout(Stdio::null()).stderr(Stdio::null());
+        }
+
+        let mut child = command
+            .spawn()
+            .map_err(|err| format!("failed to spawn YAML-configured oxidesfu-server: {err}"))?;
+        let base_url = format!("http://127.0.0.1:{bind_port}");
+        match wait_for_room_service_ready_with_retry_and_process(
+            &base_url,
+            Duration::from_secs(45),
+            Duration::from_millis(100),
+            Duration::from_millis(800),
+            Some(&mut child),
+        )
+        .await
+        {
+            Ok(()) => Ok(Some((child, base_url))),
+            Err(err) => {
+                let _ = child.kill().await;
+                Err(format!(
+                    "YAML-configured oxidesfu-server process did not become ready: {err}"
+                ))
+            }
+        }
+    }
+
     fn oxidesfu_server_binary_path() -> PathBuf {
         oxidesfu_workspace_root().join("target/debug/oxidesfu-server")
     }

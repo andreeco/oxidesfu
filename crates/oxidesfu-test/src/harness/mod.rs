@@ -59,6 +59,7 @@ pub(crate) mod support {
     const API_SECRET: &str = "secret";
 
     include!("oxidesfu_process.rs");
+    include!("livekit_yaml_process.rs");
     include!("go_livekit.rs");
     include!("ports.rs");
     include!("redis.rs");
