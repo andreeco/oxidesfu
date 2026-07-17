@@ -4,6 +4,7 @@
 // OxideSFU signalling, room, and SFU state management.
 
 use std::{
+    net::{IpAddr, SocketAddr},
     sync::{
         Arc, OnceLock,
         atomic::{AtomicUsize, Ordering},
@@ -12,7 +13,7 @@ use std::{
 };
 
 use rtc::{
-    ice::mdns::MulticastDnsMode,
+    ice::{agent::Nat1To1IpMapping, mdns::MulticastDnsMode},
     media_stream::MediaStreamTrack,
     peer_connection::configuration::media_engine::{
         MIME_TYPE_AV1, MIME_TYPE_H264, MIME_TYPE_OPUS, MIME_TYPE_PCMA, MIME_TYPE_PCMU,
@@ -35,8 +36,8 @@ use webrtc::media_stream::track_local::{
 use webrtc::peer_connection::RTCSessionDescription;
 use webrtc::peer_connection::{
     MediaEngine, PeerConnection as WebRtcPeerConnection, PeerConnectionBuilder,
-    PeerConnectionEventHandler, RTCConfigurationBuilder, RTCIceCandidateInit, RTCIceCandidateType,
-    Registry, SettingEngine, register_default_interceptors,
+    PeerConnectionEventHandler, RTCConfigurationBuilder, RTCIceCandidateInit, Registry,
+    SettingEngine, register_default_interceptors,
 };
 
 use crate::tracks::next_ssrc;
@@ -865,9 +866,25 @@ async fn create_peer_connection_with_handler(
         }
         setting_engine.set_multicast_dns_mode(MulticastDnsMode::QueryOnly);
         setting_engine.set_multicast_dns_timeout(Some(Duration::from_secs(10)));
-        if !transport.nat_1to1_ips.is_empty() {
-            setting_engine
-                .set_nat_1to1_ips(transport.nat_1to1_ips.clone(), RTCIceCandidateType::Host);
+        let nat_1to1_ip_mappings: Vec<Nat1To1IpMapping> = transport
+            .udp_addrs
+            .iter()
+            .filter_map(|local| local.parse::<SocketAddr>().ok())
+            .flat_map(|local| {
+                transport.nat_1to1_ips.iter().filter_map(move |external| {
+                    external.parse::<IpAddr>().ok().and_then(|external_ip| {
+                        (local.ip().is_ipv4() == external_ip.is_ipv4()).then_some(
+                            Nat1To1IpMapping {
+                                local_ip: local.ip(),
+                                external_ip,
+                            },
+                        )
+                    })
+                })
+            })
+            .collect();
+        if !nat_1to1_ip_mappings.is_empty() {
+            setting_engine.set_nat_1to1_ip_mappings(nat_1to1_ip_mappings);
         }
 
         match PeerConnectionBuilder::new()
@@ -972,14 +989,22 @@ mod tests {
             nat_1to1_ips: vec!["203.0.113.10".to_string()],
         };
 
-        let peer_connection = create_peer_connection_with_transport(&transport)
-            .await
-            .expect("peer connection should create with nat 1:1 transport configuration");
+        let (peer_connection, mut events) =
+            create_peer_connection_with_events_with_transport(&transport)
+                .await
+                .expect("peer connection should create with NAT 1:1 transport configuration");
         let offer = peer_connection
             .create_data_channel_offer("nat-transport-check")
             .await
-            .expect("offer should be created with nat 1:1 transport configured");
+            .expect("offer should be created with NAT 1:1 transport configured");
         assert!(offer.contains("m=application"));
+
+        let candidate = tokio::time::timeout(Duration::from_secs(5), events.ice_candidates.recv())
+            .await
+            .expect("mapped local ICE candidate should arrive before timeout")
+            .expect("local ICE candidate stream should stay open");
+        assert!(candidate.candidate_init_json.contains("203.0.113.10"));
+        assert!(!candidate.candidate_init_json.contains("0.0.0.0"));
 
         peer_connection
             .close()
