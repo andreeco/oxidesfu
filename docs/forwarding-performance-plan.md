@@ -129,7 +129,46 @@ This is an important compatibility slice, **not the completed simulcast-layer-se
 
 **Completed selector TDD coverage:** high does not latch low; non-keyframe source switches drop; high → low → high is keyframe-gated; acquisition falls back; PLI retries are bounded; target-local controllers isolate state; and one-SSRC scalable source acquisition/replacement is decodable-boundary gated without pretending packet spatial IDs are simulcast layers. The pinned RTC parser additionally has nine dependency-descriptor regressions proving that a frame boundary without an active DTI `Switch` target is not a source-switch point. Existing downstream PLI/FIR throttling remains a separate receiver-feedback path and must not be merged with selector acquisition.
 
-### Findings
+### 2026-07-17: paired high-mixed profile and source comparison
+
+Reference revisions inspected: OxideSFU `59d0f1c8138fd57e0fe0934ad609bb2d0c9f6a6d`, LiveKit `ae09b7d0ad94d764f0c97d183efd36476163e819`, local `webrtc-rs` inspection checkout `bede31c803e25f4f06830725236efd89425bec8f`.
+
+The latest benchmark overview is `target/benchmarks/overview.md`. It establishes a **scale-specific** result, not a general Go-versus-Rust result: OxideSFU is CPU-faster in every small/medium scenario and only exceeds the CPU gate in `mixed_room_high_simulcast_large`.
+
+| Scenario | Target forwarding edges | Duration | Relevant load shape | Go CPU → Oxide CPU |
+|---|---:|---:|---|---:|
+| `video_room_small` | 1 × 2 = 2 | 6 s | low H.264, no simulcast | 0.40 s → 0.14 s |
+| `audio_fanout_small` | 2 × 4 = 8 | 6 s | audio only | 0.76 s → 0.37 s |
+| `audio_fanout_medium` | 4 × 12 = 48 | 10 s | audio only | 2.06 s → 1.56 s |
+| `livestream_medium` | 1 × 20 = 20 | 10 s | low H.264, no simulcast | 2.11 s → 0.51 s |
+| `video_room_high_simulcast_large` | 3 × 18 = 54 | 30 s | high H.264, simulcast | 4.66 s → 5.02 s |
+| `mixed_room_high_simulcast_large` | (4 + 4) × 20 = 160 | 30 s | high H.264, simulcast plus audio | 7.46 s → 9.48 s |
+
+The high-mixed scenario has 20 times the target edges of `audio_fanout_small`, 80 times those of `video_room_small`, and 4,800 target-edge seconds versus 48 and 12 respectively. It additionally activates high-resolution simulcast video and runs five times longer. CPU is not expected to scale linearly with only target edges because payload size, RTP packetization, layer selection, and outbound pacing differ, but the topology explains why tiny scenarios are not capacity proxies.
+
+A paired profile used sequential attach-mode `perf record` captures (`/tmp/livekit-go-mixed.data`, `/tmp/oxidesfu-mixed.data`): about 23 MiB and 2K samples each, zero lost samples, and about 32.2 seconds of the active implementation run. Both runs delivered all 160 expected tracks with nonzero RTP and zero reported loss. The captured CPU result was Go 7.51 s and OxideSFU 9.43 s (+25.6%); peak RSS was Go 236,672 KiB and OxideSFU 77,688 KiB. `cycles` includes kernel work, so use user-space-only profiles before assigning an absolute percentage to a Rust source function.
+
+#### Proven implementation differences
+
+1. **LiveKit conditionally parallelizes fan-out at 20 targets.** `pkg/rtc/mediatrack.go` constructs each receiver with `sfu.WithLoadBalanceThreshold(20)`. `pkg/sfu/utils/downtrackspreader.go::Broadcast` calls `protocol/utils/parallel.go::ParallelExec` when `len(downTracks) >= threshold`; that helper starts up to `runtime.NumCPU()` goroutines, gives them two downtracks at a time, and waits for them all. The high mixed scenario has exactly 20 subscribers for each of eight source tracks, so every source takes this branch. The 18-subscriber high video scenario does not. OxideSFU's `router/session.rs` currently iterates `cached_forward_targets` and awaits each target write in order in its one publisher-reader task. This is a real throughput/latency architecture difference. It is **not alone a CPU explanation**: `livestream_medium` also has 20 subscribers and OxideSFU is much faster there. It must be tested as an isolated change rather than copied blindly, because spawning/waiting goroutines per packet can itself increase CPU.
+
+2. **LiveKit's steady output packet allocation is explicitly pooled and is decoupled from transport write by a pacer.** `pkg/sfu/downtrack.go::WriteRTP` borrows `PacketFactory` payload storage, `RTPHeaderFactory` headers, and a `pacer.Packet`, then calls `d.pacer.Enqueue`. It does copy the outbound payload into the pool; Go is not zero-copy. The pool and pacer nevertheless keep ownership and final transport writes out of the receiver's source-packet fan-out loop.
+
+   OxideSFU's `router/session.rs` rewrites every selected target packet then calls `LocalRtpTrack::write_rtp_with_cached_mid_preserving_extensions`. `webrtc-rs/src/media_stream/track_local/static_rtp.rs` locks the track context, builds a `SenderRtpPrepared` or `SenderRtpPreparedBatch` event, and sends it through a bounded Tokio channel. `webrtc-rs/src/peer_connection/driver.rs` later locks the peer-connection core and calls `core.write_rtp_packet`. Video batching reduces channel events but not the per-target selection/rewrite work, and audio uses the single-packet path.
+
+3. **OxideSFU retains a full target packet in its retransmission cache for every forwarded packet.** `crates/oxidesfu-signaling/src/media/rtp_forwarding.rs::SubscriberRtpState::rewrite_packet` first clones the incoming RTP packet, then clones the rewritten packet into a fixed 256-slot retransmission cache. Its steady path also updates a 512-entry `HashSet`/`VecDeque` duplicate window and maps sequence/timestamp state while holding the target's `Arc<Mutex<SubscriberRtpState>>`.
+
+   LiveKit's `DownTrack` also locks its target-local `Forwarder`, so it does not avoid synchronization entirely. But its `sequencer.push` (`pkg/sfu/sequencer.go`) stores a fixed-ring `packetMeta` record: source/target sequence numbers, timestamp, marker/layer, and only necessary rewritten codec/extension bytes. On NACK it obtains the original source RTP by sequence from `receiver.ReadRTP` and reconstructs the RTX packet (`pkg/sfu/downtrack.go::retransmitPackets` / `retransmitPacket`). Thus it does not retain a full rewritten RTP packet payload for every target in its retransmission sequencer.
+
+4. **The selector itself is not shown to be Rust's dominant defect.** Go's flat profile has `Forwarder.getTranslationParamsVideo` (1.79%) and `videolayerselector.Simulcast.Select` (0.87%). Rust's forwarding closure is about 1.08% self time; its visible work is distributed among Tokio scheduling/stealing, mutex/semaphore/futex paths, SRTP, hashing, packet marshal/clone, and the WebRTC driver. This does not prove equal cost per operation, but it rules out treating layer selection as the sole explanation.
+
+#### Derived optimization hypothesis and required proof
+
+The best source-supported candidate is a TDD-gated redesign that separates reader-owned normal RTP rewrite state from RTCP/NACK-accessible state. The normal in-order path should not require both a shared mutex and hash-set/queue mutation for every target packet if all existing duplicate, reordering, source-switch, timestamp-continuity, and retransmission contracts can remain true. A second candidate is to retain compact retransmission metadata plus an immutable source-packet reference rather than clone the complete rewritten packet twice.
+
+Do **not** port LiveKit's fan-out parallelism mechanically. First add comparable measurements for: user-space `cycles:u`, instructions, context switches, driver-channel full waits, target state lock contention, packet clone/cache bytes, and per-target selected-layer bytes. Then introduce one isolated experiment behind a benchmark/test contract: either bounded parallel fan-out or a producer/pacer boundary, not both. The experiment must preserve target packet ordering, bounded memory, RTCP/NACK behavior, and all current media-delivery validation.
+
+## Findings
 
 The original forwarding reader held several parallel maps indexed by:
 
