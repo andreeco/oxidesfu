@@ -1033,6 +1033,7 @@ fn from_lookup_parses_owned_turn_runtime_configuration() {
         ("OXIDESFU_TURN_ENABLED", "true".to_string()),
         ("OXIDESFU_TURN_DOMAIN", "turn.example.net".to_string()),
         ("OXIDESFU_TURN_BIND", "127.0.0.1".to_string()),
+        ("OXIDESFU_TURN_EXTERNAL_IP", "203.0.113.10".to_string()),
         ("OXIDESFU_TURN_UDP_PORT", "3478".to_string()),
         ("OXIDESFU_TURN_RELAY_PORT_RANGE_START", "40000".to_string()),
         ("OXIDESFU_TURN_RELAY_PORT_RANGE_END", "40010".to_string()),
@@ -1049,6 +1050,7 @@ fn from_lookup_parses_owned_turn_runtime_configuration() {
 
     assert!(config.turn_enabled);
     assert_eq!(config.turn_bind, "127.0.0.1");
+    assert_eq!(config.turn_external_ip.as_deref(), Some("203.0.113.10"));
     assert_eq!(config.turn_udp_port, Some(3478));
     assert_eq!(config.turn_relay_port_range_start, Some(40000));
     assert_eq!(config.turn_relay_port_range_end, Some(40010));

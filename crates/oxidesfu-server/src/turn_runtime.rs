@@ -163,6 +163,17 @@ impl TurnRuntime {
     }
 }
 
+fn turn_external_address(config: &ServerConfig, port: u16) -> anyhow::Result<SocketAddr> {
+    Ok(SocketAddr::new(
+        config
+            .turn_external_ip
+            .as_deref()
+            .unwrap_or(config.turn_bind.as_str())
+            .parse::<IpAddr>()?,
+        port,
+    ))
+}
+
 /// Starts the configured UDP TURN runtime, or returns `None` when TURN is disabled.
 pub async fn start_turn_runtime(config: &ServerConfig) -> anyhow::Result<Option<TurnRuntime>> {
     if !config.turn_enabled {
@@ -174,6 +185,7 @@ pub async fn start_turn_runtime(config: &ServerConfig) -> anyhow::Result<Option<
         .turn_udp_port
         .ok_or_else(|| anyhow::anyhow!("enabled TURN requires a UDP port"))?;
     let listen = SocketAddr::new(bind_ip, port);
+    let external = turn_external_address(config, port)?;
     let relay_port_range = match (
         config.turn_relay_port_range_start,
         config.turn_relay_port_range_end,
@@ -212,7 +224,7 @@ pub async fn start_turn_runtime(config: &ServerConfig) -> anyhow::Result<Option<
             port_range: relay_port_range,
             interfaces: vec![Interface::Udp {
                 listen,
-                external: listen,
+                external,
                 idle_timeout: 20,
                 mtu: 1500,
             }],
@@ -227,7 +239,7 @@ pub async fn start_turn_runtime(config: &ServerConfig) -> anyhow::Result<Option<
 
 #[cfg(test)]
 mod tests {
-    use super::{PeerPolicy, start_turn_runtime};
+    use super::{PeerPolicy, start_turn_runtime, turn_external_address};
     use oxidesfu_core::ServerConfig;
 
     #[test]
@@ -243,6 +255,22 @@ mod tests {
         let default_policy = PeerPolicy::new(&[], &[]).expect("empty lists should parse");
         assert!(!default_policy.allows("127.0.0.1".parse().expect("IP should parse")));
         assert!(default_policy.allows("8.8.8.8".parse().expect("IP should parse")));
+    }
+
+    #[test]
+    fn owned_turn_uses_configured_public_external_ip() {
+        let mut config = ServerConfig::development();
+        config.turn_bind = "0.0.0.0".to_string();
+        config.turn_external_ip = Some("203.0.113.10".to_string());
+
+        let external = turn_external_address(&config, 3479).expect("external address should parse");
+
+        assert_eq!(
+            external,
+            "203.0.113.10:3479"
+                .parse::<std::net::SocketAddr>()
+                .expect("test address should parse")
+        );
     }
 
     #[tokio::test]

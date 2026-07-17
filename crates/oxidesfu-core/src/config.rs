@@ -33,6 +33,7 @@ const ENV_PARTICIPANT_DATA_BLOB_ENABLED: &str = "OXIDESFU_PARTICIPANT_DATA_BLOB_
 const ENV_TURN_ENABLED: &str = "OXIDESFU_TURN_ENABLED";
 const ENV_TURN_DOMAIN: &str = "OXIDESFU_TURN_DOMAIN";
 const ENV_TURN_BIND: &str = "OXIDESFU_TURN_BIND";
+const ENV_TURN_EXTERNAL_IP: &str = "OXIDESFU_TURN_EXTERNAL_IP";
 const ENV_TURN_UDP_PORT: &str = "OXIDESFU_TURN_UDP_PORT";
 const ENV_TURN_RELAY_PORT_RANGE_START: &str = "OXIDESFU_TURN_RELAY_PORT_RANGE_START";
 const ENV_TURN_RELAY_PORT_RANGE_END: &str = "OXIDESFU_TURN_RELAY_PORT_RANGE_END";
@@ -295,6 +296,8 @@ pub struct ServerConfig {
     pub turn_domain: Option<String>,
     /// IP address on which the owned TURN UDP runtime listens.
     pub turn_bind: String,
+    /// Public IP advertised by the owned TURN runtime when it runs behind NAT.
+    pub turn_external_ip: Option<String>,
     /// Optional TURN UDP port used to synthesize `turn:` URLs.
     pub turn_udp_port: Option<u16>,
     /// Optional TURN TLS port used to synthesize `turns:` URLs.
@@ -562,6 +565,7 @@ impl ServerConfig {
             turn_enabled: false,
             turn_domain: None,
             turn_bind: "0.0.0.0".to_string(),
+            turn_external_ip: None,
             turn_udp_port: None,
             turn_tls_port: None,
             turn_relay_port_range_start: None,
@@ -732,6 +736,9 @@ impl ServerConfig {
         }
         if let Some(turn_bind) = lookup(ENV_TURN_BIND) {
             config.apply_kv(ENV_TURN_BIND, turn_bind)?;
+        }
+        if let Some(turn_external_ip) = lookup(ENV_TURN_EXTERNAL_IP) {
+            config.apply_kv(ENV_TURN_EXTERNAL_IP, turn_external_ip)?;
         }
         if let Some(turn_udp_port) = lookup(ENV_TURN_UDP_PORT) {
             config.apply_kv(ENV_TURN_UDP_PORT, turn_udp_port)?;
@@ -1125,6 +1132,15 @@ impl ServerConfig {
                     message: "OXIDESFU_TURN_BIND must be an IP address".to_string(),
                 });
             }
+            if self
+                .turn_external_ip
+                .as_deref()
+                .is_some_and(|value| value.parse::<std::net::IpAddr>().is_err())
+            {
+                return Err(ConfigError::InvalidTransportConfig {
+                    message: "OXIDESFU_TURN_EXTERNAL_IP must be an IP address".to_string(),
+                });
+            }
             if self.turn_credential_ttl_seconds == 0 {
                 return Err(ConfigError::InvalidTransportConfig {
                     message: "OXIDESFU_TURN_CREDENTIAL_TTL_SECONDS must be > 0".to_string(),
@@ -1504,6 +1520,10 @@ impl ServerConfig {
             }
             ENV_TURN_BIND | ARG_TURN_BIND => {
                 self.turn_bind = value.trim().to_string();
+            }
+            ENV_TURN_EXTERNAL_IP => {
+                self.turn_external_ip =
+                    (!value.trim().is_empty()).then(|| value.trim().to_string());
             }
             ENV_TURN_UDP_PORT | ARG_TURN_UDP_PORT => {
                 self.turn_udp_port =
