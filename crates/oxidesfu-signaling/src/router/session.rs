@@ -153,7 +153,10 @@ pub(crate) async fn add_track_response(
         height: request.height,
         source: request.source,
         mime_type,
-        simulcast: !simulcast_layers.is_empty() || request.simulcast_codecs.len() > 1,
+        // Go SDK `PublishTrack` describes an ordinary video source with one layer but no
+        // `simulcast_codecs`. The codec catalog, rather than descriptive layers, is the
+        // wire-level simulcast signal.
+        simulcast: !request.simulcast_codecs.is_empty(),
         layers: simulcast_layers,
         codecs: simulcast_codecs,
 
@@ -2087,9 +2090,9 @@ fn resync_target_allocation_revisions(
 
 #[allow(deprecated)]
 fn track_supports_layer_quality_control(track: &proto::TrackInfo) -> bool {
-    track.simulcast
-        || track.layers.len() > 1
-        || track.codecs.iter().any(|codec| codec.layers.len() > 1)
+    // A protocol-level simulcast flag can describe a single source/codec. Source selection is
+    // only meaningful when the catalog advertises multiple spatial sources.
+    track.layers.len() > 1 || track.codecs.iter().any(|codec| codec.layers.len() > 1)
 }
 
 #[allow(deprecated)]
@@ -9390,7 +9393,7 @@ mod tests {
         reorder_section_media_line_payloads_for_preferred_codec,
         resolved_destination_identities_for_packet, rewrite_dependency_descriptor_for_target,
         selected_forwarding_mime_type_for_subscriber, signal_track_subscribed_to_publisher,
-        video_is_decodable_switch_point,
+        track_supports_layer_quality_control, video_is_decodable_switch_point,
         video_is_decodable_switch_point_with_dependency_descriptor, vp8_is_keyframe_start,
         vp9_is_keyframe_start,
     };
@@ -9934,6 +9937,60 @@ mod tests {
                 .iter()
                 .any(|stored| stored.sid == track.sid && stored.muted),
             "room snapshot should persist muted state for published track"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_track_response_treats_single_unmapped_video_layer_as_non_simulcast() {
+        let state = test_signal_state();
+        state
+            .rooms
+            .join_participant(
+                "room",
+                "publisher",
+                "Publisher",
+                String::new(),
+                HashMap::new(),
+            )
+            .expect("publisher should join");
+        state
+            .publish_permissions
+            .set_can_publish_media("room", "publisher", true);
+
+        let response = add_track_response(
+            &state,
+            "room",
+            "publisher",
+            proto::AddTrackRequest {
+                cid: "video".to_string(),
+                name: "video".to_string(),
+                r#type: proto::TrackType::Video as i32,
+                width: 320,
+                height: 180,
+                layers: vec![proto::VideoLayer {
+                    quality: proto::VideoQuality::High as i32,
+                    width: 320,
+                    height: 180,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let Some(proto::signal_response::Message::TrackPublished(track_published)) =
+            response.message
+        else {
+            panic!("expected TrackPublished response");
+        };
+        let track = track_published.track.expect("published track should exist");
+        assert!(
+            !track.simulcast,
+            "a Go SDK PublishTrack descriptor has one descriptive layer, not simulcast sources"
+        );
+        assert!(
+            !track_supports_layer_quality_control(&track),
+            "a single non-simulcast source must bypass spatial source selection"
         );
     }
 

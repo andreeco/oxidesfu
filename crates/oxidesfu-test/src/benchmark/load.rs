@@ -1,5 +1,9 @@
 use super::*;
 
+// The load tester's video reader uses an H.264 depacketizer. Pinning the publisher codec keeps
+// received-packet accounting comparable between the Go baseline and OxideSFU.
+const BENCHMARK_VIDEO_CODEC: &str = "h264";
+
 #[derive(Debug, Clone, Copy)]
 struct BenchmarkScenario {
     name: &'static str,
@@ -315,6 +319,95 @@ async fn benchmark_resource_summary_handles_short_runs_without_divide_by_zero() 
     assert!(summary.approx_cpu_percent_one_core.is_finite());
 }
 
+#[test]
+fn benchmark_load_output_requires_all_subscribers_to_receive_tracks_and_packets() {
+    let scenario = BenchmarkScenario {
+        name: "video_room_small",
+        duration: "6s",
+        video_publishers: 1,
+        audio_publishers: 0,
+        subscribers: 2,
+        num_per_second: "10",
+        layout: "3x3",
+        video_resolution: "low",
+        no_simulcast: true,
+    };
+    let output = "Subscriber summaries:\n\
+│ Sub 0  │ 0/1    │ NaNmbps │ - │ - │\n\
+│ Sub 1  │ 0/1    │ NaNmbps │ - │ - │\n";
+
+    let error = validate_load_test_output(output, scenario).expect_err("missing media must fail");
+    assert!(error.contains("Sub 0 reports 0/1 tracks"));
+}
+
+#[test]
+fn benchmark_load_output_accepts_received_audio_fanout() {
+    let scenario = BenchmarkScenario {
+        name: "audio_fanout_small",
+        duration: "6s",
+        video_publishers: 0,
+        audio_publishers: 2,
+        subscribers: 2,
+        num_per_second: "10",
+        layout: "speaker",
+        video_resolution: "low",
+        no_simulcast: true,
+    };
+    let output = "Track loading:\n\
+│ Sub 0  │ track-a │ audio │ 290 │ 19.5kbps │ 0 (0%) │\n\
+│ Sub 1  │ track-a │ audio │ 291 │ 19.5kbps │ 0 (0%) │\n\
+Subscriber summaries:\n\
+│ Sub 0  │ 2/2    │ 41.2kbps │ 0 │ - │\n\
+│ Sub 1  │ 2/2    │ 41.2kbps │ 0 │ - │\n";
+
+    validate_load_test_output(output, scenario).expect("received media should pass");
+}
+
+#[test]
+fn benchmark_load_output_rejects_materially_lower_packet_delivery_than_go() {
+    let go = "Track loading:\n\
+│ Sub 0  │ track-a │ video │ 100 │ 100kbps │ 0 (0%) │\n";
+    let oxidesfu = "Track loading:\n\
+│ Sub 0  │ track-a │ video │ 48 │ 48kbps │ 0 (0%) │\n";
+
+    let error = ensure_comparable_packet_delivery(go, oxidesfu)
+        .expect_err("Rust delivery below half of Go must fail");
+    assert!(error.contains("48; expected totals"), "{error}");
+}
+
+#[test]
+fn benchmark_load_output_accepts_comparable_packet_delivery() {
+    let go = "Track loading:\n\
+│ Sub 0  │ track-a │ video │ 100 │ 100kbps │ 0 (0%) │\n";
+    let oxidesfu = "Track loading:\n\
+│ Sub 0  │ track-a │ video │ 150 │ 150kbps │ 0 (0%) │\n";
+
+    ensure_comparable_packet_delivery(go, oxidesfu)
+        .expect("delivery within the two-times envelope should pass");
+}
+
+#[test]
+fn benchmark_load_output_rejects_subscriber_with_no_packets() {
+    let scenario = BenchmarkScenario {
+        name: "video_room_small",
+        duration: "6s",
+        video_publishers: 1,
+        audio_publishers: 0,
+        subscribers: 1,
+        num_per_second: "10",
+        layout: "3x3",
+        video_resolution: "low",
+        no_simulcast: true,
+    };
+    let output = "Track loading:\n\
+│ Sub 0  │ track-a │ video │ 0 │ 0bps │ 0 (0%) │\n\
+Subscriber summaries:\n\
+│ Sub 0  │ 1/1    │ 0bps │ 0 │ - │\n";
+
+    let error = validate_load_test_output(output, scenario).expect_err("zero packets must fail");
+    assert!(error.contains("Sub 0 has no received packets"));
+}
+
 #[tokio::test]
 async fn benchmark_environment_reports_file_descriptor_limit() {
     let metadata = environment_metadata();
@@ -388,10 +481,24 @@ async fn benchmark_writes_summary_to_target_benchmarks_and_includes_thresholds_a
             continue;
         };
         if name.starts_with("unit_summary_output-") && name.ends_with(".json") {
-            latest_json = Some(path.clone());
+            let is_newer = latest_json
+                .as_ref()
+                .and_then(|previous| previous.file_name())
+                .and_then(|previous| previous.to_str())
+                .is_none_or(|previous| name > previous);
+            if is_newer {
+                latest_json = Some(path.clone());
+            }
         }
         if name.starts_with("unit_summary_output-") && name.ends_with(".md") {
-            latest_md = Some(path);
+            let is_newer = latest_md
+                .as_ref()
+                .and_then(|previous| previous.file_name())
+                .and_then(|previous| previous.to_str())
+                .is_none_or(|previous| name > previous);
+            if is_newer {
+                latest_md = Some(path);
+            }
         }
     }
 
@@ -406,6 +513,7 @@ async fn benchmark_writes_summary_to_target_benchmarks_and_includes_thresholds_a
     assert_eq!(value["config"]["max_peak_rss_regression_percent"], 30.0);
     assert_eq!(value["scenario"]["name"], "unit_summary_output");
     assert_eq!(value["scenario"]["video_publishers"], 1);
+    assert_eq!(value["scenario"]["video_codec"], BENCHMARK_VIDEO_CODEC);
 
     let markdown = std::fs::read_to_string(md_path).expect("markdown artifact should be readable");
     assert!(markdown.contains("Gates: wall `10.0%`, cpu `20.0%`, peak RSS `30.0%`"));
@@ -578,6 +686,10 @@ async fn run_benchmark_comparison_if_enabled(scenario: BenchmarkScenario) {
         return;
     }
 
+    // Scenarios share the host network namespace and the load generator. Serialize them so
+    // background traffic from another scenario cannot distort this scenario's measurements.
+    let _benchmark_run_guard = benchmark_run_lock().lock().await;
+
     let config = benchmark_config();
     if let Some((soft_limit, _hard_limit)) = read_self_fd_limits()
         && soft_limit < 65_535
@@ -629,16 +741,24 @@ async fn run_benchmark_comparison_if_enabled(scenario: BenchmarkScenario) {
     let mut go_runs = Vec::with_capacity(config.runs);
     let mut oxidesfu_runs = Vec::with_capacity(config.runs);
     for _ in 0..config.runs {
-        go_runs.push(
-            run_lk_load_benchmark("go_livekit", go_pid, &go_base_url, scenario)
-                .await
-                .expect("Go LiveKit benchmark run should complete"),
-        );
-        oxidesfu_runs.push(
-            run_lk_load_benchmark("oxidesfu", oxidesfu_pid, &oxidesfu_base_url, scenario)
-                .await
-                .expect("OxideSFU benchmark run should complete"),
-        );
+        let go_run = run_lk_load_benchmark("go_livekit", go_pid, &go_base_url, scenario)
+            .await
+            .expect("Go LiveKit benchmark run should complete");
+        let mut oxidesfu_run = run_lk_load_benchmark("oxidesfu", oxidesfu_pid, &oxidesfu_base_url, scenario)
+            .await
+            .expect("OxideSFU benchmark run should complete");
+        if let Err(error) = ensure_comparable_packet_delivery(&go_run.stdout, &oxidesfu_run.stdout) {
+            oxidesfu_run.status_success = false;
+            if !oxidesfu_run.stderr.is_empty() {
+                oxidesfu_run.stderr.push('\n');
+            }
+            oxidesfu_run
+                .stderr
+                .push_str("load-test delivery comparison failed: ");
+            oxidesfu_run.stderr.push_str(&error);
+        }
+        go_runs.push(go_run);
+        oxidesfu_runs.push(oxidesfu_run);
     }
 
     let go_result = aggregate_implementation_results("go_livekit", go_runs);
@@ -774,6 +894,11 @@ async fn spawn_oxidesfu_benchmark_server(
     }
 }
 
+fn benchmark_run_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 async fn run_lk_load_benchmark(
     implementation: &'static str,
     server_pid: u32,
@@ -823,6 +948,8 @@ async fn run_lk_load_benchmark(
         scenario.layout,
         "--video-resolution",
         scenario.video_resolution,
+        "--video-codec",
+        BENCHMARK_VIDEO_CODEC,
     ];
     if scenario.no_simulcast {
         args.push("--no-simulcast");
@@ -860,16 +987,127 @@ async fn run_lk_load_benchmark(
         .await
         .map_err(|err| format!("resource sampler task failed: {err}"))?;
     let summary = summarize_samples(&samples, ticks_per_second);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let media_validation = validate_load_test_output(&stdout, scenario);
+    if let Err(error) = &media_validation {
+        if !stderr.is_empty() {
+            stderr.push('\n');
+        }
+        stderr.push_str("load-test media validation failed: ");
+        stderr.push_str(error);
+    }
 
     Ok(ServerBenchmarkResult {
-        status_success: output.status.success(),
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        status_success: output.status.success() && media_validation.is_ok(),
+        stdout,
+        stderr,
         summary,
     })
 }
 
+fn validate_load_test_output(
+    output: &str,
+    scenario: BenchmarkScenario,
+) -> Result<(), String> {
+    let expected_tracks = scenario.video_publishers + scenario.audio_publishers;
+    if scenario.subscribers == 0 || expected_tracks == 0 {
+        return Ok(());
+    }
 
+    let mut subscriber_track_rows = Vec::new();
+    let mut subscriber_packet_rows = std::collections::HashMap::<String, u64>::new();
+    for line in output.lines() {
+        let mut columns = line
+            .split('│')
+            .map(str::trim)
+            .collect::<Vec<_>>();
+        if columns.first().is_some_and(|column| column.is_empty()) {
+            columns.remove(0);
+        }
+        if columns.len() < 4 || !columns[0].starts_with("Sub ") {
+            continue;
+        }
+
+        if let Some((received, expected)) = columns[1].split_once('/') {
+            let received = received.parse::<u16>().map_err(|_| {
+                format!("{} has an invalid track summary {:?}", columns[0], columns[1])
+            })?;
+            let expected = expected.parse::<u16>().map_err(|_| {
+                format!("{} has an invalid track summary {:?}", columns[0], columns[1])
+            })?;
+            subscriber_track_rows.push((columns[0].to_string(), received, expected));
+            continue;
+        }
+
+        let packets = columns[3].parse::<u64>().map_err(|_| {
+            format!("{} has an invalid packet count {:?}", columns[0], columns[3])
+        })?;
+        subscriber_packet_rows.insert(columns[0].to_string(), packets);
+    }
+
+    let expected_subscribers = usize::from(scenario.subscribers);
+    if subscriber_track_rows.len() != expected_subscribers {
+        return Err(format!(
+            "expected {expected_subscribers} subscriber summaries, found {}",
+            subscriber_track_rows.len()
+        ));
+    }
+
+    for (subscriber, received, reported_expected) in subscriber_track_rows {
+        if reported_expected != expected_tracks || received != expected_tracks {
+            return Err(format!(
+                "{subscriber} reports {received}/{reported_expected} tracks, expected {expected_tracks}/{expected_tracks}"
+            ));
+        }
+        if subscriber_packet_rows.get(&subscriber).copied().unwrap_or(0) == 0 {
+            return Err(format!("{subscriber} has no received packets"));
+        }
+    }
+
+    Ok(())
+}
+
+fn ensure_comparable_packet_delivery(go_output: &str, oxidesfu_output: &str) -> Result<(), String> {
+    let go_packets = received_packet_count(go_output)?;
+    let oxidesfu_packets = received_packet_count(oxidesfu_output)?;
+    if oxidesfu_packets.saturating_mul(2) < go_packets
+        || go_packets.saturating_mul(2) < oxidesfu_packets
+    {
+        return Err(format!(
+            "Go received {go_packets} RTP packets but Rust received {oxidesfu_packets}; expected totals within a 2x envelope"
+        ));
+    }
+    Ok(())
+}
+
+fn received_packet_count(output: &str) -> Result<u64, String> {
+    let mut packets = 0u64;
+    for line in output.lines() {
+        let mut columns = line
+            .split('│')
+            .map(str::trim)
+            .collect::<Vec<_>>();
+        if columns.first().is_some_and(|column| column.is_empty()) {
+            columns.remove(0);
+        }
+        if columns.len() < 4 || columns[1].contains('/') {
+            continue;
+        }
+        let is_track_row = columns[0].starts_with("Sub ") || columns[0].is_empty();
+        if !is_track_row {
+            continue;
+        }
+        let Ok(packet_count) = columns[3].parse::<u64>() else {
+            continue;
+        };
+        packets = packets.saturating_add(packet_count);
+    }
+    if packets == 0 {
+        return Err("no received RTP packets found in load-test output".to_string());
+    }
+    Ok(packets)
+}
 
 async fn sample_process_resources_until_stopped(
     pid: u32,
@@ -1533,6 +1771,7 @@ fn write_benchmark_artifacts(
             "num_per_second": scenario.num_per_second,
             "layout": scenario.layout,
             "video_resolution": scenario.video_resolution,
+            "video_codec": BENCHMARK_VIDEO_CODEC,
             "no_simulcast": scenario.no_simulcast,
         },
         "results": json_results,

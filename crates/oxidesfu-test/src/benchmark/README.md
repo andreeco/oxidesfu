@@ -17,8 +17,11 @@ For each scenario, the suite compares Go LiveKit vs OxideSFU using:
 - approximate one-core CPU %
 - peak and average RSS
 - loadavg, network byte/packet deltas, and FD counts (in JSON artifacts)
+- subscriber delivery validation: every configured subscriber must receive every expected track and at least one RTP packet; total received RTP packets must remain within a 2× Go/Rust envelope
 
-Resource samples are collected from `/proc` during each load test run.
+All video scenarios pin the load generator to H.264 so both implementations forward the same encoded source shape. Benchmark scenarios run serially to avoid inter-scenario contention.
+
+Resource samples are collected from `/proc` during each load test run. CPU and RSS are process-specific. Network counters come from the shared network namespace and are diagnostic only; they are not per-process server accounting.
 
 ## Scenarios
 
@@ -102,4 +105,5 @@ If prerequisites are missing, benchmark scenario tests may skip with an explanat
 - These are comparative micro/meso benchmarks for CI/dev feedback, not absolute capacity certification.
 - Synthetic scenarios are useful for fast regressions; production-like scenarios (`*high_simulcast_large*`) are better for realism.
 - Prefer idle hosts and repeated runs (`OXIDESFU_BENCHMARK_RUNS>=5`) before drawing strong conclusions.
-- A scenario passes only if OxideSFU stays within configured regression gates against Go medians.
+- A scenario passes only if both implementations pass subscriber delivery validation and OxideSFU stays within configured regression gates against Go medians.
+- CPU/RSS comparisons should only be interpreted from artifacts whose CLI output confirms identical expected track counts and packet-delivery envelope. Packet totals are captured in the CLI log tail when `OXIDESFU_BENCHMARK_INCLUDE_LOG_TAILS=1`.
