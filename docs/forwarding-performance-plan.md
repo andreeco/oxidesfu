@@ -8,6 +8,14 @@ _This document serves as a kind of memory for an LLM on how to continue with per
 
 This plan records the evidence, reference behavior, target architecture, staged implementation plan, and compatibility gates for normalizing delivered simulcast media before attributing or closing the remaining CPU gap.
 
+## Status update (2026-07-17): target-owned RTP/RTCP state extracted
+
+Commit `0a34aa6d` implements the first production ownership extraction. `ForwardTarget` now owns `SubscriberRtpState`; the serialized publisher-track reader mutates it for both RTP and RTCP. The production media path no longer uses `SignalState.rtp_forwarding`, compound-key forwarding-state lookup, or an `Arc<Mutex<SubscriberRtpState>>`. RTCP refreshes the cached target set before dispatch and cannot recreate state for a removed target. The retransmission cache is replaced after target-local descriptor and extension mutation so NACK replays the wire representation sent to the subscriber.
+
+Validation for that slice: `cargo test -p oxidesfu-signaling --lib` (548 passed, 2 ignored), `cargo clippy -p oxidesfu-signaling --all-targets -- -D warnings`, formatting, and diff check.
+
+This is **not** the proposed complete actor-owned media plane. The first incarnation implementation revealed a control-plane lifecycle race: `ForwardTrackStore` holds tracks, active membership/index, and incarnations in separate mutexes. A rapid same-key remove/re-add or replacement can produce a torn `(transport, incarnation)` snapshot or let old cleanup remove a replacement target; incarnations are also not currently reclaimed by every removal path. Before packet fast paths, sharding, pacing, or `webrtc-rs` changes, consolidate those structures behind one lifecycle-state mutex; publish/list/remove coherent tuples atomically; discard pending old-target video batches on changed incarnation; and refresh timer branches before they act on cached targets. The temporary operational continuation note is `docs/temporary-forwarding-implementation-handoff.md`.
+
 ## Final implementation status (2026-07-16)
 
 The target-aware simulcast and one-SSRC scalable forwarding slice is implemented through wire output: descriptor-backed frames are selected per `ForwardTarget`, direct/chain dependencies are preserved, fragments share frame decisions, outgoing dependency-descriptor active-target masks are rewritten per subscriber, negotiated extension IDs are honored, unnegotiated descriptors are stripped, and retransmission caches retain the final rewritten packet. Final implementation commit: `2daecd11`.
