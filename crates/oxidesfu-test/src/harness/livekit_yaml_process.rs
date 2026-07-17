@@ -6,15 +6,8 @@ async fn livekit_yaml_startup_process_supports_cli_room_lifecycle() {
     };
     assert_success(version, "lk --version should run");
 
-    let reservation = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("test listener should reserve a port");
-    let port = reservation
-        .local_addr()
-        .expect("reserved listener should expose its address")
-        .port();
-    drop(reservation);
-
+    let port = reserve_local_port();
+    let rtc_tcp_port = reserve_local_port();
     let config_path = std::env::temp_dir().join(format!(
         "oxidesfu-livekit-yaml-{}-{}.yaml",
         std::process::id(),
@@ -23,7 +16,7 @@ async fn livekit_yaml_startup_process_supports_cli_room_lifecycle() {
     std::fs::write(
         &config_path,
         format!(
-            "port: {port}\nkeys:\n  {API_KEY}: {API_SECRET}\nroom:\n  auto_create: true\n"
+            "port: {port}\nkeys:\n  {API_KEY}: {API_SECRET}\nrtc:\n  tcp_port: {rtc_tcp_port}\nroom:\n  auto_create: true\n"
         ),
     )
     .expect("test YAML fixture should write");
@@ -80,15 +73,8 @@ async fn livekit_yaml_startup_process_supports_cli_room_lifecycle() {
 
 #[tokio::test]
 async fn livekit_yaml_process_advertises_static_external_turn_servers() {
-    let reservation = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("port reservation should bind");
-    let port = reservation
-        .local_addr()
-        .expect("reservation should expose address")
-        .port();
-    drop(reservation);
-
+    let port = reserve_local_port();
+    let rtc_tcp_port = reserve_local_port();
     let config_path = std::env::temp_dir().join(format!(
         "oxidesfu-livekit-yaml-turn-{}-{}.yaml",
         std::process::id(),
@@ -97,7 +83,7 @@ async fn livekit_yaml_process_advertises_static_external_turn_servers() {
     std::fs::write(
         &config_path,
         format!(
-            "port: {port}\nkeys:\n  {API_KEY}: {API_SECRET}\nrtc:\n  turn_servers:\n    - host: turn.example.net\n      port: 3478\n      protocol: udp\n      username: turn-user\n      credential: turn-pass\n"
+            "port: {port}\nkeys:\n  {API_KEY}: {API_SECRET}\nrtc:\n  tcp_port: {rtc_tcp_port}\n  turn_servers:\n    - host: turn.example.net\n      port: 3478\n      protocol: udp\n      username: turn-user\n      credential: turn-pass\n"
         ),
     )
     .expect("external TURN YAML fixture should write");
@@ -132,19 +118,8 @@ async fn redis_relay_process_returns_room_owner_ice_servers() {
         eprintln!("skipping Redis relay process contract because Redis is unavailable");
         return;
     };
-    let first = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("first port reservation should bind");
-    let second = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("second port reservation should bind");
-    let mut ports = [
-        first.local_addr().expect("first reservation should expose address").port(),
-        second.local_addr().expect("second reservation should expose address").port(),
-    ];
+    let mut ports = [reserve_local_port(), reserve_local_port()];
     ports.sort_unstable();
-    drop(first);
-    drop(second);
 
     let owner_options = OxidesfuServerProcessOptions {
         ice_servers_json: Some(
@@ -208,15 +183,14 @@ async fn livekit_yaml_redis_process_supports_room_api_and_join() {
         eprintln!("skipping YAML Redis process contract because Redis is unavailable");
         return;
     };
-    let reservation = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("port reservation should bind");
-    let port = reservation.local_addr().expect("reservation should expose address").port();
-    drop(reservation);
+    let port = reserve_local_port();
     let redis_address = redis_url
         .strip_prefix("redis://")
         .and_then(|value| value.strip_suffix("/0"))
         .expect("test Redis URL should have the expected shape");
+    let rtc_tcp_port = reserve_local_port();
     let config_path = std::env::temp_dir().join(format!("oxidesfu-livekit-yaml-redis-{}-{}.yaml", std::process::id(), unique_suffix()));
-    std::fs::write(&config_path, format!("port: {port}\nkeys:\n  {API_KEY}: {API_SECRET}\nredis:\n  address: {redis_address}\nroom:\n  auto_create: true\n")).expect("Redis YAML fixture should write");
+    std::fs::write(&config_path, format!("port: {port}\nkeys:\n  {API_KEY}: {API_SECRET}\nrtc:\n  tcp_port: {rtc_tcp_port}\nredis:\n  address: {redis_address}\nroom:\n  auto_create: true\n")).expect("Redis YAML fixture should write");
     let (mut server, url) = spawn_oxidesfu_server_process_with_livekit_config(port, &config_path)
         .await.expect("YAML Redis server should start").expect("server binary should be available");
     let room = format!("yaml-redis-{}", unique_suffix());

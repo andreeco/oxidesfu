@@ -33,6 +33,13 @@
             return Ok(None);
         }
 
+        let mut options = options.clone();
+        // The server owns a fixed TCP mux. Test processes must not inherit its
+        // production default or parallel nodes will contend for one listener.
+        if options.rtc_tcp_port.is_none() {
+            options.rtc_tcp_port = Some(reserve_local_port());
+        }
+
         let binary_path = oxidesfu_server_binary_path();
         let bind = format!("127.0.0.1:{bind_port}");
         let mut command = tokio::process::Command::new(&binary_path);
