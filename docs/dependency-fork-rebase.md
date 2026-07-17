@@ -132,10 +132,34 @@ Run relevant Rust SDK conformance commands in `tools/conformance/` as well.
 
 Known validation caveats from the 2026-07-15 rebase: the strict Rust SDK clippy
 command also fails on pristine upstream `origin/main` in `device-info` because
-two compile-time assertion helpers are reported as dead code. The OxideSFU
-workspace run completed 112 tests, with two known failures awaiting follow-up:
-`rust_sdk_room_publisher_unpublish_then_republish_audio_emits_clean_remote_lifecycle`
-and `upstream_livekit::singlenode::test_single_node_update_subscription_permissions`.
+two compile-time assertion helpers are reported as dead code.
+
+Two Rust SDK compatibility contracts remain unresolved as of 2026-07-17:
+
+- `rust_sdk_room_publisher_unpublish_then_republish_audio_emits_clean_remote_lifecycle`
+  reproduces in isolation. After `LocalParticipant::unpublish_track`, the pinned
+  SDK revision (`2dc87b5cde110365aef8c090d19a50d0fdbec5ae`) does not send a
+  follow-up publisher offer within 30 seconds, and Oxide receives no terminal
+  `RemoteTrackEvent::Ended`. The server therefore has no wire-observable reason
+  to remove the publication or emit the remote `TrackUnpublished` event. Run the
+  same client scenario against the local upstream LiveKit server before changing
+  Oxide's removal behavior.
+- `upstream_livekit::singlenode::test_single_node_update_subscription_permissions`
+  intermittently times out in v0 while awaiting the first data-track frame after
+  the server has reported a subscriber handle. Draining the client-side
+  `_data_track` event and waiting for that channel to open did not make repeated
+  runs reliable, so that harness-only workaround was deliberately not retained.
+  Investigate server-side subscriber data-channel writability and reliable-frame
+  handling before reporting the subscriber handle as ready.
+
+Reproduce the two contracts independently with:
+
+```sh
+cargo test -p oxidesfu-test \
+  rust_sdk_room_publisher_unpublish_then_republish_audio_emits_clean_remote_lifecycle \
+  -- --nocapture
+cargo test -p oxidesfu-test test_single_node_update_subscription_permissions -- --nocapture
+```
 
 ## WebRTC and RTC forks
 
