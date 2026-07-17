@@ -42,26 +42,27 @@ The retransmission cache is replaced after final target-local descriptor/extensi
 
 `SignalState.rtp_forwarding` and all production `RtpForwardingStore` cleanup/context plumbing have been removed. A `#[cfg(test)]` compatibility fixture remains only for legacy state-algorithm tests and must not be reintroduced into production code.
 
-### Target incarnation attempt
+### Target incarnation and normal lifecycle containment (`5ddcaeae`)
 
-`ForwardTrackStore` now assigns a monotonic incarnation on insertion and the reader retains target RTP state only when both key and incarnation match. This was intended to distinguish a same-lifetime transport refresh from remove/re-add/replacement.
+`ForwardTrackStore` assigns a monotonic incarnation on insertion and the reader retains target RTP state only when both key and incarnation match. This distinguishes a same-lifetime transport refresh from remove/re-add/replacement.
+
+Commit `5ddcaeae` adds a control-plane lifecycle mutex around normal target insertion, subscriber activation, active target snapshots, incarnation-aware snapshots, and single-target removal. The normal insert/list/remove path can no longer observe a new incarnation with an old transport. Single-target removal also reclaims its incarnation record. This mutex is never acquired by the RTP/RTCP reader.
 
 ## Critical unfinished correctness work
 
 Do **not** start target shards, egress actors, compact retransmission metadata, or `webrtc-rs` changes yet.
 
-The current `ForwardTrackStore` lifecycle data is split across independent mutexes:
+Bulk lifecycle operations still manipulate the lifecycle maps through their older multi-lock implementation. They require consolidation under the same lifecycle domain:
 
-- `tracks`;
-- `target_incarnations`;
-- `active`;
-- `active_by_track`.
+- `remove_all_for_track`;
+- `remove_subscriber_mid`;
+- `remove_track`;
+- `remove_all_for_publisher`;
+- `remove_participant`.
 
-That makes the current incarnation implementation racy. A concurrent insert/remove/list can produce a new incarnation paired with an old transport, or an old cleanup can remove a just-inserted replacement. The incarnation map also is not removed on every target removal path.
+### Required next slice: complete atomic forwarding-target lifecycle
 
-### Required next slice: atomic forwarding-target lifecycle
-
-Replace those separate lifecycle maps with one private store state guarded by one mutex:
+Prefer one private store state guarded by the existing lifecycle mutex:
 
 ```rust
 struct ForwardTrackStoreState {
@@ -74,17 +75,12 @@ struct ForwardTrackStoreState {
 
 Requirements:
 
-1. Insert, activate, deactivate, remove, and list an active target atomically with respect to this lifecycle state.
-2. `list_for_track_with_incarnation` must return a coherent `(key, transport, incarnation)` tuple from one state snapshot.
-3. Every removal path must remove the target incarnation in the same lifecycle operation:
-   - single key;
-   - subscriber MID;
-   - publisher track;
-   - publisher departure;
-   - participant removal.
+1. Bulk mutation and active-target listing must use coherent lifecycle snapshots.
+2. `list_for_track_with_incarnation` must keep returning an atomic `(key, transport, incarnation)` tuple.
+3. Every bulk removal path must remove the target incarnation in the same lifecycle operation.
 4. Bump the store revision only after a fully committed lifecycle mutation.
 5. Keep reader leases (`started`) separate unless their semantics require an explicit lifecycle handoff.
-6. Add deterministic tests for same-key replacement, remove/re-add, bulk removal, and incarnation-map reclamation. A test-only synchronization hook is acceptable for forced interleavings.
+6. Add deterministic tests for same-key replacement, remove/re-add, each bulk removal route, and incarnation-map reclamation.
 
 ### Required refresh ordering correction
 
@@ -105,7 +101,7 @@ The reader’s keyframe-retry and allocation timer branches must also refresh wh
 5. **Subscriber egress/pacer**: conditional on measured driver/core contention after the preceding slices. Existing bounded WebRTC driver queues may already be sufficient.
 6. **Paired performance conclusion**: repeated delivery-validated Go/Rust runs using process CPU plus `cycles:u`, instructions, context switches, and packet-plane counters.
 
-## Validation already completed for `0a34aa6d`
+## Validation already completed for `0a34aa6d` and `5ddcaeae`
 
 ```bash
 cargo fmt --all
