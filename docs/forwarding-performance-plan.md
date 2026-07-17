@@ -293,6 +293,136 @@ It may:
 - clone an RTP payload only where output packet ownership requires it;
 - write through the negotiated WebRTC sender.
 
+### Proposed end-state: actor-owned media plane (not implemented)
+
+This is a Rust-native design proposal, not a request to mechanically port LiveKit's goroutine model. The core rule is **single-writer ownership of hot RTP state**: the task that advances a target's sequence/timestamp/layer state is also the task that serves its NACK/RTCP state. Shared locks should be exceptional control-plane boundaries, not the normal packet path.
+
+```mermaid
+flowchart LR
+    I[WebRTC ingress packet] --> S[Source coordinator]
+    C[Subscription and policy snapshot] --> S
+    F[RTCP NACK, PLI, receiver feedback] --> T[Stable target shard]
+    S -->|immutable packet reference and parsed metadata| T
+    T -->|prepared target RTP| E[Subscriber egress and pacer]
+    E --> W[WebRTC sender and SRTP UDP write]
+    T --> R[Bounded retransmission metadata]
+    R -->|NACK lookup| T
+```
+
+#### 1. Treat control plane and data plane as different systems
+
+The signaling/room layer may use strings, protobufs, room maps, negotiation, authorization, and asynchronous request/response logic. It runs at participant and subscription change frequency. The media layer runs at packet frequency and should receive only compact, already-resolved state:
+
+```rust
+struct MediaTargetSnapshot {
+    target_id: TargetId,
+    sender_id: SenderId,
+    target_ssrc: u32,
+    payload_type: u8,
+    mid_extension_id: Option<u8>,
+    policy: LayerPolicy,
+}
+```
+
+`TargetId`, `SenderId`, and source identity should be opaque numeric/newtype IDs in the packet plane, not `(String, String, String, String)` keys. A subscription change constructs a new immutable target snapshot and sends it to the source coordinator. It must not make the packet loop query room/subscription stores.
+
+#### 2. Source coordinator owns ingress ordering and parses once
+
+One coordinator owns each publisher codec/source stream. It receives decrypted RTP from WebRTC, parses H264/VP8/VP9/AV1 metadata once, classifies source SSRC/RID once, and publishes an `Arc<IncomingMediaPacket>` to its target shards. The packet object contains immutable payload ownership and parsed metadata; target code must not repeatedly parse payload bytes or query `RemoteTrack`.
+
+The coordinator also receives source-level control messages: target snapshot replacement, publisher lifecycle, PLI aggregation, and source-specific RTCP. It is allowed to stay serial because source RTP ordering is inherent. Its packet cost should be approximately:
+
+```text
+source parse + O(number of active target shards)
+```
+
+not full target rewrite plus sender I/O for every subscriber.
+
+#### 3. Stable target shards own translation and retransmission state
+
+A target shard owns a fixed subset of targets for one source. Each target's state is private to that shard:
+
+```rust
+struct TargetForwardState {
+    policy: LayerPolicy,
+    spatial: SubscriberVideoLayerSelector,
+    temporal: SubscriberVideoTemporalController,
+    sequence_timestamp: SequenceTimestampMapper,
+    duplicate_window: DuplicateWindow,
+    retransmission: RetransmissionState,
+    output: MediaTargetSnapshot,
+}
+```
+
+The shard processes packet events and RTCP/NACK events in one ordered actor loop. Consequently, the normal rewrite path does not need `Arc<Mutex<SubscriberRtpState>>`; NACK handling observes the same sequence mapping/cache without a lock. This is particularly aligned with Rust ownership: state is `mut` because exactly one task owns it, not because many tasks coordinate access to it.
+
+At low fan-out a source has one target shard. At high fan-out it has a small, stable, bounded number of shards—for example two to four, chosen from target count and host capacity. Each shard preserves packet order for every target it owns. This is deliberately different from spawning up to one task per target on every packet. It creates bounded long-lived tasks, keeps cache locality, and allows parallel target processing only where the workload warrants it.
+
+#### 4. Make the in-order RTP case explicit
+
+The common case is an active SSRC with next sequence number. Its state transition should be a few integer updates and a ring-slot replacement. Out-of-order, duplicate, rollover, and source-switch packets take a slower compatibility path. The existing behavior must be retained, but the data structure can make the cheap case cheap:
+
+- store the last extended sequence and a fixed-size ring indexed by sequence number;
+- avoid a `HashSet`/`VecDeque` mutation for the ordinary next packet;
+- enter duplicate/reorder bookkeeping only when continuity breaks;
+- retain exact tests for duplicate suppression, rollover, layer switches, and late RTX.
+
+#### 5. Keep retransmission metadata compact and source-addressable
+
+The current full rewritten-packet cache is simple and correct but expensive under fan-out. The desired model is a bounded ring of target translation metadata plus a retained/lookupable immutable source packet. For NACK, the shard reconstructs the target RTP header and target-specific descriptor/extensions from the saved metadata. This mirrors LiveKit's separation of source-packet retention from `sequencer` metadata while retaining Oxide's exact dependency-descriptor compatibility tests.
+
+This must be budgeted. A source-packet cache is shared by targets; target metadata is compact. Eviction must be deterministic and tied to RTT/retransmission requirements. It may not silently lower NACK reliability just to reduce memory or CPU.
+
+#### 6. Subscriber egress owns pacing and WebRTC writer interaction
+
+A subscriber connection has many outgoing tracks. It needs one bounded egress/pacing boundary that owns packet priority and the interaction with the WebRTC sender/driver. The boundary accepts already-prepared target packets, batches compatible packets, and applies an explicit overload policy. It must not allow unbounded target queues.
+
+Priority should be explicit:
+
+1. RTCP/control needed to sustain media;
+2. audio and selected video media in sequence order;
+3. retransmissions, paced according to congestion policy;
+4. probing/padding/diagnostic work.
+
+The exact implementation can initially use the existing `webrtc-rs` prepared-driver event path. Replacing it with a dedicated pacer is a later experiment, only if driver queue waits or core-lock contention prove material. The abstraction boundary matters before the transport mechanism does.
+
+#### 7. Backpressure is part of correctness
+
+Every actor channel has a capacity, owner, and overload decision. A full channel must not create an unbounded `await` chain across every source and target. For each queue, document whether full means:
+
+- coalesce a superseded policy update;
+- drop obsolete video enhancement data according to the selected-layer policy;
+- retain audio/control within a bounded deadline;
+- request a source/keyframe recovery action; or
+- surface a health metric.
+
+Do not use lossy behavior for a packet solely because a queue is convenient. The loss policy must be compatible with RTP sequence rewriting and subscriber decoder recovery.
+
+#### 8. Measure an architecture before claiming it is better
+
+A valid benchmark change must preserve the current media contract: every expected track arrives, every track has RTP, delivery remains within the packet-comparability envelope, and decoded simulcast quality/temporal behavior remains correct. Add per-run counters for:
+
+- source packets and bytes by codec/layer;
+- target packets selected, dropped, rewritten, queued, and written;
+- target-shard queue depth and full events;
+- egress/driver queue depth and wait duration;
+- retransmission cache bytes, NACK hits, and misses;
+- lock acquisitions/contention remaining in the packet plane;
+- packet clone/copy bytes and allocation counts.
+
+Then compare paired Go/Rust runs using `cycles:u`, instructions, cache/branch misses, and context switches, alongside process CPU time. Do not select a design based only on wall time or a single flat profile.
+
+#### Migration order
+
+1. Add invariants and counters around the existing path without changing behavior.
+2. Extract reader-owned sequence/timestamp/duplicate state behind a tested private type; keep the old retransmission interface.
+3. Route NACK/RTCP to the owning reader actor, removing the packet-path shared mutex only after race/order tests pass.
+4. Replace full rewritten-packet cache ownership with compact metadata/source lookup, guarded by retransmission tests.
+5. Add stable target shards for a controlled high-fan-out threshold and prove per-target ordering.
+6. Only if measurements show it is needed, add an egress pacer or refine the `webrtc-rs` driver boundary.
+
+Each phase requires focused unit contracts, existing SDK/browser compatibility coverage, a delivery-validated benchmark comparison, and rollback-friendly commits. No public API or LiveKit wire format change is required by this design.
+
 ## Implementation phases
 
 ### Phase 0 — Preserve baseline and contracts
