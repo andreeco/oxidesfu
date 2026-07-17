@@ -419,21 +419,19 @@ response. Dynamic TURN credentials (`secret`, `secret_file`, `ttl`) remain
 fail-closed because they require participant-specific HMAC credential
 issuance; owned TURN/TLS remains unsupported.
 
-### Slice E — multi-node relay parity blockers from gaps register 🚧
+### Slice E — multi-node relay parity blockers from gaps register ✅
 
-**Completed owner-response contract:** relay join intents now carry encoded client
-metadata to the selected owner. The owner resolves ICE servers and client
-configuration through the same `SignalState` queries as a local join, including
-participant-SID-specific TURN credentials and browser codec policy. Malformed
-relay client metadata is rejected rather than silently losing policy state.
+**Completed:** relay join intents carry encoded client metadata to the selected
+owner. The owner resolves ICE servers and client configuration through the same
+`SignalState` queries as a local join, including participant-SID-specific TURN
+credentials and browser codec policy. Malformed relay client metadata is
+rejected rather than silently losing policy state.
 
-**Remaining work:**
-
-1. Add a multi-process Redis relay contract proving this owner response is
-   delivered through the origin to an SDK client.
-2. Validate distributed room API forwarding behavior under YAML/native configs.
-
-**Done when:** targeted distributed tests from `docs/gaps.md` are green.
+`redis_relay_process_returns_room_owner_ice_servers` starts two real native
+server processes against Redis, joins through the non-owning origin, and proves
+that the SDK receives the selected owner’s ICE entry. The same process contract
+uses RoomService list/get through the origin to prove management-plane forwarding
+to the owner.
 
 ### Slice F — room policy/limit functionality
 

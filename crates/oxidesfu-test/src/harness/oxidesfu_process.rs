@@ -6,6 +6,7 @@
         rtc_tcp_port: Option<u16>,
         rtc_use_external_ip: Option<bool>,
         rtc_node_ip: Option<String>,
+        ice_servers_json: Option<String>,
     }
 
     async fn spawn_oxidesfu_server_process(
@@ -77,6 +78,9 @@
         }
         if let Some(rtc_node_ip) = options.rtc_node_ip.as_ref() {
             command.arg("--rtc-node-ip").arg(rtc_node_ip);
+        }
+        if let Some(ice_servers_json) = options.ice_servers_json.as_ref() {
+            command.arg("--ice-servers-json").arg(ice_servers_json);
         }
 
         command.current_dir(oxidesfu_workspace_root());

@@ -127,6 +127,82 @@ async fn livekit_yaml_process_advertises_static_external_turn_servers() {
 }
 
 #[tokio::test]
+async fn redis_relay_process_returns_room_owner_ice_servers() {
+    let Some((mut redis, redis_url)) = spawn_ready_redis_server_for_distributed_tests().await else {
+        eprintln!("skipping Redis relay process contract because Redis is unavailable");
+        return;
+    };
+    let first = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("first port reservation should bind");
+    let second = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("second port reservation should bind");
+    let mut ports = [
+        first.local_addr().expect("first reservation should expose address").port(),
+        second.local_addr().expect("second reservation should expose address").port(),
+    ];
+    ports.sort_unstable();
+    drop(first);
+    drop(second);
+
+    let owner_options = OxidesfuServerProcessOptions {
+        ice_servers_json: Some(
+            r#"[{"urls":["turn:owner.example.net:3478?transport=udp"],"username":"owner-user","credential":"owner-pass"}]"#.to_string(),
+        ),
+        ..Default::default()
+    };
+    let origin_options = OxidesfuServerProcessOptions {
+        ice_servers_json: Some(
+            r#"[{"urls":["turn:origin.example.net:3478?transport=udp"],"username":"origin-user","credential":"origin-pass"}]"#.to_string(),
+        ),
+        ..Default::default()
+    };
+    let (mut owner, _) = spawn_oxidesfu_server_process_with_options(
+        ports[0],
+        &redis_url,
+        false,
+        &owner_options,
+    )
+    .await
+    .expect("room-owner server should start")
+    .expect("server binary should be available");
+    let (mut origin, origin_url) = spawn_oxidesfu_server_process_with_options(
+        ports[1],
+        &redis_url,
+        false,
+        &origin_options,
+    )
+    .await
+    .expect("relay-origin server should start")
+    .expect("server binary should be available");
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    let join = run_signal_join_participant_visibility(
+        &origin_url,
+        &format!("redis-relay-owner-{}", unique_suffix()),
+        "redis-relay-alice",
+        "Redis Relay Alice",
+    )
+    .await;
+
+    assert_eq!(join.ice_servers.len(), 1);
+    assert_eq!(
+        join.ice_servers[0].urls,
+        vec!["turn:owner.example.net:3478?transport=udp"]
+    );
+    assert_eq!(join.ice_servers[0].username, "owner-user");
+    assert_eq!(join.ice_servers[0].credential, "owner-pass");
+    assert_eq!(join.joined_identity, "redis-relay-alice");
+    assert_eq!(join.fetched_identity, "redis-relay-alice");
+    assert_eq!(join.listed_participant_count, 1);
+
+    let _ = origin.kill().await;
+    let _ = owner.kill().await;
+    let _ = redis.kill().await;
+}
+
+#[tokio::test]
 async fn livekit_yaml_redis_process_supports_room_api_and_join() {
     let Some((mut redis, redis_url)) = spawn_ready_redis_server_for_distributed_tests().await else {
         eprintln!("skipping YAML Redis process contract because Redis is unavailable");

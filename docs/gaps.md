@@ -41,36 +41,36 @@ Upstream keeps publisher and subscriber writers independent and routes downstrea
 
 ## Open gaps
 
-### Relay JoinResponse does not carry configured ICE servers
+### Relay JoinResponse preserves configured ICE servers
 
-**Status:** High risk.
+**Status:** Covered.
 
-The relay owner currently returns a default STUN server list. Local joins can use `SignalState`’s static or participant-specific ICE server provider. As a result, a relayed participant can lose configured TURN/STUN servers.
+The relay owner resolves ICE through `SignalState`, the same source used by local
+joins. This preserves configured static servers and participant-SID-specific ICE
+providers instead of hard-coding default STUN.
 
 - Upstream: `livekit/pkg/rtc/room.go:createJoinResponseLocked` returns the room participant’s resolved `IceServers`.
-- Oxide paths:
-  - local: `crates/oxidesfu-signaling/src/router.rs`
-  - relay owner: `crates/oxidesfu-server/src/relay_worker.rs`
-  - provider state: `crates/oxidesfu-signaling/src/state.rs`
+- Oxide: `SignalState::ice_servers_for_participant`; `RoomStoreRelayJoinIntentExecutor`.
+- Regression: `relay_executor_uses_owner_ice_and_client_configuration_resolution`
+  proves provider credentials use the assigned SID; the two-process Redis
+  `redis_relay_process_returns_room_owner_ice_servers` contract proves that the
+  origin delivers the selected owner’s ICE entry to an SDK client.
 
-**Required contract:** configure a participant-specific TURN/STUN provider, force a non-local room owner, decode the relayed `JoinResponse`, and assert exact ICE-server parity with a local join. Follow with a Firefox/TURN-only connection smoke test.
+### Relay JoinResponse preserves client configuration
 
-**Implementation direction:** expose a narrowly scoped public signaling-state method for owner-side ICE resolution, rather than duplicating or hard-coding provider behavior in the server crate.
+**Status:** Covered.
 
-### Relay JoinResponse omits client configuration
-
-**Status:** High risk.
-
-Local signaling computes `ClientConfiguration` from the candidate protocol preference and client codec policy. The relay response omits it, so a relayed browser may not apply `force_relay` or disabled-codec behavior.
+Relay intents carry encoded `JoinRequest.client_info`, and the selected owner
+uses `SignalState::client_configuration_for_participant`, the same resolver used
+by local joins. Therefore candidate-protocol preferences remain owner-local and
+browser codec policy is reconstructed from the original client metadata.
 
 - Upstream: `livekit/pkg/rtc/room.go:createJoinResponseLocked` returns `participant.GetClientConfiguration()`.
 - Client: `client-sdk-js/src/room/RTCEngine.ts:makeRTCConfiguration` maps `forceRelay` to relay-only ICE.
-- Oxide local calculation: `crates/oxidesfu-signaling/src/router.rs:client_configuration_for_participant`.
-- Relay owner: `crates/oxidesfu-server/src/relay_worker.rs`.
-
-**Required contract:** choose TLS candidate protocol for a relayed participant and assert the decoded join response has `force_relay=ENABLED`; separately cover configured disabled codecs.
-
-**Implementation direction:** move the calculation behind a documented `SignalState` query usable by the relay owner. Preserve participant-specific state rather than reconstructing it from relay intent fields.
+- Regression: `relay_executor_uses_owner_ice_and_client_configuration_resolution`
+  proves Safari’s disabled-AV1 policy survives relay serialization. Existing
+  candidate-protocol signal-request coverage continues to exercise
+  `force_relay` through the shared `SignalState` resolver.
 
 ### Enabled publish codecs are not advertised
 
