@@ -15,6 +15,9 @@ ALLOW_FAILURE="${OXIDESFU_DISCOVERY_ALLOW_FAILURE:-false}"
 LOG_DIR="${OXIDESFU_DISCOVERY_LOG_DIR:-$ROOT/target/conformance}"
 RUST_TEST_FILTER="${OXIDESFU_DISCOVERY_RUST_TEST_FILTER-}"
 CARGO_TEST_EXTRA_ARGS="${OXIDESFU_DISCOVERY_RUST_SDKS_CARGO_TEST_EXTRA_ARGS:-}"
+# Native libwebrtc factory tests use process-global state and can segfault when
+# libtest schedules them concurrently. Keep each test binary serial by default.
+RUST_TEST_THREADS="${OXIDESFU_DISCOVERY_RUST_TEST_THREADS:-1}"
 SERVER_PID=""
 
 if [[ "$REUSE_SERVER" == "true" ]]; then
@@ -89,6 +92,7 @@ echo "reuse_server: $REUSE_SERVER" >>"$LOG_FILE"
 echo "allow_failure: $ALLOW_FAILURE" >>"$LOG_FILE"
 echo "rust_test_filter: $RUST_TEST_FILTER" >>"$LOG_FILE"
 echo "cargo_test_extra_args: $CARGO_TEST_EXTRA_ARGS" >>"$LOG_FILE"
+echo "rust_test_threads: $RUST_TEST_THREADS" >>"$LOG_FILE"
 echo >>"$LOG_FILE"
 
 CARGO_TEST_COMMAND="cargo test --workspace --all-targets"
@@ -98,7 +102,7 @@ fi
 if [[ -n "$CARGO_TEST_EXTRA_ARGS" ]]; then
   CARGO_TEST_COMMAND="$CARGO_TEST_COMMAND $CARGO_TEST_EXTRA_ARGS"
 fi
-CARGO_TEST_COMMAND="$CARGO_TEST_COMMAND -- --nocapture"
+CARGO_TEST_COMMAND="$CARGO_TEST_COMMAND -- --test-threads=$RUST_TEST_THREADS --nocapture"
 
 echo "Running: $CARGO_TEST_COMMAND" | tee -a "$LOG_FILE"
 
