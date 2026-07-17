@@ -18,10 +18,19 @@ type DataChannelSample = {
   ordered: boolean;
 };
 
+type CandidatePairSample = {
+  state: string;
+  localProtocol?: string;
+  remoteProtocol?: string;
+  localCandidateType?: string;
+  remoteCandidateType?: string;
+};
+
 type PeerConnectionSample = {
   pcId: string;
   connectionState: string;
   iceConnectionState: string;
+  selectedCandidatePair?: CandidatePairSample;
 };
 
 type SessionDescriptionSample = {
@@ -129,6 +138,26 @@ async function waitForPeerConnectionCount(
   throw new Error(`${label} did not create ${expectedCount} peer connections within ${timeoutMs}ms: ${JSON.stringify(latest)}`);
 }
 
+async function waitForSelectedCandidatePairs(
+  page: import('@playwright/test').Page,
+  label: string,
+  timeoutMs = 10_000,
+): Promise<PeerConnectionSample[]> {
+  const deadline = Date.now() + timeoutMs;
+  let latest: PeerConnectionSample[] = [];
+
+  while (Date.now() < deadline) {
+    latest = await page.evaluate(() => window.oxidesfuPeerConnectionSample()) as PeerConnectionSample[];
+    const connected = latest.filter((sample) => sample.connectionState === 'connected');
+    if (connected.length > 0 && connected.every((sample) => sample.selectedCandidatePair)) {
+      return connected;
+    }
+    await page.waitForTimeout(250);
+  }
+
+  throw new Error(`${label} did not expose selected candidate-pair stats within ${timeoutMs}ms: ${JSON.stringify(latest)}`);
+}
+
 async function waitForReceiverSample(
   page: import('@playwright/test').Page,
   label: string,
@@ -182,6 +211,53 @@ test('Firefox single-PC publisher delivers video to a subscriber', async ({ brow
   await subscriber.evaluate(() => window.oxidesfuClose());
   await publisherContext.close();
   await subscriberContext.close();
+});
+
+test('publisher and subscriber select ICE/TCP candidate pairs when the deployment routes TCP only', async ({ browser }) => {
+  test.skip(
+    process.env.OXIDESFU_EXPECT_ICE_TCP !== '1',
+    'Set OXIDESFU_EXPECT_ICE_TCP=1 only when the server/deployment independently prevents UDP ICE.',
+  );
+
+  const serverUrl = process.env.OXIDESFU_URL ?? process.env.LIVEKIT_URL;
+  const room = `browser-ice-tcp-${randomUUID()}`;
+  const publisherContext = await browser.newContext();
+  const subscriberContext = await browser.newContext();
+  const publisher = await publisherContext.newPage();
+  const subscriber = await subscriberContext.newPage();
+  const publisherUrl = `/?role=publisher&url=${encodeURIComponent(serverUrl!)}&token=${encodeURIComponent(token('browser-tcp-publisher', room))}`;
+  const subscriberUrl = `/?role=subscriber&url=${encodeURIComponent(serverUrl!)}&token=${encodeURIComponent(token('browser-tcp-subscriber', room))}`;
+
+  try {
+    await publisher.goto(publisherUrl);
+    await waitForHarnessReady(publisher, 'TCP publisher');
+    await subscriber.goto(subscriberUrl);
+    await waitForHarnessReady(subscriber, 'TCP subscriber');
+    await expect.poll(
+      async () => {
+        try {
+          return (await subscriber.evaluate(() => window.oxidesfuReceiverSample()) as ReceiverSample)
+            .framesDecoded;
+        } catch {
+          return 0;
+        }
+      },
+      { timeout: 10_000 },
+    ).toBeGreaterThan(0);
+
+    for (const [label, page] of [['publisher', publisher], ['subscriber', subscriber]] as const) {
+      const connected = await waitForSelectedCandidatePairs(page, label);
+      for (const connection of connected) {
+        expect(
+          connection.selectedCandidatePair,
+          `${label} selected a non-TCP or unobservable pair: ${JSON.stringify(connection)}`,
+        ).toMatchObject({ localProtocol: 'tcp', remoteProtocol: 'tcp' });
+      }
+    }
+  } finally {
+    await publisherContext.close();
+    await subscriberContext.close();
+  }
 });
 
 test('final adaptive low request keeps the active Firefox receiver advancing', async ({ browser }) => {

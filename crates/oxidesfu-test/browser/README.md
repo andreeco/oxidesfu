@@ -95,6 +95,58 @@ npm run test:firefox:raw
 
 The test mints short-lived tokens in memory; it never writes them to artifacts.
 
+## ICE/TCP contract
+
+The harness exposes the redacted selected-candidate-pair details as part of:
+
+```ts
+window.oxidesfuPeerConnectionSample(): Promise<Array<{
+  pcId: string;
+  connectionState: RTCPeerConnectionState;
+  iceConnectionState: RTCIceConnectionState;
+  selectedCandidatePair?: {
+    state: string;
+    localProtocol?: string;
+    remoteProtocol?: string;
+    localCandidateType?: string;
+    remoteCandidateType?: string;
+  };
+}>>
+```
+
+It never returns candidate addresses, ICE usernames/passwords, or tokens. When a
+browser reports a selected candidate pair, the opt-in contract requires both the
+publisher and subscriber's connected peer connections to report `tcp` for the
+local and remote candidate protocols:
+
+```bash
+OXIDESFU_EXPECT_ICE_TCP=1 \
+OXIDESFU_URL=wss://example.invalid \
+OXIDESFU_API_KEY=... \
+OXIDESFU_API_SECRET=... \
+npm run test:firefox -- --grep 'ICE/TCP'
+```
+
+`LIVEKIT_URL`, `LIVEKIT_API_KEY`, and `LIVEKIT_API_SECRET` remain equivalent
+aliases. Credentials and the generated JWTs remain process-memory only; do not
+put them in shell history or test artifacts.
+
+### Current forcing limitation
+
+This harness **does not force TCP**. The standard `RTCPeerConnection`
+configuration has no host-candidate transport filter: `iceTransportPolicy:
+'relay'` would require a TURN relay and still cannot select TCP rather than UDP.
+The LiveKit browser client exposes no additional safe TCP-only transport option.
+
+Likewise, the current OxideSFU startup configuration always creates a UDP ICE
+listener (ephemeral when no UDP port/range is configured), even while its shared
+ICE/TCP listener is enabled with `OXIDESFU_RTC_TCP_PORT`. Consequently, there
+is no truthful browser-only local `TCP-only OxideSFU` launch command today. Run
+the opt-in contract only against a deployment or independently provisioned
+network path that prevents UDP ICE and permits ICE/TCP; it then proves the
+actual selected browser candidate pairs are TCP. The test fails rather than
+claiming success if Firefox does not expose selected-pair protocol stats.
+
 By default, this harness keeps screenshots on failure, but disables trace/video to avoid storing JWT-bearing websocket URLs in artifacts.
 
 You can opt in for deeper debugging:

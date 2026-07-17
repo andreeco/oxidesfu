@@ -1,6 +1,6 @@
 // OxideSFU HTTP/WebSocket server composition.
 
-use std::{collections::BTreeMap, str::FromStr, sync::Arc};
+use std::{collections::BTreeMap, io, str::FromStr, sync::Arc};
 
 use async_trait::async_trait;
 use axum::{
@@ -433,8 +433,10 @@ impl MediaSubscriptionRuntime for SignalStateMediaSubscriptionRuntime {
 
 /// Builds the OxideSFU HTTP router with development configuration wiring.
 ///
-/// This path applies the same config-derived signaling transport/ICE settings
-/// as production server startup, but with `ServerConfig::development()` values.
+/// This compatibility convenience path uses `ServerConfig::development()` values
+/// without binding a fixed ICE/TCP listener. Use
+/// [`try_app_with_api_room_nodes_from_config`] for production-equivalent
+/// configuration-driven ICE/TCP setup.
 pub fn app() -> Router {
     let config = ServerConfig::development();
     let api_state = api_state_from_config(&config);
@@ -611,7 +613,34 @@ pub fn app_with_api_signal_state_readiness_webhooks_and_agent_relay(
         .layer(middleware::from_fn(normalize_path_and_reflect_origin))
 }
 
+/// Builds the OxideSFU HTTP router with placement controls and a shared ICE/TCP mux sourced from server configuration.
+///
+/// When ICE/TCP fallback is enabled, this binds the configured fixed TCP port before
+/// constructing the router. Binding failures are returned rather than silently
+/// constructing a router without the configured TCP transport.
+pub fn try_app_with_api_room_nodes_from_config(
+    api_state: ApiState,
+    room_nodes: Option<Arc<dyn RoomNodeDirectory>>,
+    local_room_node_id: Option<String>,
+    config: &ServerConfig,
+) -> io::Result<Router> {
+    let rtc_transport = rtc_transport_config_with_tcp_mux_from_server_config(config)?;
+    Ok(app_with_api_room_nodes_from_config_and_transport(
+        api_state,
+        room_nodes,
+        local_room_node_id,
+        config,
+        Arc::new(oxidesfu_signaling::NoopNonLocalRelayDispatcher),
+        Arc::new(AlwaysReadyRelayBackendReadiness),
+        rtc_transport,
+    ))
+}
+
 /// Builds the OxideSFU HTTP router with placement controls sourced from server configuration.
+///
+/// This compatibility constructor does not bind a fixed ICE/TCP listener. New server
+/// startup code that enables ICE/TCP fallback should use
+/// [`try_app_with_api_room_nodes_from_config`] instead.
 pub fn app_with_api_room_nodes_from_config(
     api_state: ApiState,
     room_nodes: Option<Arc<dyn RoomNodeDirectory>>,
@@ -654,6 +683,26 @@ pub fn app_with_api_room_nodes_from_config_relay_dispatcher_and_readiness(
     non_local_relay_dispatcher: Arc<dyn oxidesfu_signaling::NonLocalRelayDispatcher>,
     relay_backend_readiness: Arc<dyn RelayBackendReadiness>,
 ) -> Router {
+    app_with_api_room_nodes_from_config_and_transport(
+        api_state,
+        room_nodes,
+        local_room_node_id,
+        config,
+        non_local_relay_dispatcher,
+        relay_backend_readiness,
+        rtc_transport_config_from_server_config(config),
+    )
+}
+
+fn app_with_api_room_nodes_from_config_and_transport(
+    api_state: ApiState,
+    room_nodes: Option<Arc<dyn RoomNodeDirectory>>,
+    local_room_node_id: Option<String>,
+    config: &ServerConfig,
+    non_local_relay_dispatcher: Arc<dyn oxidesfu_signaling::NonLocalRelayDispatcher>,
+    relay_backend_readiness: Arc<dyn RelayBackendReadiness>,
+    rtc_transport: oxidesfu_rtc::RtcTransportConfig,
+) -> Router {
     let signal_state = oxidesfu_signaling::SignalState::with_data_channels_room_nodes_placement_and_relay_dispatcher(
         api_state.rooms.clone(),
         api_state.auth.clone(),
@@ -665,7 +714,7 @@ pub fn app_with_api_room_nodes_from_config_relay_dispatcher_and_readiness(
     )
     .with_ice_servers(signal_ice_servers_from_config(config))
         .with_room_auto_create(config.room_auto_create)
-        .with_rtc_transport_config(rtc_transport_config_from_server_config(config))
+        .with_rtc_transport_config(rtc_transport)
         .with_datachannel_slow_threshold_bytes(config.datachannel_slow_threshold)
         .with_participant_data_blob_enabled(config.participant_data_blob_enabled);
 

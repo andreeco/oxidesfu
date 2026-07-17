@@ -275,10 +275,36 @@ try {
     bufferedAmount: dataChannel.bufferedAmount,
     ordered: dataChannel.ordered,
   }));
-  window.oxidesfuPeerConnectionSample = () => peerConnections.map((peerConnection) => ({
-    pcId: peerConnectionIds.get(peerConnection) ?? 'unknown',
-    connectionState: peerConnection.connectionState,
-    iceConnectionState: peerConnection.iceConnectionState,
+  window.oxidesfuPeerConnectionSample = async () => Promise.all(peerConnections.map(async (peerConnection) => {
+    const stats = await peerConnection.getStats();
+    const transport = [...stats.values()].find((report) => report.type === 'transport' && report.selectedCandidatePairId);
+    const selectedPair = (transport ? stats.get(transport.selectedCandidatePairId) : undefined)
+      ?? [...stats.values()].find((report) => report.type === 'candidate-pair' && report.selected === true);
+    const localCandidate = selectedPair?.localCandidateId ? stats.get(selectedPair.localCandidateId) : undefined;
+    const remoteCandidate = selectedPair?.remoteCandidateId ? stats.get(selectedPair.remoteCandidateId) : undefined;
+    const protocol = (candidate) => typeof candidate?.protocol === 'string'
+      ? candidate.protocol.toLowerCase()
+      : undefined;
+    const candidateType = (candidate) => typeof candidate?.candidateType === 'string'
+      ? candidate.candidateType
+      : undefined;
+
+    return {
+      pcId: peerConnectionIds.get(peerConnection) ?? 'unknown',
+      connectionState: peerConnection.connectionState,
+      iceConnectionState: peerConnection.iceConnectionState,
+      ...(selectedPair
+        ? {
+            selectedCandidatePair: {
+              state: selectedPair.state ?? 'unknown',
+              localProtocol: protocol(localCandidate),
+              remoteProtocol: protocol(remoteCandidate),
+              localCandidateType: candidateType(localCandidate),
+              remoteCandidateType: candidateType(remoteCandidate),
+            },
+          }
+        : {}),
+    };
   }));
   window.oxidesfuSessionDescriptionSample = () => observedSessionDescriptions.map(({ peerConnection, direction, type, sections }) => ({
     pcId: peerConnectionIds.get(peerConnection) ?? 'unknown',

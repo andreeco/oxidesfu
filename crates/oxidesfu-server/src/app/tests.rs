@@ -19,7 +19,8 @@ use super::{
     rtc_transport_config_from_server_config, rtc_transport_config_with_tcp_mux_from_server_config,
     set_local_room_node_draining, signal_ice_servers_for_participant,
     signal_ice_servers_from_config, spawn_relay_intent_worker, spawn_room_cleanup_task,
-    spawn_room_cleanup_task_with_room_finished_handler, validate_turn_runtime_from_config,
+    spawn_room_cleanup_task_with_room_finished_handler, try_app_with_api_room_nodes_from_config,
+    validate_turn_runtime_from_config,
 };
 use axum::{
     body::Body,
@@ -1208,6 +1209,48 @@ async fn rtc_transport_config_binds_one_shared_tcp_mux_and_preserves_nat_mapping
     missing_node_ip.rtc_node_ip = None;
     let missing_node_ip_transport = rtc_transport_config_from_server_config(&missing_node_ip);
     assert!(missing_node_ip_transport.nat_1to1_ips.is_empty());
+}
+
+#[tokio::test]
+async fn config_router_binds_and_retains_shared_tcp_mux_or_returns_bind_error() {
+    let mut config = ServerConfig::development();
+    config.bind = "127.0.0.1:0".parse().expect("bind should parse");
+    let reserved_tcp = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("test should reserve an ephemeral fixed TCP port");
+    config.rtc_tcp_port = reserved_tcp
+        .local_addr()
+        .expect("reserved TCP listener should have an address")
+        .port();
+    drop(reserved_tcp);
+
+    let router = try_app_with_api_room_nodes_from_config(
+        api_state_from_config(&config),
+        None,
+        None,
+        &config,
+    )
+    .expect("configuration router should bind its shared fixed ICE/TCP mux");
+    assert!(
+        oxidesfu_rtc::bind_tcp_mux((std::net::Ipv4Addr::LOCALHOST, config.rtc_tcp_port)).is_err(),
+        "router must retain the single mux listener for its lifetime"
+    );
+    let mut occupied_config = config.clone();
+    let occupied = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("test should occupy an ephemeral fixed TCP port");
+    occupied_config.rtc_tcp_port = occupied
+        .local_addr()
+        .expect("occupied TCP listener should have an address")
+        .port();
+    let error = try_app_with_api_room_nodes_from_config(
+        api_state_from_config(&occupied_config),
+        None,
+        None,
+        &occupied_config,
+    )
+    .expect_err("configuration router must return a shared mux bind error");
+    assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
+    drop(occupied);
+    drop(router);
 }
 
 #[test]

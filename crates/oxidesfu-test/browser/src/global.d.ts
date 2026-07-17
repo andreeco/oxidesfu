@@ -22,11 +22,18 @@ declare global {
       bufferedAmount: number;
       ordered: boolean;
     }>;
-    oxidesfuPeerConnectionSample: () => Array<{
+    oxidesfuPeerConnectionSample: () => Promise<Array<{
       pcId: string;
       connectionState: RTCPeerConnectionState;
       iceConnectionState: RTCIceConnectionState;
-    }>;
+      selectedCandidatePair?: {
+        state: string;
+        localProtocol?: string;
+        remoteProtocol?: string;
+        localCandidateType?: string;
+        remoteCandidateType?: string;
+      };
+    }>>;
     oxidesfuSessionDescriptionSample: () => Array<{
       pcId: string;
       direction: 'local' | 'remote';
