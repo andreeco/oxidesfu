@@ -11,13 +11,11 @@ This project is **not affiliated with LiveKit**.
 
 ## Conformance status
 
-OxideSFU keeps external compatibility checks in `tools/conformance/` and runs them against upstream-style SDK and server checkouts. There is also a high internal test coverage.
+OxideSFU keeps external compatibility checks in `tools/conformance/` and runs them against upstream-style SDK and server checkouts. There is also a high internal test coverage. 
+
+There may be some flacky tests remaining but in general (nearly) all internal and external tests should pass.
 
 _Passing tests sadly do not mean that everything works as expected._
-
-## License
-
-OxideSFU is currently published under the [Apache License, Version 2.0](LICENSE-APACHE). I may consider publishing future versions under the MIT License if there are no legal restrictions. See also [`NOTICE`](NOTICE) and [`docs/provenance.md`](docs/provenance.md).
 
 ## Quickstart
 
@@ -82,3 +80,7 @@ lk token create \
 In each browser window, open [the LiveKit Meet custom connection page](https://meet.livekit.io/?tab=custom).
 
 Enter the local WebSocket URL `ws://127.0.0.1:7880` (not `wss://127.0.0.1:7880`) and the corresponding access token generated above. Use a different token in each window.
+
+## License
+
+OxideSFU is currently published under the [Apache License, Version 2.0](LICENSE-APACHE). I may consider publishing future versions under the MIT License if there are no legal restrictions. See also [`NOTICE`](NOTICE) and [`docs/provenance.md`](docs/provenance.md).

@@ -40,7 +40,7 @@ use super::*;
 
         wait_for_room_node_registration_count(&redis_url, 2)
             .await
-            .expect("both ferrite nodes should register in shared redis directory");
+            .expect("both oxidesfu nodes should register in shared redis directory");
 
         let room_name = format!("distributed-outage-fallback-room-{}", unique_suffix());
         let identity = format!("distributed-outage-fallback-identity-{}", unique_suffix());
@@ -124,7 +124,7 @@ use super::*;
 
         wait_for_room_node_registration_count(&redis_url, 2)
             .await
-            .expect("both ferrite nodes should register in shared redis directory");
+            .expect("both oxidesfu nodes should register in shared redis directory");
 
         let room_name = format!("distributed-outage-active-session-room-{}", unique_suffix());
         let identity = format!("distributed-outage-active-session-identity-{}", unique_suffix());
@@ -270,7 +270,7 @@ use super::*;
 
         wait_for_room_node_registration_count(&redis_url, 2)
             .await
-            .expect("both ferrite nodes should register in shared redis directory");
+            .expect("both oxidesfu nodes should register in shared redis directory");
 
         let room_name = format!("distributed-active-publish-outage-room-{}", unique_suffix());
         let publisher_identity = format!("distributed-active-publish-publisher-{}", unique_suffix());
@@ -436,7 +436,7 @@ use super::*;
 
         wait_for_room_node_registration_count(&redis_url, 2)
             .await
-            .expect("both ferrite nodes should register in shared redis directory");
+            .expect("both oxidesfu nodes should register in shared redis directory");
 
         let room_name = format!("distributed-outage-fallback-reconnect-room-{}", unique_suffix());
         let identity = format!("distributed-outage-fallback-reconnect-identity-{}", unique_suffix());
@@ -528,7 +528,7 @@ use super::*;
 
         wait_for_room_node_registration_count(&redis_url, 2)
             .await
-            .expect("both ferrite nodes should register in shared redis directory");
+            .expect("both oxidesfu nodes should register in shared redis directory");
 
         let room_name = format!(
             "distributed-process-reconnect-storm-room-{}",
@@ -644,7 +644,7 @@ use super::*;
 
         wait_for_room_node_registration_count(&redis_url, 2)
             .await
-            .expect("both ferrite nodes should register in shared redis directory");
+            .expect("both oxidesfu nodes should register in shared redis directory");
 
         let room_name = format!(
             "distributed-process-reconnect-soak-room-{}",
@@ -786,7 +786,7 @@ use super::*;
 
         wait_for_room_node_registration_count(&redis_url, 2)
             .await
-            .expect("both ferrite nodes should register in shared redis directory");
+            .expect("both oxidesfu nodes should register in shared redis directory");
 
         let remote_client = RoomClient::with_api_key(&node_b_base_url, API_KEY, API_SECRET)
             .with_failover(false)
@@ -940,7 +940,7 @@ use super::*;
 
         wait_for_room_node_registration_count(&redis_url, 2)
             .await
-            .expect("both ferrite nodes should register before redis outage");
+            .expect("both oxidesfu nodes should register before redis outage");
 
         let _ = redis.kill().await;
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -1044,7 +1044,7 @@ use super::*;
 
         wait_for_room_node_registration_count(&redis_url, 2)
             .await
-            .expect("both ferrite nodes should register before outage");
+            .expect("both oxidesfu nodes should register before outage");
 
         let room_name = format!("distributed-redis-outage-data-room-{}", unique_suffix());
         let publisher_identity = format!("distributed-redis-outage-publisher-{}", unique_suffix());
@@ -1214,7 +1214,7 @@ use super::*;
 
         wait_for_room_node_registration_count(&redis_url, 2)
             .await
-            .expect("both ferrite nodes should register in shared redis directory");
+            .expect("both oxidesfu nodes should register in shared redis directory");
 
         let room_name = format!("distributed-relay-worker-restart-room-{}", unique_suffix());
         let identity = format!("distributed-relay-worker-restart-identity-{}", unique_suffix());

@@ -23,10 +23,11 @@ pub use crate::cleanup::{
     spawn_room_cleanup_task_with_room_finished_handler,
 };
 pub use crate::config::{
-    api_state_from_config, register_local_room_node, room_node_directory_from_config,
-    rtc_transport_config_from_server_config, set_local_room_node_draining,
-    signal_ice_servers_for_participant, signal_ice_servers_from_config,
-    spawn_room_node_registration_task, validate_turn_runtime_from_config,
+    api_state_from_config, register_local_room_node, resolve_rtc_external_ip_from_config,
+    room_node_directory_from_config, rtc_transport_config_from_server_config,
+    set_local_room_node_draining, signal_ice_servers_for_participant,
+    signal_ice_servers_from_config, spawn_room_node_registration_task,
+    validate_turn_runtime_from_config,
 };
 pub use crate::health::HealthResponse;
 pub use crate::logging::DEFAULT_TRACING_ENV_FILTER;

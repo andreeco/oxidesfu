@@ -18215,7 +18215,7 @@ async fn rtc_v1_user_data_packet_reaches_oxidesfu() {
                         let packet = proto::DataPacket {
                             kind: proto::data_packet::Kind::Reliable as i32,
                             value: Some(proto::data_packet::Value::User(proto::UserPacket {
-                                payload: b"hello ferrite packet".to_vec(),
+                                payload: b"hello oxidesfu packet".to_vec(),
                                 topic: Some("test-topic".to_string()),
                                 ..Default::default()
                             })),
@@ -18240,10 +18240,10 @@ async fn rtc_v1_user_data_packet_reaches_oxidesfu() {
 
     assert_eq!(received.room, "test-room");
     assert_eq!(received.identity, "alice");
-    assert_eq!(received.text, "hello ferrite packet");
+    assert_eq!(received.text, "hello oxidesfu packet");
     assert_eq!(
         received.user_payload.as_deref(),
-        Some(&b"hello ferrite packet"[..])
+        Some(&b"hello oxidesfu packet"[..])
     );
     assert_eq!(received.topic.as_deref(), Some("test-topic"));
     assert_eq!(received.kind, proto::data_packet::Kind::Reliable as i32);
@@ -18534,7 +18534,7 @@ async fn rtc_v1_server_user_data_packet_reaches_client() {
                         let packet = proto::DataPacket {
                             kind: proto::data_packet::Kind::Reliable as i32,
                             value: Some(proto::data_packet::Value::User(proto::UserPacket {
-                                payload: b"hello from ferrite".to_vec(),
+                                payload: b"hello from oxidesfu".to_vec(),
                                 topic: Some("server-topic".to_string()),
                                 ..Default::default()
                             })),
@@ -18564,7 +18564,7 @@ async fn rtc_v1_server_user_data_packet_reaches_client() {
     let Some(proto::data_packet::Value::User(user)) = packet.value else {
         panic!("expected user packet");
     };
-    assert_eq!(user.payload, b"hello from ferrite");
+    assert_eq!(user.payload, b"hello from oxidesfu");
     assert_eq!(user.topic.as_deref(), Some("server-topic"));
 
     client_peer.close().await.expect("client peer should close");

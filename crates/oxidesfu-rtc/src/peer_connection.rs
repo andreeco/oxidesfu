@@ -1421,7 +1421,7 @@ mod tests {
                             .expect("open task should not panic")
                             .expect("offerer data channel should open");
                         send_channel
-                            .send_text("hello ferrite")
+                            .send_text("hello oxidesfu")
                             .await
                             .expect("text should send");
                         sent = true;
@@ -1437,7 +1437,7 @@ mod tests {
         .await
         .expect("data channel message should arrive before timeout");
 
-        assert_eq!(received, "hello ferrite");
+        assert_eq!(received, "hello oxidesfu");
 
         offerer.close().await.expect("offerer should close");
         answerer.close().await.expect("answerer should close");

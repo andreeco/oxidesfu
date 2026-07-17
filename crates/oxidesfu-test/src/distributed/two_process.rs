@@ -40,7 +40,7 @@ use super::*;
 
         wait_for_room_node_registration_count(&redis_url, 2)
             .await
-            .expect("both ferrite nodes should register in shared redis directory");
+            .expect("both oxidesfu nodes should register in shared redis directory");
 
         let room_name = format!("distributed-process-room-{}", unique_suffix());
         let identity = format!("distributed-process-identity-{}", unique_suffix());
@@ -134,7 +134,7 @@ use super::*;
 
         wait_for_room_node_registration_count(&redis_url, 2)
             .await
-            .expect("both ferrite nodes should register in shared redis directory");
+            .expect("both oxidesfu nodes should register in shared redis directory");
 
         let room_name = format!("distributed-process-reconnect-room-{}", unique_suffix());
         let identity = format!("distributed-process-reconnect-identity-{}", unique_suffix());
@@ -266,7 +266,7 @@ use super::*;
 
         wait_for_room_node_registration_count(&redis_url, 2)
             .await
-            .expect("both ferrite nodes should register in shared redis directory");
+            .expect("both oxidesfu nodes should register in shared redis directory");
 
         let room_name = format!("distributed-process-lifecycle-room-{}", unique_suffix());
         let identity = format!("distributed-process-lifecycle-identity-{}", unique_suffix());
@@ -434,7 +434,7 @@ use super::*;
 
         wait_for_room_node_registration_count(&redis_url, 2)
             .await
-            .expect("both ferrite nodes should register in shared redis directory");
+            .expect("both oxidesfu nodes should register in shared redis directory");
 
         let room_name = format!("distributed-process-data-room-{}", unique_suffix());
         let publisher_identity = format!("distributed-process-data-publisher-{}", unique_suffix());
@@ -606,7 +606,7 @@ use super::*;
 
         wait_for_room_node_registration_count(&redis_url, 2)
             .await
-            .expect("both ferrite nodes should register in shared redis directory");
+            .expect("both oxidesfu nodes should register in shared redis directory");
 
         let room_name = format!("distributed-process-audio-room-{}", unique_suffix());
         let publisher_identity = format!("distributed-process-audio-publisher-{}", unique_suffix());
@@ -851,7 +851,7 @@ use super::*;
 
         wait_for_room_node_registration_count(&redis_url, 2)
             .await
-            .expect("both ferrite nodes should register in shared redis directory");
+            .expect("both oxidesfu nodes should register in shared redis directory");
 
         let room_name = format!("distributed-process-offer-trickle-room-{}", unique_suffix());
         let identity = format!(

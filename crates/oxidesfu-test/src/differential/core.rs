@@ -1,14 +1,14 @@
 use super::*;
     #[tokio::test]
     async fn differential_validate_v1_negative_paths_match_go_livekit_dev() {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -35,7 +35,7 @@ use super::*;
             .to_jwt()
             .expect("access token should encode");
 
-        let ferrite_missing_join = http_get_status_and_body(
+        let oxidesfu_missing_join = http_get_status_and_body(
             &oxidesfu_base_url,
             "/rtc/v1/validate",
             Some(&format!("Bearer {auth_token}")),
@@ -48,16 +48,16 @@ use super::*;
         )
         .await;
 
-        assert_eq!(ferrite_missing_join.status, go_missing_join.status);
-        assert_eq!(ferrite_missing_join.body, go_missing_join.body);
+        assert_eq!(oxidesfu_missing_join.status, go_missing_join.status);
+        assert_eq!(oxidesfu_missing_join.body, go_missing_join.body);
 
-        let ferrite_missing_auth =
+        let oxidesfu_missing_auth =
             http_get_status_and_body(&oxidesfu_base_url, "/rtc/v1/validate", None).await;
         let go_missing_auth =
             http_get_status_and_body(&go_base_url, "/rtc/v1/validate", None).await;
 
-        assert_eq!(ferrite_missing_auth.status, go_missing_auth.status);
-        assert!(!ferrite_missing_auth.body.trim().is_empty());
+        assert_eq!(oxidesfu_missing_auth.status, go_missing_auth.status);
+        assert!(!oxidesfu_missing_auth.body.trim().is_empty());
         assert!(!go_missing_auth.body.trim().is_empty());
 
         let _ = go_livekit.kill().await;
@@ -262,14 +262,14 @@ use super::*;
 
     #[tokio::test]
     async fn differential_validate_v1_malformed_join_request_parity_matches_go_livekit_dev() {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -303,14 +303,14 @@ use super::*;
     }
     #[tokio::test]
     async fn differential_validate_v1_invalid_gzip_join_request_parity_matches_go_livekit_dev() {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -344,14 +344,14 @@ use super::*;
     }
     #[tokio::test]
     async fn differential_signal_v1_auth_failure_matrix_matches_go_livekit_dev() {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -381,14 +381,14 @@ use super::*;
     }
     #[tokio::test]
     async fn differential_signal_join_participant_visibility_matches_go_livekit_dev() {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -429,14 +429,14 @@ use super::*;
     }
     #[tokio::test]
     async fn differential_signal_leave_removes_participant_visibility_matches_go_livekit_dev() {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -470,14 +470,14 @@ use super::*;
     }
     #[tokio::test]
     async fn differential_signal_reconnect_resubscribe_data_track_matches_go_livekit_dev() {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -515,14 +515,14 @@ use super::*;
     }
     #[tokio::test]
     async fn differential_signal_reconnect_resubscribe_audio_track_matches_go_livekit_dev() {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -564,14 +564,14 @@ use super::*;
     }
     #[tokio::test]
     async fn differential_signal_reconnect_resubscribe_audio_track_single_pc_v1_matches_go_livekit_dev() {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -615,14 +615,14 @@ use super::*;
     #[tokio::test]
     async fn differential_signal_abrupt_disconnect_removes_participant_visibility_matches_go_livekit_dev()
      {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -656,14 +656,14 @@ use super::*;
     }
     #[tokio::test]
     async fn differential_signal_reconnect_identity_takeover_matches_go_livekit_dev() {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -697,14 +697,14 @@ use super::*;
     }
     #[tokio::test]
     async fn differential_twirp_delete_missing_room_error_shape_matches_go_livekit_dev() {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -736,14 +736,14 @@ use super::*;
     }
     #[tokio::test]
     async fn differential_signal_reconnect_then_pingreq_pongresp_matches_go_livekit_dev() {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -788,14 +788,14 @@ use super::*;
     #[tokio::test]
     async fn differential_signal_reconnect_rr_unknown_returns_reconnect_response_matches_go_livekit_dev()
     {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -838,14 +838,14 @@ use super::*;
     #[tokio::test]
     async fn differential_signal_reconnect_rr_publisher_failed_returns_reconnect_response_matches_go_livekit_dev()
      {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -887,14 +887,14 @@ use super::*;
     #[tokio::test]
     async fn differential_signal_reconnect_rr_switch_candidate_returns_reconnect_response_matches_go_livekit_dev()
      {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -939,14 +939,14 @@ use super::*;
     #[tokio::test]
     async fn differential_signal_reconnect_rr_subscriber_failed_returns_reconnect_response_matches_go_livekit_dev()
      {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -991,14 +991,14 @@ use super::*;
     #[tokio::test]
     async fn differential_signal_reconnect_rr_signal_disconnected_returns_reconnect_response_matches_go_livekit_dev()
      {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -1049,14 +1049,14 @@ use super::*;
     #[tokio::test]
     async fn differential_signal_reconnect_rr_unknown_returns_reconnect_response_dual_pc_matches_go_livekit_dev()
     {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -1101,14 +1101,14 @@ use super::*;
     #[tokio::test]
     async fn differential_signal_reconnect_rr_switch_candidate_returns_reconnect_response_dual_pc_matches_go_livekit_dev()
     {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -1159,14 +1159,14 @@ use super::*;
     #[tokio::test]
     async fn differential_signal_reconnect_rr_publisher_failed_returns_reconnect_response_dual_pc_matches_go_livekit_dev()
     {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -1217,14 +1217,14 @@ use super::*;
     #[tokio::test]
     async fn differential_signal_reconnect_rr_subscriber_failed_returns_reconnect_response_dual_pc_matches_go_livekit_dev()
     {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -1275,14 +1275,14 @@ use super::*;
     #[tokio::test]
     async fn differential_signal_reconnect_rr_signal_disconnected_returns_reconnect_response_dual_pc_matches_go_livekit_dev()
     {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -1333,14 +1333,14 @@ use super::*;
     #[tokio::test]
     async fn differential_signal_reconnect_rr_switch_candidate_then_pingreq_pongresp_matches_go_livekit_dev()
     {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -1393,14 +1393,14 @@ use super::*;
     #[tokio::test]
     async fn differential_signal_reconnect_rr_signal_disconnected_then_pingreq_pongresp_dual_pc_matches_go_livekit_dev()
     {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -1458,14 +1458,14 @@ use super::*;
     #[tokio::test]
     async fn differential_signal_reconnect_rr_publisher_failed_then_pingreq_pongresp_dual_pc_matches_go_livekit_dev()
     {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -1523,14 +1523,14 @@ use super::*;
     #[tokio::test]
     async fn differential_signal_reconnect_rr_subscriber_failed_then_pingreq_pongresp_dual_pc_matches_go_livekit_dev()
     {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -1588,14 +1588,14 @@ use super::*;
     #[tokio::test]
     async fn differential_signal_reconnect_rr_unknown_then_pingreq_pongresp_dual_pc_matches_go_livekit_dev()
     {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -1649,14 +1649,14 @@ use super::*;
 
     #[tokio::test]
     async fn differential_signal_reconnect_rr_switch_candidate_then_pingreq_pongresp_dual_pc_matches_go_livekit_dev() {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -1716,14 +1716,14 @@ use super::*;
     #[tokio::test]
     async fn differential_signal_reconnect_rr_publisher_failed_then_pingreq_pongresp_matches_go_livekit_dev()
     {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -1776,14 +1776,14 @@ use super::*;
     #[tokio::test]
     async fn differential_signal_reconnect_rr_signal_disconnected_then_pingreq_pongresp_matches_go_livekit_dev()
     {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -1838,14 +1838,14 @@ use super::*;
 
     #[tokio::test]
     async fn differential_signal_reconnect_rr_unknown_then_pingreq_pongresp_matches_go_livekit_dev() {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -1895,14 +1895,14 @@ use super::*;
     #[tokio::test]
     async fn differential_signal_reconnect_rr_subscriber_failed_then_pingreq_pongresp_matches_go_livekit_dev()
     {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -1955,14 +1955,14 @@ use super::*;
     #[tokio::test]
     async fn differential_signal_reconnect_stale_participant_sid_lifecycle_matches_go_livekit_dev()
     {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -2015,14 +2015,14 @@ use super::*;
     #[tokio::test]
     async fn differential_twirp_list_participants_permission_denied_error_shape_matches_go_livekit_dev()
      {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -2058,14 +2058,14 @@ use super::*;
     #[tokio::test]
     async fn differential_twirp_list_participants_missing_auth_error_shape_matches_go_livekit_dev()
     {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -2103,14 +2103,14 @@ use super::*;
     #[tokio::test]
     async fn differential_twirp_list_participants_malformed_body_error_shape_matches_go_livekit_dev()
      {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -2143,14 +2143,14 @@ use super::*;
     #[tokio::test]
     async fn differential_twirp_list_participants_content_type_mismatch_error_shape_matches_go_livekit_dev()
      {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -2186,14 +2186,14 @@ use super::*;
     }
     #[tokio::test]
     async fn differential_twirp_list_rooms_permission_denied_error_shape_matches_go_livekit_dev() {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -2223,14 +2223,14 @@ use super::*;
     }
     #[tokio::test]
     async fn differential_twirp_create_room_missing_auth_error_shape_matches_go_livekit_dev() {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -2260,14 +2260,14 @@ use super::*;
     }
     #[tokio::test]
     async fn differential_twirp_create_room_malformed_body_error_shape_matches_go_livekit_dev() {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -2295,14 +2295,14 @@ use super::*;
     #[tokio::test]
     async fn differential_twirp_remove_participant_permission_denied_error_shape_matches_go_livekit_dev()
      {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -2338,14 +2338,14 @@ use super::*;
     #[tokio::test]
     async fn differential_twirp_update_participant_malformed_body_error_shape_matches_go_livekit_dev()
      {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -2377,14 +2377,14 @@ use super::*;
     #[tokio::test]
     async fn differential_twirp_create_room_content_type_mismatch_error_shape_matches_go_livekit_dev()
      {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -2412,14 +2412,14 @@ use super::*;
     }
     #[tokio::test]
     async fn differential_twirp_send_data_permission_denied_error_shape_matches_go_livekit_dev() {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -2453,14 +2453,14 @@ use super::*;
     }
     #[tokio::test]
     async fn differential_twirp_send_data_invalid_nonce_error_shape_matches_go_livekit_dev() {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -2494,14 +2494,14 @@ use super::*;
     }
     #[tokio::test]
     async fn differential_twirp_send_data_missing_room_error_shape_matches_go_livekit_dev() {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -2536,14 +2536,14 @@ use super::*;
     #[tokio::test]
     async fn differential_twirp_get_participant_permission_denied_error_shape_matches_go_livekit_dev()
      {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -2578,14 +2578,14 @@ use super::*;
     #[tokio::test]
     async fn differential_twirp_get_participant_malformed_body_error_shape_matches_go_livekit_dev()
     {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -2617,14 +2617,14 @@ use super::*;
     #[tokio::test]
     async fn differential_twirp_update_room_metadata_permission_denied_error_shape_matches_go_livekit_dev()
      {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -2660,14 +2660,14 @@ use super::*;
     #[tokio::test]
     async fn differential_twirp_update_room_metadata_missing_room_error_shape_matches_go_livekit_dev()
      {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -2702,14 +2702,14 @@ use super::*;
     #[tokio::test]
     async fn differential_twirp_send_data_content_type_mismatch_error_shape_matches_go_livekit_dev()
     {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -2741,14 +2741,14 @@ use super::*;
     #[tokio::test]
     async fn differential_twirp_get_participant_missing_participant_error_shape_matches_go_livekit_dev()
      {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -2784,14 +2784,14 @@ use super::*;
     #[tokio::test]
     async fn differential_twirp_update_room_metadata_malformed_body_error_shape_matches_go_livekit_dev()
      {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -2821,14 +2821,14 @@ use super::*;
     #[tokio::test]
     async fn differential_twirp_update_room_metadata_content_type_mismatch_error_shape_matches_go_livekit_dev()
      {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -2857,14 +2857,14 @@ use super::*;
     }
     #[tokio::test]
     async fn differential_twirp_send_data_missing_auth_error_shape_matches_go_livekit_dev() {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -2898,14 +2898,14 @@ use super::*;
     }
     #[tokio::test]
     async fn differential_signal_post_close_send_no_pong_matches_go_livekit_dev() {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -2941,14 +2941,14 @@ use super::*;
     }
     #[tokio::test]
     async fn differential_signal_leave_termination_lifecycle_matches_go_livekit_dev() {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -2984,14 +2984,14 @@ use super::*;
     }
     #[tokio::test]
     async fn differential_signal_identity_takeover_close_lifecycle_matches_go_livekit_dev() {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -3027,14 +3027,14 @@ use super::*;
     #[tokio::test]
     async fn differential_data_track_multi_subscriber_reconnect_under_load_matches_go_livekit_dev()
     {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -3074,14 +3074,14 @@ use super::*;
     }
     #[tokio::test]
     async fn differential_data_track_publisher_drop_lifecycle_matches_go_livekit_dev() {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -3119,14 +3119,14 @@ use super::*;
     }
     #[tokio::test]
     async fn differential_signal_track_setting_acceptance_matches_go_livekit_dev() {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -3173,14 +3173,14 @@ use super::*;
     }
     #[tokio::test]
     async fn differential_signal_pingreq_pongresp_matches_go_livekit_dev() {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -3230,14 +3230,14 @@ use super::*;
 
     #[tokio::test]
     async fn differential_twirp_update_subscriptions_lifecycle_event_parity_matches_go_livekit_dev() {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });

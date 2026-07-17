@@ -410,8 +410,8 @@ fn from_lookup_reads_api_credentials_from_secret_files_when_env_values_absent() 
         .duration_since(UNIX_EPOCH)
         .expect("system time should be after epoch")
         .as_nanos();
-    let key_path = std::env::temp_dir().join(format!("ferrite-api-key-{now}.txt"));
-    let secret_path = std::env::temp_dir().join(format!("ferrite-api-secret-{now}.txt"));
+    let key_path = std::env::temp_dir().join(format!("oxidesfu-api-key-{now}.txt"));
+    let secret_path = std::env::temp_dir().join(format!("oxidesfu-api-secret-{now}.txt"));
 
     std::fs::write(&key_path, "file-key\n").expect("key file should write");
     std::fs::write(&secret_path, "file-secret\r\n").expect("secret file should write");
@@ -519,12 +519,13 @@ fn from_lookup_reports_invalid_millis_override() {
 }
 
 #[test]
-fn from_lookup_reports_missing_node_ip_when_use_external_ip_enabled() {
+fn from_lookup_accepts_external_ip_discovery_without_node_ip() {
     let env = HashMap::from([("OXIDESFU_RTC_USE_EXTERNAL_IP", "true".to_string())]);
 
-    let error = ServerConfig::from_lookup(|key| env.get(key).cloned())
-        .expect_err("missing node ip should fail when use_external_ip is enabled");
-    assert!(matches!(error, ConfigError::InvalidTransportConfig { .. }));
+    let config = ServerConfig::from_lookup(|key| env.get(key).cloned())
+        .expect("runtime STUN discovery should resolve a missing node IP");
+    assert!(config.rtc_use_external_ip);
+    assert_eq!(config.rtc_node_ip, None);
 }
 
 #[test]
@@ -541,13 +542,14 @@ fn from_lookup_accepts_node_ip_when_use_external_ip_enabled() {
 }
 
 #[test]
-fn apply_args_reports_missing_node_ip_when_use_external_ip_enabled() {
-    let error = ServerConfig::apply_args(
+fn apply_args_accepts_external_ip_discovery_without_node_ip() {
+    let config = ServerConfig::apply_args(
         ServerConfig::development(),
         vec![ARG_RTC_USE_EXTERNAL_IP.to_string(), "true".to_string()],
     )
-    .expect_err("missing node ip should fail when use_external_ip is enabled");
-    assert!(matches!(error, ConfigError::InvalidTransportConfig { .. }));
+    .expect("runtime STUN discovery should resolve a missing node IP");
+    assert!(config.rtc_use_external_ip);
+    assert_eq!(config.rtc_node_ip, None);
 }
 
 #[test]
@@ -901,7 +903,7 @@ fn resolve_config_text_matches_upstream_get_config_string_precedence() {
         .duration_since(UNIX_EPOCH)
         .expect("system time should be after epoch")
         .as_nanos();
-    let path = std::env::temp_dir().join(format!("ferrite-get-config-{now}.env"));
+    let path = std::env::temp_dir().join(format!("oxidesfu-get-config-{now}.env"));
     std::fs::write(&path, "fileContent").expect("temp config file should write");
 
     let cases = vec![
@@ -996,7 +998,7 @@ fn apply_config_file_via_arg_then_cli_values_override_file() {
         .duration_since(UNIX_EPOCH)
         .expect("system time should be after epoch")
         .as_nanos();
-    let path = std::env::temp_dir().join(format!("ferrite-config-{now}.env"));
+    let path = std::env::temp_dir().join(format!("oxidesfu-config-{now}.env"));
     std::fs::write(
             &path,
             "OXIDESFU_BIND=127.0.0.1:9091\nOXIDESFU_API_KEY=file-key\nOXIDESFU_ROOM_NODE_DIRECTORY_BACKEND=redis\n",

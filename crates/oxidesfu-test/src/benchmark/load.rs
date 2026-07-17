@@ -685,7 +685,7 @@ async fn run_benchmark_comparison_if_enabled(scenario: BenchmarkScenario) {
 }
 
 fn oxidesfu_benchmark_server_binary_path() -> PathBuf {
-    ferrite_workspace_root().join("target/release/oxidesfu-server")
+    oxidesfu_workspace_root().join("target/release/oxidesfu-server")
 }
 
 async fn ensure_oxidesfu_benchmark_server_binary_built() -> Result<bool, String> {
@@ -697,7 +697,7 @@ async fn ensure_oxidesfu_benchmark_server_binary_built() -> Result<bool, String>
         .arg("-p")
         .arg("oxidesfu-server")
         .arg("--release")
-        .current_dir(ferrite_workspace_root())
+        .current_dir(oxidesfu_workspace_root())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
@@ -740,7 +740,7 @@ async fn spawn_oxidesfu_benchmark_server(
         .arg("--api-secret")
         .arg(API_SECRET)
         .env("RUST_LOG", "error")
-        .current_dir(ferrite_workspace_root());
+        .current_dir(oxidesfu_workspace_root());
 
     if std::env::var_os("OXIDESFU_BENCHMARK_SERVER_STDIO").is_some() {
         command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
@@ -1097,7 +1097,7 @@ fn sanitize_artifact_text(value: &str) -> String {
         sanitized = sanitized.replace(&home, "~");
     }
 
-    let workspace = ferrite_workspace_root().display().to_string();
+    let workspace = oxidesfu_workspace_root().display().to_string();
     sanitized = sanitized.replace(&workspace, "<workspace>");
 
     sanitized
@@ -1139,7 +1139,7 @@ fn read_git_revision() -> Option<String> {
         .arg("rev-parse")
         .arg("--short")
         .arg("HEAD")
-        .current_dir(ferrite_workspace_root())
+        .current_dir(oxidesfu_workspace_root())
         .output()
         .ok()?;
     if !output.status.success() {
@@ -1431,7 +1431,7 @@ fn write_benchmark_artifacts(
     scenario: BenchmarkScenario,
     results: &[&ImplementationBenchmarkResult],
 ) -> std::io::Result<PathBuf> {
-    let artifact_dir = ferrite_workspace_root().join("target/benchmarks");
+    let artifact_dir = oxidesfu_workspace_root().join("target/benchmarks");
     std::fs::create_dir_all(&artifact_dir)?;
     let stem = format!("{}-{}", scenario.name, unique_suffix());
     let json_path = artifact_dir.join(format!("{stem}.json"));

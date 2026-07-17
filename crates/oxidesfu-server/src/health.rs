@@ -12,7 +12,7 @@ pub struct HealthResponse {
 
 pub(crate) async fn healthz() -> Json<HealthResponse> {
     Json(HealthResponse {
-        service: "ferrite",
+        service: "oxidesfu",
         status: "ok",
     })
 }

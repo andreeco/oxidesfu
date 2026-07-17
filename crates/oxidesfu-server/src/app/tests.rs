@@ -172,7 +172,7 @@ async fn healthz_returns_ok_json() {
     assert_eq!(
         decoded,
         serde_json::json!({
-            "service": "ferrite",
+            "service": "oxidesfu",
             "status": "ok",
         })
     );
@@ -1082,7 +1082,7 @@ async fn server_serves_healthz_over_tcp_and_graceful_shutdown_completes() {
     let response_text = String::from_utf8(response).expect("response should be utf8");
 
     assert!(response_text.contains("200 OK"));
-    assert!(response_text.contains("\"service\":\"ferrite\""));
+    assert!(response_text.contains("\"service\":\"oxidesfu\""));
     assert!(response_text.contains("\"status\":\"ok\""));
 
     shutdown_tx

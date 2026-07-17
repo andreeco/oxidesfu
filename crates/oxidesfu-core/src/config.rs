@@ -1076,13 +1076,6 @@ impl ServerConfig {
     }
 
     fn validate_transport_constraints(&self) -> Result<(), ConfigError> {
-        if self.rtc_use_external_ip && self.rtc_node_ip.as_deref().unwrap_or("").is_empty() {
-            return Err(ConfigError::InvalidTransportConfig {
-                message: "OXIDESFU_RTC_USE_EXTERNAL_IP requires OXIDESFU_RTC_NODE_IP to be set"
-                    .to_string(),
-            });
-        }
-
         let range_start = self.rtc_udp_port_range_start;
         let range_end = self.rtc_udp_port_range_end;
         if range_start.is_some() ^ range_end.is_some() {

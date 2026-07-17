@@ -3815,7 +3815,7 @@
             .arg("build")
             .arg("-p")
             .arg("oxidesfu-server")
-            .current_dir(ferrite_workspace_root())
+            .current_dir(oxidesfu_workspace_root())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
 

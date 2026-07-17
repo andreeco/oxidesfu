@@ -79,7 +79,7 @@
             command.arg("--rtc-node-ip").arg(rtc_node_ip);
         }
 
-        command.current_dir(ferrite_workspace_root());
+        command.current_dir(oxidesfu_workspace_root());
 
         if std::env::var_os("OXIDESFU_TEST_SERVER_STDIO").is_some() {
             command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
@@ -111,9 +111,9 @@
         }
     }
     fn oxidesfu_server_binary_path() -> PathBuf {
-        ferrite_workspace_root().join("target/debug/oxidesfu-server")
+        oxidesfu_workspace_root().join("target/debug/oxidesfu-server")
     }
-    fn ferrite_workspace_root() -> PathBuf {
+    fn oxidesfu_workspace_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .ancestors()
             .nth(2)

@@ -75,7 +75,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if run_config_command(&invocation)? {
         return Ok(());
     }
-    let config = match invocation {
+    let mut config = match invocation {
         Invocation::Serve(args) => ServerConfig::from_env_args_or_development(args)?,
         Invocation::ServeLiveKit(path) => {
             let yaml = fs::read_to_string(path)?;
@@ -90,6 +90,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
             unreachable!("config commands return before server startup")
         }
     };
+    if config.rtc_use_external_ip && config.rtc_node_ip.is_none() {
+        let discovered = oxidesfu_server::resolve_rtc_external_ip_from_config(&config)
+            .await?
+            .expect("external-IP discovery is enabled");
+        eprintln!("resolved RTC external IP through STUN: {discovered}");
+        config.rtc_node_ip = Some(discovered);
+    }
     oxidesfu_server::init_tracing()?;
     oxidesfu_server::validate_turn_runtime_from_config(&config).await?;
     let turn_runtime = oxidesfu_server::start_turn_runtime(&config).await?;

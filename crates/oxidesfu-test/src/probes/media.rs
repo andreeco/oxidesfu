@@ -1463,14 +1463,14 @@ async fn rust_sdk_room_vp9_svc_quality_low_to_high_preserves_delivery_contract()
 #[tokio::test]
 async fn differential_media_publish_subscribe_event_flow_matches_go_livekit_dev() {
     let _media_probe_guard = NATIVE_MEDIA_PROBE_LOCK.lock().await;
-    let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+    let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("listener should bind");
-    let oxidesfu_addr = ferrite_listener
+    let oxidesfu_addr = oxidesfu_listener
         .local_addr()
         .expect("listener should have local addr");
     let oxidesfu_server = tokio::spawn(async move {
-        axum::serve(ferrite_listener, oxidesfu_server::app())
+        axum::serve(oxidesfu_listener, oxidesfu_server::app())
             .await
             .expect("test server should run");
     });

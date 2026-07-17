@@ -37,7 +37,7 @@ pub(crate) async fn readinessz(
         return (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             Json(ReadinessResponse {
-                service: "ferrite",
+                service: "oxidesfu",
                 status: "not_ready",
             }),
         )
@@ -47,7 +47,7 @@ pub(crate) async fn readinessz(
         return (
             axum::http::StatusCode::OK,
             Json(ReadinessResponse {
-                service: "ferrite",
+                service: "oxidesfu",
                 status: "ready",
             }),
         )
@@ -65,7 +65,7 @@ pub(crate) async fn readinessz(
                 (
                     axum::http::StatusCode::OK,
                     Json(ReadinessResponse {
-                        service: "ferrite",
+                        service: "oxidesfu",
                         status: "ready",
                     }),
                 )
@@ -74,7 +74,7 @@ pub(crate) async fn readinessz(
                 (
                     axum::http::StatusCode::SERVICE_UNAVAILABLE,
                     Json(ReadinessResponse {
-                        service: "ferrite",
+                        service: "oxidesfu",
                         status: "not_ready",
                     }),
                 )
@@ -84,7 +84,7 @@ pub(crate) async fn readinessz(
         Err(_) => (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             Json(ReadinessResponse {
-                service: "ferrite",
+                service: "oxidesfu",
                 status: "not_ready",
             }),
         )

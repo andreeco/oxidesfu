@@ -13,7 +13,10 @@ use oxidesfu_room::{
     RedisRoomNodeDirectory, RegisteredNode, RoomNodeDirectory, RoomNodeRegistry,
     RoomNodeRegistryError, SelectorRegion,
 };
-use rtc_stun::message::{BINDING_REQUEST, BINDING_SUCCESS, Message, TransactionId};
+use rtc_stun::{
+    message::{BINDING_REQUEST, BINDING_SUCCESS, Getter, Message, TransactionId},
+    xoraddr::XorMappedAddress,
+};
 
 /// Builds an API state from server configuration.
 pub fn api_state_from_config(config: &ServerConfig) -> ApiState {
@@ -177,6 +180,98 @@ pub fn rtc_transport_config_from_server_config(
         tcp_addrs,
         nat_1to1_ips,
     }
+}
+
+/// Resolves the public RTC address through STUN when external-IP mode has no explicit node IP.
+///
+/// An explicit node IP remains the deterministic deployment override. Discovery is
+/// synchronous and startup-fatal after three attempts, matching LiveKit's initial
+/// external-IP configuration behavior.
+pub async fn resolve_rtc_external_ip_from_config(
+    config: &ServerConfig,
+) -> Result<Option<String>, io::Error> {
+    if !config.rtc_use_external_ip || config.rtc_node_ip.is_some() {
+        return Ok(config.rtc_node_ip.clone());
+    }
+    let endpoint = config
+        .ice_servers
+        .iter()
+        .flat_map(|server| server.urls.iter())
+        .find_map(|url| stun_endpoint(url))
+        .unwrap_or_else(|| ("stun.l.google.com".to_string(), 19_302));
+
+    let mut last_error = None;
+    for attempt in 1..=3 {
+        match discover_stun_mapped_ip(&endpoint.0, endpoint.1, Duration::from_secs(5)).await {
+            Ok(ip) => return Ok(Some(ip.to_string())),
+            Err(error) => last_error = Some(error),
+        }
+        if attempt < 3 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+    Err(last_error.unwrap_or_else(|| io::Error::other("STUN external-IP discovery failed")))
+}
+
+fn stun_endpoint(url: &str) -> Option<(String, u16)> {
+    let value = url.strip_prefix("stun:")?.split('?').next()?;
+    let (host, port) = value.rsplit_once(':')?;
+    Some((host.to_string(), port.parse().ok()?))
+}
+
+async fn discover_stun_mapped_ip(
+    domain: &str,
+    port: u16,
+    timeout: Duration,
+) -> Result<IpAddr, io::Error> {
+    let addresses = tokio::time::timeout(timeout, tokio::net::lookup_host((domain, port)))
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "STUN DNS lookup timed out"))??;
+    let mut request = Message::new();
+    request
+        .build(&[Box::<TransactionId>::default(), Box::new(BINDING_REQUEST)])
+        .map_err(|error| io::Error::other(format!("failed building STUN request: {error}")))?;
+    let request_id = request.transaction_id;
+    let request_bytes = request.raw.clone();
+    let mut last_error = None;
+    for address in addresses {
+        let bind = match address {
+            SocketAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+            SocketAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+        };
+        let result = async {
+            let socket = tokio::net::UdpSocket::bind(bind).await?;
+            socket.connect(address).await?;
+            socket.send(&request_bytes).await?;
+            let mut bytes = [0_u8; 2048];
+            let length = tokio::time::timeout(timeout, socket.recv(&mut bytes))
+                .await
+                .map_err(|_| {
+                    io::Error::new(io::ErrorKind::TimedOut, "STUN response timed out")
+                })??;
+            let mut response = Message::new();
+            response
+                .unmarshal_binary(&bytes[..length])
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            if response.typ != BINDING_SUCCESS || response.transaction_id != request_id {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "unexpected STUN response",
+                ));
+            }
+            let mut mapped = XorMappedAddress::default();
+            mapped
+                .get_from(&response)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            Ok::<IpAddr, io::Error>(mapped.ip)
+        }
+        .await;
+        match result {
+            Ok(ip) => return Ok(ip),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| io::Error::other("STUN lookup returned no addresses")))
 }
 
 /// Validates configured TURN endpoints are reachable when probing is enabled.

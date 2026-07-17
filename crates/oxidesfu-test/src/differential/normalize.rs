@@ -2,14 +2,14 @@ use super::*;
 
 #[tokio::test]
     async fn differential_distributed_lite_probes_match_go_livekit_dev() {
-        let ferrite_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let oxidesfu_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let oxidesfu_addr = ferrite_listener
+        let oxidesfu_addr = oxidesfu_listener
             .local_addr()
             .expect("listener should have local addr");
         let oxidesfu_server = tokio::spawn(async move {
-            axum::serve(ferrite_listener, oxidesfu_server::app())
+            axum::serve(oxidesfu_listener, oxidesfu_server::app())
                 .await
                 .expect("test server should run");
         });
@@ -35,11 +35,11 @@ use super::*;
 
         for (idx, case) in cases.iter().enumerate() {
             let namespace = format!("distributed-lite-case-{idx}-{}", unique_suffix());
-            let ferrite = run_differential_case(*case, &oxidesfu_base_url, &namespace).await;
+            let oxidesfu = run_differential_case(*case, &oxidesfu_base_url, &namespace).await;
             let go = run_differential_case(*case, &go_base_url, &namespace).await;
             assert_eq!(
-                ferrite, go,
-                "distributed differential lite case mismatch: {case:?}\nferrite={ferrite:?}\ngo={go:?}"
+                oxidesfu, go,
+                "distributed differential lite case mismatch: {case:?}\noxidesfu={oxidesfu:?}\ngo={go:?}"
             );
         }
 
