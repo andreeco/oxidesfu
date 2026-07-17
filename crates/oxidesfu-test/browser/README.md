@@ -74,7 +74,12 @@ OXIDESFU_API_SECRET=secret \
 npm run test:firefox
 ```
 
-`test:firefox` now auto-starts `oxidesfu-server` when nothing is listening on `OXIDESFU_URL` and stops it after the test run.
+The harness also accepts the equivalent `LIVEKIT_URL`, `LIVEKIT_API_KEY`, and
+`LIVEKIT_API_SECRET` variables. This permits testing a deployment with the
+same credentials used by LiveKit tooling, without copying them into a browser
+configuration file.
+
+`test:firefox` auto-starts `oxidesfu-server` when nothing is listening on the configured URL and stops it after the test run.
 
 If you want to run against an already-running server only, disable auto-start:
 

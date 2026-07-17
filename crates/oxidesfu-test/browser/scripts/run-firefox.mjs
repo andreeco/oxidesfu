@@ -4,12 +4,12 @@ import path from 'node:path';
 import net from 'node:net';
 import process from 'node:process';
 
-const serverUrl = process.env.OXIDESFU_URL;
-const apiKey = process.env.OXIDESFU_API_KEY;
-const apiSecret = process.env.OXIDESFU_API_SECRET;
+const serverUrl = process.env.OXIDESFU_URL ?? process.env.LIVEKIT_URL;
+const apiKey = process.env.OXIDESFU_API_KEY ?? process.env.LIVEKIT_API_KEY;
+const apiSecret = process.env.OXIDESFU_API_SECRET ?? process.env.LIVEKIT_API_SECRET;
 
 if (!serverUrl || !apiKey || !apiSecret) {
-  console.error('Missing required env: OXIDESFU_URL, OXIDESFU_API_KEY, OXIDESFU_API_SECRET');
+  console.error('Missing required env: OXIDESFU_URL/OXIDESFU_API_KEY/OXIDESFU_API_SECRET or LIVEKIT_URL/LIVEKIT_API_KEY/LIVEKIT_API_SECRET');
   process.exit(1);
 }
 
