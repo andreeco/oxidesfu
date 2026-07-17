@@ -188,6 +188,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .clone()
         .map(|dispatcher| dispatcher.signal_webhook_handler());
 
+    let rtc_transport =
+        oxidesfu_server::rtc_transport_config_with_tcp_mux_from_server_config(&config)?;
+
     let signal_state = oxidesfu_signaling::SignalState::with_data_channels_room_nodes_placement_and_relay_dispatcher(
         api_state.rooms.clone(),
         api_state.auth.clone(),
@@ -199,9 +202,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     )
     .with_ice_servers(oxidesfu_server::signal_ice_servers_from_config(&config))
     .with_room_auto_create(config.room_auto_create)
-    .with_rtc_transport_config(oxidesfu_server::rtc_transport_config_from_server_config(
-            &config,
-        ))
+    .with_rtc_transport_config(rtc_transport)
         .with_datachannel_slow_threshold_bytes(config.datachannel_slow_threshold)
         .with_participant_data_blob_enabled(config.participant_data_blob_enabled)
         .with_webhook_event_handler(webhook_event_handler);

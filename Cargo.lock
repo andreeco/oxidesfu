@@ -1171,7 +1171,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2419,7 +2419,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3689,7 +3689,7 @@ dependencies = [
 [[package]]
 name = "rtc"
 version = "0.20.0-rc.3"
-source = "git+https://github.com/andreeco/webrtc.git?rev=c2c355a0ca46a1549c912b900c05f14324f2de62#c2c355a0ca46a1549c912b900c05f14324f2de62"
+source = "git+https://github.com/andreeco/webrtc.git?rev=f95d4f56284e6832ae48124e044b0578cb02c357#f95d4f56284e6832ae48124e044b0578cb02c357"
 dependencies = [
  "bytes",
  "hex",
@@ -3723,7 +3723,7 @@ dependencies = [
 [[package]]
 name = "rtc-datachannel"
 version = "0.20.0-rc.3"
-source = "git+https://github.com/andreeco/webrtc.git?rev=c2c355a0ca46a1549c912b900c05f14324f2de62#c2c355a0ca46a1549c912b900c05f14324f2de62"
+source = "git+https://github.com/andreeco/webrtc.git?rev=f95d4f56284e6832ae48124e044b0578cb02c357#f95d4f56284e6832ae48124e044b0578cb02c357"
 dependencies = [
  "bytes",
  "log",
@@ -3735,7 +3735,7 @@ dependencies = [
 [[package]]
 name = "rtc-dtls"
 version = "0.20.0-rc.3"
-source = "git+https://github.com/andreeco/webrtc.git?rev=c2c355a0ca46a1549c912b900c05f14324f2de62#c2c355a0ca46a1549c912b900c05f14324f2de62"
+source = "git+https://github.com/andreeco/webrtc.git?rev=f95d4f56284e6832ae48124e044b0578cb02c357#f95d4f56284e6832ae48124e044b0578cb02c357"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -3768,7 +3768,7 @@ dependencies = [
 [[package]]
 name = "rtc-ice"
 version = "0.20.0-rc.3"
-source = "git+https://github.com/andreeco/webrtc.git?rev=c2c355a0ca46a1549c912b900c05f14324f2de62#c2c355a0ca46a1549c912b900c05f14324f2de62"
+source = "git+https://github.com/andreeco/webrtc.git?rev=f95d4f56284e6832ae48124e044b0578cb02c357#f95d4f56284e6832ae48124e044b0578cb02c357"
 dependencies = [
  "bytes",
  "crc",
@@ -3786,7 +3786,7 @@ dependencies = [
 [[package]]
 name = "rtc-interceptor"
 version = "0.20.0-rc.3"
-source = "git+https://github.com/andreeco/webrtc.git?rev=c2c355a0ca46a1549c912b900c05f14324f2de62#c2c355a0ca46a1549c912b900c05f14324f2de62"
+source = "git+https://github.com/andreeco/webrtc.git?rev=f95d4f56284e6832ae48124e044b0578cb02c357#f95d4f56284e6832ae48124e044b0578cb02c357"
 dependencies = [
  "log",
  "rand 0.10.2",
@@ -3800,7 +3800,7 @@ dependencies = [
 [[package]]
 name = "rtc-interceptor-derive"
 version = "0.20.0-rc.3"
-source = "git+https://github.com/andreeco/webrtc.git?rev=c2c355a0ca46a1549c912b900c05f14324f2de62#c2c355a0ca46a1549c912b900c05f14324f2de62"
+source = "git+https://github.com/andreeco/webrtc.git?rev=f95d4f56284e6832ae48124e044b0578cb02c357#f95d4f56284e6832ae48124e044b0578cb02c357"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3810,7 +3810,7 @@ dependencies = [
 [[package]]
 name = "rtc-mdns"
 version = "0.20.0-rc.3"
-source = "git+https://github.com/andreeco/webrtc.git?rev=c2c355a0ca46a1549c912b900c05f14324f2de62#c2c355a0ca46a1549c912b900c05f14324f2de62"
+source = "git+https://github.com/andreeco/webrtc.git?rev=f95d4f56284e6832ae48124e044b0578cb02c357#f95d4f56284e6832ae48124e044b0578cb02c357"
 dependencies = [
  "bytes",
  "log",
@@ -3822,7 +3822,7 @@ dependencies = [
 [[package]]
 name = "rtc-media"
 version = "0.20.0-rc.3"
-source = "git+https://github.com/andreeco/webrtc.git?rev=c2c355a0ca46a1549c912b900c05f14324f2de62#c2c355a0ca46a1549c912b900c05f14324f2de62"
+source = "git+https://github.com/andreeco/webrtc.git?rev=f95d4f56284e6832ae48124e044b0578cb02c357#f95d4f56284e6832ae48124e044b0578cb02c357"
 dependencies = [
  "byteorder",
  "bytes",
@@ -3835,7 +3835,7 @@ dependencies = [
 [[package]]
 name = "rtc-rtcp"
 version = "0.20.0-rc.3"
-source = "git+https://github.com/andreeco/webrtc.git?rev=c2c355a0ca46a1549c912b900c05f14324f2de62#c2c355a0ca46a1549c912b900c05f14324f2de62"
+source = "git+https://github.com/andreeco/webrtc.git?rev=f95d4f56284e6832ae48124e044b0578cb02c357#f95d4f56284e6832ae48124e044b0578cb02c357"
 dependencies = [
  "bytes",
  "rtc-shared",
@@ -3844,7 +3844,7 @@ dependencies = [
 [[package]]
 name = "rtc-rtp"
 version = "0.20.0-rc.3"
-source = "git+https://github.com/andreeco/webrtc.git?rev=c2c355a0ca46a1549c912b900c05f14324f2de62#c2c355a0ca46a1549c912b900c05f14324f2de62"
+source = "git+https://github.com/andreeco/webrtc.git?rev=f95d4f56284e6832ae48124e044b0578cb02c357#f95d4f56284e6832ae48124e044b0578cb02c357"
 dependencies = [
  "bytes",
  "memchr",
@@ -3856,7 +3856,7 @@ dependencies = [
 [[package]]
 name = "rtc-sctp"
 version = "0.20.0-rc.3"
-source = "git+https://github.com/andreeco/webrtc.git?rev=c2c355a0ca46a1549c912b900c05f14324f2de62#c2c355a0ca46a1549c912b900c05f14324f2de62"
+source = "git+https://github.com/andreeco/webrtc.git?rev=f95d4f56284e6832ae48124e044b0578cb02c357#f95d4f56284e6832ae48124e044b0578cb02c357"
 dependencies = [
  "bytes",
  "crc32c",
@@ -3871,7 +3871,7 @@ dependencies = [
 [[package]]
 name = "rtc-sdp"
 version = "0.20.0-rc.3"
-source = "git+https://github.com/andreeco/webrtc.git?rev=c2c355a0ca46a1549c912b900c05f14324f2de62#c2c355a0ca46a1549c912b900c05f14324f2de62"
+source = "git+https://github.com/andreeco/webrtc.git?rev=f95d4f56284e6832ae48124e044b0578cb02c357#f95d4f56284e6832ae48124e044b0578cb02c357"
 dependencies = [
  "rand 0.10.2",
  "rtc-shared",
@@ -3881,7 +3881,7 @@ dependencies = [
 [[package]]
 name = "rtc-shared"
 version = "0.20.0-rc.3"
-source = "git+https://github.com/andreeco/webrtc.git?rev=c2c355a0ca46a1549c912b900c05f14324f2de62#c2c355a0ca46a1549c912b900c05f14324f2de62"
+source = "git+https://github.com/andreeco/webrtc.git?rev=f95d4f56284e6832ae48124e044b0578cb02c357#f95d4f56284e6832ae48124e044b0578cb02c357"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -3902,7 +3902,7 @@ dependencies = [
 [[package]]
 name = "rtc-srtp"
 version = "0.20.0-rc.3"
-source = "git+https://github.com/andreeco/webrtc.git?rev=c2c355a0ca46a1549c912b900c05f14324f2de62#c2c355a0ca46a1549c912b900c05f14324f2de62"
+source = "git+https://github.com/andreeco/webrtc.git?rev=f95d4f56284e6832ae48124e044b0578cb02c357#f95d4f56284e6832ae48124e044b0578cb02c357"
 dependencies = [
  "aes",
  "byteorder",
@@ -3920,7 +3920,7 @@ dependencies = [
 [[package]]
 name = "rtc-stun"
 version = "0.20.0-rc.3"
-source = "git+https://github.com/andreeco/webrtc.git?rev=c2c355a0ca46a1549c912b900c05f14324f2de62#c2c355a0ca46a1549c912b900c05f14324f2de62"
+source = "git+https://github.com/andreeco/webrtc.git?rev=f95d4f56284e6832ae48124e044b0578cb02c357#f95d4f56284e6832ae48124e044b0578cb02c357"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -3938,7 +3938,7 @@ dependencies = [
 [[package]]
 name = "rtc-turn"
 version = "0.20.0-rc.3"
-source = "git+https://github.com/andreeco/webrtc.git?rev=c2c355a0ca46a1549c912b900c05f14324f2de62#c2c355a0ca46a1549c912b900c05f14324f2de62"
+source = "git+https://github.com/andreeco/webrtc.git?rev=f95d4f56284e6832ae48124e044b0578cb02c357#f95d4f56284e6832ae48124e044b0578cb02c357"
 dependencies = [
  "bytes",
  "log",
@@ -3987,7 +3987,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4046,7 +4046,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4500,7 +4500,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5185,7 +5185,7 @@ dependencies = [
 [[package]]
 name = "webrtc"
 version = "0.20.0-rc.3"
-source = "git+https://github.com/andreeco/webrtc.git?rev=c2c355a0ca46a1549c912b900c05f14324f2de62#c2c355a0ca46a1549c912b900c05f14324f2de62"
+source = "git+https://github.com/andreeco/webrtc.git?rev=f95d4f56284e6832ae48124e044b0578cb02c357#f95d4f56284e6832ae48124e044b0578cb02c357"
 dependencies = [
  "async-trait",
  "bytes",
@@ -5245,7 +5245,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

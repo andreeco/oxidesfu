@@ -279,11 +279,14 @@ fn disabled_codecs_for_client_info_matches_upstream_static_rules() {
     assert_eq!(firefox_linux_conf.publish[0].mime, "video/H264");
 }
 
-#[test]
-fn switch_candidate_reconnect_prefers_tcp_when_available() {
+#[tokio::test]
+async fn switch_candidate_reconnect_prefers_shared_tcp_mux_when_available() {
+    let tcp_mux = oxidesfu_rtc::bind_tcp_mux("127.0.0.1:0")
+        .expect("shared TCP mux should bind for supported client test");
     let state = state().with_rtc_transport_config(oxidesfu_rtc::RtcTransportConfig {
         udp_addrs: vec!["0.0.0.0:50000".to_string()],
-        tcp_addrs: vec!["0.0.0.0:7881".to_string()],
+        tcp_addrs: Vec::new(),
+        tcp_mux: Some(tcp_mux),
         nat_1to1_ips: Vec::new(),
     });
 
@@ -299,14 +302,18 @@ fn switch_candidate_reconnect_prefers_tcp_when_available() {
 
     let effective = effective_rtc_transport_for_join_request(&state, &request);
     assert!(effective.udp_addrs.is_empty());
-    assert_eq!(effective.tcp_addrs, vec!["0.0.0.0:7881"]);
+    assert!(effective.tcp_addrs.is_empty());
+    assert!(effective.tcp_mux.is_some());
 }
 
-#[test]
-fn switch_candidate_reconnect_for_go_sdk_does_not_use_tcp() {
+#[tokio::test]
+async fn switch_candidate_reconnect_for_go_sdk_does_not_use_shared_tcp_mux() {
+    let tcp_mux = oxidesfu_rtc::bind_tcp_mux("127.0.0.1:0")
+        .expect("shared TCP mux should bind for unsupported client test");
     let state = state().with_rtc_transport_config(oxidesfu_rtc::RtcTransportConfig {
         udp_addrs: vec!["0.0.0.0:50000".to_string()],
-        tcp_addrs: vec!["0.0.0.0:7881".to_string()],
+        tcp_addrs: Vec::new(),
+        tcp_mux: Some(tcp_mux),
         nat_1to1_ips: Vec::new(),
     });
 
@@ -323,6 +330,7 @@ fn switch_candidate_reconnect_for_go_sdk_does_not_use_tcp() {
     let effective = effective_rtc_transport_for_join_request(&state, &request);
     assert_eq!(effective.udp_addrs, vec!["0.0.0.0:50000"]);
     assert!(effective.tcp_addrs.is_empty());
+    assert!(effective.tcp_mux.is_none());
 }
 
 #[test]
@@ -330,6 +338,7 @@ fn non_switch_reconnect_keeps_udp_transport_configuration() {
     let state = state().with_rtc_transport_config(oxidesfu_rtc::RtcTransportConfig {
         udp_addrs: vec!["0.0.0.0:50000".to_string()],
         tcp_addrs: vec!["0.0.0.0:7881".to_string()],
+        tcp_mux: None,
         nat_1to1_ips: Vec::new(),
     });
 

@@ -163,10 +163,9 @@ pub fn rtc_transport_config_from_server_config(
     } else {
         vec![SocketAddr::new(rtc_bind_ip, 0).to_string()]
     };
-    // LiveKit exposes a fixed ICE/TCP server port, but `webrtc-rs` currently binds
-    // addresses passed here per peer connection. Passing a fixed TCP port would make
-    // the second peer connection fail with `Address already in use`. Leave fixed-port
-    // ICE/TCP disabled at this boundary until OxideSFU owns a shared TCP listener/mux.
+    // Per-peer TCP addresses are retained for explicit wrapper/test use. Production
+    // fixed-port ICE/TCP uses the shared mux added by
+    // `rtc_transport_config_with_tcp_mux_from_server_config` below.
     let tcp_addrs = Vec::new();
     let nat_1to1_ips = if config.rtc_use_external_ip {
         config
@@ -181,8 +180,21 @@ pub fn rtc_transport_config_from_server_config(
     oxidesfu_rtc::RtcTransportConfig {
         udp_addrs,
         tcp_addrs,
+        tcp_mux: None,
         nat_1to1_ips,
     }
+}
+
+/// Builds RTC transport configuration and binds the one shared configured ICE/TCP listener.
+pub fn rtc_transport_config_with_tcp_mux_from_server_config(
+    config: &ServerConfig,
+) -> io::Result<oxidesfu_rtc::RtcTransportConfig> {
+    let mut transport = rtc_transport_config_from_server_config(config);
+    if config.rtc_allow_tcp_fallback {
+        let addr = SocketAddr::new(rtc_bind_ip(config), config.rtc_tcp_port);
+        transport.tcp_mux = Some(oxidesfu_rtc::bind_tcp_mux(addr)?);
+    }
+    Ok(transport)
 }
 
 fn rtc_bind_ip(config: &ServerConfig) -> IpAddr {

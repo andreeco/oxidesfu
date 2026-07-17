@@ -16,10 +16,10 @@ use super::{
     app_with_api_room_nodes_relay_dispatcher_and_readiness, begin_graceful_shutdown,
     log_request_completion, register_local_room_node, request_id_from_headers,
     room_node_directory_from_config, room_node_directory_from_config_with_factory,
-    rtc_transport_config_from_server_config, set_local_room_node_draining,
-    signal_ice_servers_for_participant, signal_ice_servers_from_config, spawn_relay_intent_worker,
-    spawn_room_cleanup_task, spawn_room_cleanup_task_with_room_finished_handler,
-    validate_turn_runtime_from_config,
+    rtc_transport_config_from_server_config, rtc_transport_config_with_tcp_mux_from_server_config,
+    set_local_room_node_draining, signal_ice_servers_for_participant,
+    signal_ice_servers_from_config, spawn_relay_intent_worker, spawn_room_cleanup_task,
+    spawn_room_cleanup_task_with_room_finished_handler, validate_turn_runtime_from_config,
 };
 use axum::{
     body::Body,
@@ -1160,28 +1160,43 @@ fn rtc_transport_config_widens_loopback_signaling_bind_for_browser_ice() {
     assert_eq!(transport.udp_addrs, vec!["0.0.0.0:50100"]);
 }
 
-#[test]
-fn rtc_transport_config_from_server_config_does_not_bind_fixed_tcp_per_peer_connection() {
+#[tokio::test]
+async fn rtc_transport_config_binds_one_shared_tcp_mux_and_preserves_nat_mapping() {
     let mut enabled = ServerConfig::development();
     enabled.rtc_allow_tcp_fallback = true;
     enabled.rtc_use_external_ip = true;
     enabled.rtc_node_ip = Some("203.0.113.10".to_string());
     enabled.rtc_udp_port = Some(50100);
-    enabled.rtc_tcp_port = 7991;
+    let reserved_tcp = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("test should reserve an ephemeral fixed TCP port");
+    enabled.rtc_tcp_port = reserved_tcp
+        .local_addr()
+        .expect("reserved TCP listener should have an address")
+        .port();
+    drop(reserved_tcp);
 
-    let enabled_transport = rtc_transport_config_from_server_config(&enabled);
+    let enabled_transport = rtc_transport_config_with_tcp_mux_from_server_config(&enabled)
+        .expect("configured fixed ICE/TCP should bind one shared mux");
     assert_eq!(enabled_transport.udp_addrs, vec!["0.0.0.0:50100"]);
-    assert!(
-        enabled_transport.tcp_addrs.is_empty(),
-        "fixed ICE/TCP ports require a shared listener; binding them per peer connection collides"
-    );
+    assert!(enabled_transport.tcp_addrs.is_empty());
     assert_eq!(enabled_transport.nat_1to1_ips, vec!["203.0.113.10"]);
+    let mux = enabled_transport
+        .tcp_mux
+        .as_ref()
+        .expect("enabled TCP fallback should retain a shared mux");
+    assert_ne!(mux.local_addr().port(), 0);
+    assert!(
+        oxidesfu_rtc::bind_tcp_mux(mux.local_addr()).is_err(),
+        "the configuration owns exactly one listener for its mux address"
+    );
 
     let mut disabled = enabled.clone();
     disabled.rtc_allow_tcp_fallback = false;
-    let disabled_transport = rtc_transport_config_from_server_config(&disabled);
+    let disabled_transport = rtc_transport_config_with_tcp_mux_from_server_config(&disabled)
+        .expect("disabled TCP fallback should not bind a mux");
     assert_eq!(disabled_transport.udp_addrs, vec!["0.0.0.0:50100"]);
     assert!(disabled_transport.tcp_addrs.is_empty());
+    assert!(disabled_transport.tcp_mux.is_none());
     assert_eq!(disabled_transport.nat_1to1_ips, vec!["203.0.113.10"]);
 
     let mut no_external_ip = enabled.clone();
@@ -1189,7 +1204,7 @@ fn rtc_transport_config_from_server_config_does_not_bind_fixed_tcp_per_peer_conn
     let no_external_ip_transport = rtc_transport_config_from_server_config(&no_external_ip);
     assert!(no_external_ip_transport.nat_1to1_ips.is_empty());
 
-    let mut missing_node_ip = enabled.clone();
+    let mut missing_node_ip = enabled;
     missing_node_ip.rtc_node_ip = None;
     let missing_node_ip_transport = rtc_transport_config_from_server_config(&missing_node_ip);
     assert!(missing_node_ip_transport.nat_1to1_ips.is_empty());

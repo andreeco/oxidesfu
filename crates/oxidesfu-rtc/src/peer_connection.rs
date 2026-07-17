@@ -4,7 +4,8 @@
 // OxideSFU signalling, room, and SFU state management.
 
 use std::{
-    net::{IpAddr, SocketAddr},
+    io,
+    net::{IpAddr, SocketAddr, ToSocketAddrs},
     sync::{
         Arc, OnceLock,
         atomic::{AtomicUsize, Ordering},
@@ -37,28 +38,51 @@ use webrtc::peer_connection::RTCSessionDescription;
 use webrtc::peer_connection::{
     MediaEngine, PeerConnection as WebRtcPeerConnection, PeerConnectionBuilder,
     PeerConnectionEventHandler, RTCConfigurationBuilder, RTCIceCandidateInit, Registry,
-    SettingEngine, register_default_interceptors,
+    SettingEngine, TcpMux, register_default_interceptors,
 };
 
 use crate::tracks::next_ssrc;
 use crate::webrtc_adapter::{EventPeerConnectionHandler, NoopPeerConnectionHandler};
 use crate::{DataChannel, DataChannelOptions, LocalRtpTrack, PeerConnectionEvents, RtcResult};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct RtcTransportConfig {
     pub udp_addrs: Vec<String>,
     pub tcp_addrs: Vec<String>,
+    /// Server-owned passive ICE/TCP listener shared by all peer connections.
+    pub tcp_mux: Option<Arc<TcpMux>>,
     pub nat_1to1_ips: Vec<String>,
 }
+
+impl PartialEq for RtcTransportConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.udp_addrs == other.udp_addrs
+            && self.tcp_addrs == other.tcp_addrs
+            && self.nat_1to1_ips == other.nat_1to1_ips
+            && match (&self.tcp_mux, &other.tcp_mux) {
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
+impl Eq for RtcTransportConfig {}
 
 impl Default for RtcTransportConfig {
     fn default() -> Self {
         Self {
             udp_addrs: vec!["0.0.0.0:0".to_string()],
             tcp_addrs: Vec::new(),
+            tcp_mux: None,
             nat_1to1_ips: Vec::new(),
         }
     }
+}
+
+/// Binds a Tokio-backed shared passive ICE/TCP listener for a transport configuration.
+pub fn bind_tcp_mux<A: ToSocketAddrs>(addr: A) -> io::Result<Arc<TcpMux>> {
+    TcpMux::bind(Arc::new(webrtc::runtime::TokioRuntime), addr).map(Arc::new)
 }
 
 /// OxideSFU-owned wrapper around a `webrtc-rs` peer connection.
@@ -951,17 +975,19 @@ async fn create_peer_connection_with_handler(
             setting_engine.set_nat_1to1_ip_mappings(nat_1to1_ip_mappings);
         }
 
-        match PeerConnectionBuilder::new()
+        let builder = PeerConnectionBuilder::new()
             .with_configuration(config)
             .with_setting_engine(setting_engine)
             .with_media_engine(media_engine)
             .with_interceptor_registry(registry)
             .with_handler(handler.clone())
-            .with_udp_addrs(udp_addrs.clone())
-            .with_tcp_addrs(transport.tcp_addrs.clone())
-            .build()
-            .await
-        {
+            .with_udp_addrs(udp_addrs.clone());
+        let builder = match transport.tcp_mux.as_deref() {
+            Some(tcp_mux) => builder.with_tcp_mux(tcp_mux.clone()),
+            None => builder.with_tcp_addrs(transport.tcp_addrs.clone()),
+        };
+
+        match builder.build().await {
             Ok(inner) => {
                 return Ok(PeerConnection {
                     inner: Box::new(inner),
@@ -1095,6 +1121,7 @@ mod tests {
         let transport = RtcTransportConfig {
             udp_addrs: vec!["0.0.0.0:0".to_string()],
             tcp_addrs: Vec::new(),
+            tcp_mux: None,
             nat_1to1_ips: vec!["203.0.113.10".to_string()],
         };
 
@@ -1126,6 +1153,7 @@ mod tests {
         let transport = RtcTransportConfig {
             udp_addrs: vec!["0.0.0.0:0".to_string()],
             tcp_addrs: vec!["127.0.0.1:0".to_string()],
+            tcp_mux: None,
             nat_1to1_ips: Vec::new(),
         };
 
@@ -1142,6 +1170,43 @@ mod tests {
             .close()
             .await
             .expect("peer connection should close");
+    }
+
+    #[tokio::test]
+    async fn creates_multiple_peer_connections_with_shared_tcp_mux() {
+        let tcp_mux =
+            bind_tcp_mux("127.0.0.1:0").expect("shared TCP mux should bind an ephemeral listener");
+        let transport = RtcTransportConfig {
+            udp_addrs: vec!["0.0.0.0:0".to_string()],
+            tcp_addrs: Vec::new(),
+            tcp_mux: Some(tcp_mux.clone()),
+            nat_1to1_ips: Vec::new(),
+        };
+
+        let first = create_peer_connection_with_transport(&transport)
+            .await
+            .expect("first peer connection should use the shared TCP mux");
+        let second = create_peer_connection_with_transport(&transport)
+            .await
+            .expect("second peer connection should reuse the shared TCP mux without binding");
+
+        assert_eq!(
+            transport
+                .tcp_mux
+                .as_ref()
+                .expect("transport should retain the shared TCP mux")
+                .local_addr(),
+            tcp_mux.local_addr()
+        );
+
+        first
+            .close()
+            .await
+            .expect("first peer connection should close");
+        second
+            .close()
+            .await
+            .expect("second peer connection should close");
     }
 
     #[tokio::test]
@@ -1162,6 +1227,7 @@ mod tests {
         let transport = RtcTransportConfig {
             udp_addrs: vec![addr_a.to_string(), addr_b.to_string()],
             tcp_addrs: Vec::new(),
+            tcp_mux: None,
             nat_1to1_ips: Vec::new(),
         };
 

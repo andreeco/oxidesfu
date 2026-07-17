@@ -279,11 +279,12 @@ fn effective_rtc_transport_for_join_request(
 
     if !client_supports_ice_tcp(request.client_info.as_ref()) {
         transport.tcp_addrs.clear();
+        transport.tcp_mux = None;
     }
 
     if request.reconnect
         && request.reconnect_reason == ReconnectReason::RrSwitchCandidate as i32
-        && !transport.tcp_addrs.is_empty()
+        && (!transport.tcp_addrs.is_empty() || transport.tcp_mux.is_some())
     {
         transport.udp_addrs.clear();
     }
