@@ -139,15 +139,7 @@ pub fn rtc_transport_config_from_server_config(
     // interfaces in that case so ICE can advertise a routable host candidate.
     // Owned loopback TURN needs a concrete server host candidate for the relay
     // candidate to pair with, so preserve the loopback bind in that topology.
-    let configured_bind_ip = config.bind.ip();
-    let rtc_bind_ip = if configured_bind_ip.is_loopback() && !config.turn_enabled {
-        match configured_bind_ip {
-            IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-            IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-        }
-    } else {
-        configured_bind_ip
-    };
+    let rtc_bind_ip = rtc_bind_ip(config);
     let udp_addrs = if let Some(udp_port) = config.rtc_udp_port {
         vec![SocketAddr::new(rtc_bind_ip, udp_port).to_string()]
     } else if let (Some(start), Some(end)) = (
@@ -182,6 +174,17 @@ pub fn rtc_transport_config_from_server_config(
     }
 }
 
+fn rtc_bind_ip(config: &ServerConfig) -> IpAddr {
+    let configured_bind_ip = config.bind.ip();
+    if configured_bind_ip.is_loopback() && !config.turn_enabled {
+        return match configured_bind_ip {
+            IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+        };
+    }
+    configured_bind_ip
+}
+
 /// Resolves the public RTC address through STUN when external-IP mode has no explicit node IP.
 ///
 /// An explicit node IP remains the deterministic deployment override. Discovery is
@@ -202,7 +205,14 @@ pub async fn resolve_rtc_external_ip_from_config(
 
     let mut last_error = None;
     for attempt in 1..=3 {
-        match discover_stun_mapped_ip(&endpoint.0, endpoint.1, Duration::from_secs(5)).await {
+        match discover_stun_mapped_ip_from(
+            rtc_bind_ip(config),
+            &endpoint.0,
+            endpoint.1,
+            Duration::from_secs(5),
+        )
+        .await
+        {
             Ok(ip) => return Ok(Some(ip.to_string())),
             Err(error) => last_error = Some(error),
         }
@@ -219,7 +229,8 @@ fn stun_endpoint(url: &str) -> Option<(String, u16)> {
     Some((host.to_string(), port.parse().ok()?))
 }
 
-async fn discover_stun_mapped_ip(
+async fn discover_stun_mapped_ip_from(
+    source_ip: IpAddr,
     domain: &str,
     port: u16,
     timeout: Duration,
@@ -235,10 +246,10 @@ async fn discover_stun_mapped_ip(
     let request_bytes = request.raw.clone();
     let mut last_error = None;
     for address in addresses {
-        let bind = match address {
-            SocketAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
-            SocketAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
-        };
+        if address.is_ipv4() != source_ip.is_ipv4() {
+            continue;
+        }
+        let bind = SocketAddr::new(source_ip, 0);
         let result = async {
             let socket = tokio::net::UdpSocket::bind(bind).await?;
             socket.connect(address).await?;
@@ -271,7 +282,12 @@ async fn discover_stun_mapped_ip(
             Err(error) => last_error = Some(error),
         }
     }
-    Err(last_error.unwrap_or_else(|| io::Error::other("STUN lookup returned no addresses")))
+    Err(last_error.unwrap_or_else(|| {
+        io::Error::other(format!(
+            "STUN lookup returned no {family} addresses for RTC bind IP {source_ip}",
+            family = if source_ip.is_ipv4() { "IPv4" } else { "IPv6" },
+        ))
+    }))
 }
 
 /// Validates configured TURN endpoints are reachable when probing is enabled.
@@ -607,4 +623,74 @@ pub fn set_local_room_node_draining(
     draining: bool,
 ) -> Result<(), RoomNodeRegistryError> {
     directory.set_node_draining(node_id, draining)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::time::Duration;
+
+    use rtc_stun::{
+        message::{BINDING_REQUEST, BINDING_SUCCESS, Message},
+        xoraddr::XorMappedAddress,
+    };
+
+    use super::discover_stun_mapped_ip_from;
+
+    #[tokio::test]
+    async fn stun_discovery_binds_to_the_configured_rtc_interface() {
+        let server = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("test STUN server should bind");
+        let server_addr = server
+            .local_addr()
+            .expect("test STUN server should expose its address");
+        let responder = tokio::spawn(async move {
+            let mut bytes = [0_u8; 2048];
+            let (length, peer) = server
+                .recv_from(&mut bytes)
+                .await
+                .expect("test STUN server should receive a request");
+            assert_eq!(peer.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+
+            let mut request = Message::new();
+            request
+                .unmarshal_binary(&bytes[..length])
+                .expect("STUN request should decode");
+            assert_eq!(request.typ, BINDING_REQUEST);
+
+            let mut response = Message::new();
+            response
+                .build(&[
+                    Box::new(request.transaction_id),
+                    Box::new(BINDING_SUCCESS),
+                    Box::new(XorMappedAddress {
+                        ip: "203.0.113.10".parse().expect("test public IP should parse"),
+                        port: peer.port(),
+                    }),
+                ])
+                .expect("STUN response should encode");
+            server
+                .send_to(&response.raw, peer)
+                .await
+                .expect("test STUN server should respond");
+        });
+
+        let mapped = discover_stun_mapped_ip_from(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            "127.0.0.1",
+            server_addr.port(),
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("source-bound STUN discovery should succeed");
+
+        assert_eq!(
+            mapped,
+            "203.0.113.10"
+                .parse::<IpAddr>()
+                .expect("test public IP should parse")
+        );
+        responder.await.expect("test STUN responder should finish");
+    }
 }
