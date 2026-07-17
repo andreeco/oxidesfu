@@ -7,7 +7,7 @@ This project is **not affiliated with LiveKit**.
 
 **The project was developed primarily by LLM agents, constrained by TDD, source inspection, compatibility tests, and differential checks against LiveKit behavior.** This is important context so you know what to expect from this project.
 
-**Don't expect that I will further develop this project.** Ideally, some gifted developers from the Rust community see value in the code and pick it up and finishes this project well. This publishing may be a handsoff to someone else.
+**Don't expect that I will further develop this project.** Ideally, some gifted developers from the Rust community see value in the code and pick it up and finish this project well. This publishing may be a handoff to someone else.
 
 ## Conformance status
 
@@ -17,7 +17,7 @@ _Passing tests sadly do not mean that everything works as expected._
 
 ## License
 
-OxideSFU is currently published under the [Apache License, Version 2.0](LICENSE-APACHE). I may consider publishing future versions under the MIT License if there are so legal restrictions. See also [`NOTICE`](NOTICE) and [`docs/provenance.md`](docs/provenance.md). 
+OxideSFU is currently published under the [Apache License, Version 2.0](LICENSE-APACHE). I may consider publishing future versions under the MIT License if there are no legal restrictions. See also [`NOTICE`](NOTICE) and [`docs/provenance.md`](docs/provenance.md).
 
 ## Quickstart
 
@@ -27,6 +27,7 @@ OxideSFU can run its own UDP TURN runtime; do **not** start coturn for this
 local setup. The runtime issues participant-specific TURN credentials in the
 signaling response.
 
+### Start the server
 ```bash
 # These are development-only credentials. Use distinct secrets outside local testing.
 export LIVEKIT_API_KEY=devkey
@@ -48,7 +49,11 @@ cargo run -p oxidesfu-server -- \
 The owned runtime currently provides UDP TURN. Configure an external TURN
 service separately when TCP/TLS TURN is required.
 
-```
+## Create access tokens with `lk`
+
+Run each command and save the token it prints:
+
+```bash
 lk token create \
   --api-key "$LIVEKIT_API_KEY" \
   --api-secret "$LIVEKIT_API_SECRET" \
@@ -60,7 +65,7 @@ lk token create \
   --token-only
 ```
 
-```
+```bash
 lk token create \
   --api-key "$LIVEKIT_API_KEY" \
   --api-secret "$LIVEKIT_API_SECRET" \
@@ -72,7 +77,8 @@ lk token create \
   --token-only
 ```
 
-```
-# https://meet.livekit.io/?tab=custom
-ws://127.0.0.1:7880 # not wss://
-```
+### Run two browser windows
+
+In each browser window, open [the LiveKit Meet custom connection page](https://meet.livekit.io/?tab=custom).
+
+Enter the local WebSocket URL `ws://127.0.0.1:7880` (not `wss://127.0.0.1:7880`) and the corresponding access token generated above. Use a different token in each window.
