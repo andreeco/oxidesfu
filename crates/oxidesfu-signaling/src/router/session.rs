@@ -8,7 +8,7 @@ use crate::media::{
     DependencyDescriptorDti, DependencyDescriptorForwardingDecision,
     DependencyDescriptorForwardingSelector, DependencyDescriptorFrame,
     DependencyDescriptorLayerPolicy, DependencyDescriptorTargetLayer, ForwardTrackKey,
-    LayerAcquisitionState, LayerPacketMetadata, LayerPolicy, SpatialLayer,
+    LayerAcquisitionState, LayerPacketMetadata, LayerPolicy, SpatialLayer, SubscriberRtpState,
     SubscriberVideoLayerSelector, VideoIngressDecision, VideoSourceKind,
 };
 use forwarding_snapshot::{
@@ -552,12 +552,6 @@ pub(crate) async fn activate_tracks_with_compatible_bind_results(
                     &track.sid,
                     subscriber_identity,
                 );
-                state.rtp_forwarding.remove(
-                    room_name,
-                    publisher_identity,
-                    &track.sid,
-                    subscriber_identity,
-                );
                 state.media_forwarding.remove(
                     room_name,
                     publisher_identity,
@@ -603,12 +597,6 @@ pub(crate) async fn activate_tracks_with_compatible_bind_results(
                 ) {
                     rejected_forward_tracks.push((track.sid.clone(), forward_track));
                 }
-                state.rtp_forwarding.remove(
-                    room_name,
-                    publisher_identity,
-                    &track.sid,
-                    subscriber_identity,
-                );
                 rejected_track_sids.insert(track.sid.clone());
                 if !already_rejected {
                     unsupported_response_track_sids.push(track.sid.clone());
@@ -1305,13 +1293,13 @@ struct VideoForwardingCounters {
 
 /// Reader-owned state for one subscriber forwarding target.
 ///
-/// A publisher reader is single-threaded, so policy and packet-processing state belongs here
-/// rather than in compound-key maps. The RTP forwarder remains shared with RTCP through
-/// `RtpForwardingStore`.
+/// A publisher reader serializes RTP and RTCP events, so all per-target packet state belongs
+/// here. The state is never resolved through a shared compound-key map on the media path.
 struct ForwardTarget {
     key: ForwardTrackKey,
+    incarnation: u64,
     local_forward_track: oxidesfu_rtc::LocalRtpTrack,
-    rtp_forwarder: crate::media::SubscriberRtpForwarder,
+    rtp_state: SubscriberRtpState,
     decision: Option<CachedForwardingDecision>,
     settings_revision: Option<u64>,
     allocation_revision: Option<u64>,
@@ -1386,13 +1374,14 @@ async fn flush_pending_video_rtp_batch(
 impl ForwardTarget {
     fn new(
         key: ForwardTrackKey,
+        incarnation: u64,
         local_forward_track: oxidesfu_rtc::LocalRtpTrack,
-        rtp_forwarder: crate::media::SubscriberRtpForwarder,
     ) -> Self {
         Self {
             key,
+            incarnation,
             local_forward_track,
-            rtp_forwarder,
+            rtp_state: SubscriberRtpState::default(),
             decision: None,
             settings_revision: None,
             allocation_revision: None,
@@ -1416,13 +1405,8 @@ impl ForwardTarget {
         }
     }
 
-    fn replace_transport(
-        &mut self,
-        local_forward_track: oxidesfu_rtc::LocalRtpTrack,
-        rtp_forwarder: crate::media::SubscriberRtpForwarder,
-    ) {
+    fn replace_transport(&mut self, local_forward_track: oxidesfu_rtc::LocalRtpTrack) {
         self.local_forward_track = local_forward_track;
-        self.rtp_forwarder = rtp_forwarder;
         self.target_dependency_descriptor_extension_id = None;
         self.prepared_video_batching_compatible = None;
     }
@@ -1751,7 +1735,6 @@ pub(super) fn take_forwarding_debug_heartbeat(heartbeat_due: &mut bool) -> bool 
 async fn refresh_forward_targets_for_track(
     targets: &mut Vec<ForwardTarget>,
     forward_tracks: &ForwardTrackStore,
-    rtp_forwarding: &RtpForwardingStore,
     room_name: &str,
     publisher_identity: &str,
     track_sid: &str,
@@ -1771,17 +1754,16 @@ async fn refresh_forward_targets_for_track(
         .map(|target| (target.key.clone(), target))
         .collect::<HashMap<_, _>>();
 
-    for (key, local_forward_track) in
-        forward_tracks.list_for_track(room_name, publisher_identity, track_sid)
+    for (key, local_forward_track, incarnation) in
+        forward_tracks.list_for_track_with_incarnation(room_name, publisher_identity, track_sid)
     {
-        let Some(rtp_forwarder) = rtp_forwarding.forwarder_for(&key) else {
-            continue;
-        };
-        if let Some(mut target) = previous_targets.remove(&key) {
-            target.replace_transport(local_forward_track, rtp_forwarder);
+        if let Some(mut target) = previous_targets.remove(&key)
+            && target.incarnation == incarnation
+        {
+            target.replace_transport(local_forward_track);
             targets.push(target);
         } else {
-            targets.push(ForwardTarget::new(key, local_forward_track, rtp_forwarder));
+            targets.push(ForwardTarget::new(key, incarnation, local_forward_track));
         }
     }
 }
@@ -4043,12 +4025,6 @@ pub(crate) async fn handle_media_subscription_request(
                 &track_sid,
                 subscriber_identity,
             );
-            state.rtp_forwarding.remove(
-                room_name,
-                &participant.identity,
-                &track_sid,
-                subscriber_identity,
-            );
             clear_publisher_subscription_active_if_no_remaining_tracks(
                 state,
                 room_name,
@@ -4132,12 +4108,6 @@ async fn remove_subscriber_media_forwarding_for_track_with_negotiation(
     ) else {
         return Ok(false);
     };
-    state.rtp_forwarding.remove(
-        room_name,
-        publisher_identity,
-        &track.sid,
-        subscriber_identity,
-    );
 
     let Some((subscriber_pc, connection_kind)) = state
         .peer_connections
@@ -4800,12 +4770,6 @@ async fn attach_receive_section_forwarding_to_single_pc(
                     &reclaimed_track_sid,
                     subscriber_identity,
                 );
-                state.rtp_forwarding.remove(
-                    room_name,
-                    &reclaimed_publisher_identity,
-                    &reclaimed_track_sid,
-                    subscriber_identity,
-                );
 
                 if should_requeue_reclaimed_track {
                     if let Some(reclaimed_track) = reclaimed_track_info.as_ref() {
@@ -5201,7 +5165,6 @@ pub(crate) async fn create_subscriber_offer(
             track_allocations: state.track_allocations.clone(),
             pending_remote_tracks: state.pending_remote_tracks.clone(),
             forward_tracks: state.forward_tracks.clone(),
-            rtp_forwarding: state.rtp_forwarding.clone(),
             signal_connections: state.signal_connections.clone(),
             media_track_cids: state.media_track_cids.clone(),
             publish_permissions: state.publish_permissions.clone(),
@@ -5279,12 +5242,6 @@ async fn reclaim_single_pc_forwarding_on_publisher_mids(
                 subscriber_identity,
             );
             state.pending_media_section_requests.remove(
-                room_name,
-                &publisher_identity,
-                &track_sid,
-                subscriber_identity,
-            );
-            state.rtp_forwarding.remove(
                 room_name,
                 &publisher_identity,
                 &track_sid,
@@ -5675,7 +5632,6 @@ pub(crate) async fn answer_publisher_offer(
             track_allocations: state.track_allocations.clone(),
             pending_remote_tracks: state.pending_remote_tracks.clone(),
             forward_tracks: state.forward_tracks.clone(),
-            rtp_forwarding: state.rtp_forwarding.clone(),
             signal_connections: state.signal_connections.clone(),
             media_track_cids: state.media_track_cids.clone(),
             publish_permissions: state.publish_permissions.clone(),
@@ -5793,7 +5749,6 @@ struct PeerConnectionEventForwardingContext {
     track_settings: crate::media::TrackSettingsStore,
     track_allocations: crate::media::TrackAllocationStore,
     forward_tracks: ForwardTrackStore,
-    rtp_forwarding: RtpForwardingStore,
     signal_connections: SignalConnectionStore,
     room_name: String,
     identity: String,
@@ -5841,7 +5796,6 @@ fn forward_peer_connection_events(
             track_settings: _,
             track_allocations: _,
             forward_tracks: _,
-            rtp_forwarding: _,
             signal_connections: _,
             room_name,
             identity,
@@ -6633,12 +6587,6 @@ pub(crate) async fn rebuild_forwarding_tracks_after_runtime_codec_change(
             .remove_all_for_track(room_name, publisher_identity, track_sid);
 
     for (subscriber_identity, forward_track) in stale_forward_tracks {
-        state.rtp_forwarding.remove(
-            room_name,
-            publisher_identity,
-            track_sid,
-            &subscriber_identity,
-        );
         state.media_forwarding.remove(
             room_name,
             publisher_identity,
@@ -6700,7 +6648,6 @@ async fn forward_publisher_remote_track(
     let pending_remote_tracks = &state.pending_remote_tracks;
     let subscriber_offer_ids = &state.subscriber_offer_ids;
     let forward_tracks = &state.forward_tracks;
-    let rtp_forwarding = &state.rtp_forwarding;
     let signal_connections = &state.signal_connections;
 
     if !publisher_session_is_current(rooms, room_name, publisher_identity, publisher_sid) {
@@ -6905,7 +6852,6 @@ async fn forward_publisher_remote_track(
     let track_settings = track_settings.clone();
     let track_allocations = track_allocations.clone();
     let rooms = rooms.clone();
-    let rtp_forwarding = rtp_forwarding.clone();
     let subscriber_offer_ids = subscriber_offer_ids.clone();
     let signal_connections = signal_connections.clone();
     let publisher_subscription_active_pairs = state.publisher_subscription_active_pairs();
@@ -7119,7 +7065,6 @@ async fn forward_publisher_remote_track(
                             refresh_forward_targets_for_track(
                                 &mut cached_forward_targets,
                                 &forward_tracks,
-                                &rtp_forwarding,
                                 &room_name,
                                 &publisher_identity,
                                 &track_sid,
@@ -7262,7 +7207,6 @@ async fn forward_publisher_remote_track(
                             refresh_forward_targets_for_track(
                                 &mut cached_forward_targets,
                                 &forward_tracks,
-                                &rtp_forwarding,
                                 &room_name,
                                 &publisher_identity,
                                 &track_sid,
@@ -7529,7 +7473,6 @@ async fn forward_publisher_remote_track(
                         refresh_forward_targets_for_track(
                             &mut cached_forward_targets,
                             &forward_tracks,
-                            &rtp_forwarding,
                             &room_name,
                             &publisher_identity,
                             &track_sid,
@@ -7892,13 +7835,11 @@ async fn forward_publisher_remote_track(
                                 }
                             }
                         };
-                        let rewritten_packet = target
-                            .rtp_forwarder
-                            .rewrite_packet_with_target_ssrc_and_payload_type(
-                                &packet,
-                                target_ssrc,
-                                negotiated_payload_type,
-                            );
+                        let rewritten_packet = target.rtp_state.rewrite_packet(
+                            &packet,
+                            target_ssrc,
+                            negotiated_payload_type,
+                        );
                         let Some(mut rewritten_packet) = rewritten_packet else {
                             if is_video_track {
                                 if !target.logged_video_rewrite_drop {
@@ -7948,21 +7889,21 @@ async fn forward_publisher_remote_track(
                                         extension_id
                                     }
                                 };
-                            if rewrite_dependency_descriptor_for_target(
+                            let _ = rewrite_dependency_descriptor_for_target(
                                 &mut rewritten_packet,
                                 &descriptor_frame.snapshot,
                                 descriptor_decision,
                                 destination_extension_id,
-                            ) {
-                                target
-                                    .rtp_forwarder
-                                    .replace_cached_retransmission_packet(&rewritten_packet);
-                            }
+                            );
                         }
 
                         if is_video_track {
                             remove_unencodable_one_byte_extensions(&mut rewritten_packet);
                         }
+                        // NACK must replay the exact packet representation delivered to this target.
+                        target
+                            .rtp_state
+                            .cache_retransmission_packet(rewritten_packet.clone());
 
                         if uses_prepared_video_batching(is_video_track) {
                             let binding_compatible = matches!(
@@ -8160,6 +8101,22 @@ async fn forward_publisher_remote_track(
                     }
                 }
                 Ok(oxidesfu_rtc::RemoteTrackEvent::RtcpPacket(rtcp_packets)) => {
+                    let current_revision = forward_tracks.revision();
+                    if forwarding_target_revision_changed(
+                        cached_forward_tracks_revision,
+                        current_revision,
+                    ) {
+                        refresh_forward_targets_for_track(
+                            &mut cached_forward_targets,
+                            &forward_tracks,
+                            &room_name,
+                            &publisher_identity,
+                            &track_sid,
+                        )
+                        .await;
+                        cached_forward_tracks_revision = Some(current_revision);
+                    }
+
                     let actions = derive_rtcp_forward_actions(&rtcp_packets);
                     if actions.is_empty() {
                         continue;
@@ -8181,27 +8138,26 @@ async fn forward_publisher_remote_track(
                             >()
                         })
                         .count() as u64;
-                    let forward_tracks_for_track =
-                        forward_tracks.list_for_track(&room_name, &publisher_identity, &track_sid);
-                    for (key, local_forward_track) in forward_tracks_for_track {
-                        let (key_room, key_publisher, key_track_sid, key_subscriber) = &key;
+                    for target in &mut cached_forward_targets {
                         if !should_forward_media_for_subscriber_with_track_settings_in(
                             &forwarding_decision_context,
-                            &key,
+                            &target.key,
                         ) || !subscriber_within_track_type_subscription_limit(
                             &forwarding_decision_context,
-                            &key,
+                            &target.key,
                             Some(&track_info),
                         ) {
                             continue;
                         }
 
+                        let key = target.key.clone();
+                        let local_forward_track = target.local_forward_track.clone();
                         let effects = build_rtcp_outbound_effects(
-                            &key,
+                            &mut target.rtp_state,
                             &actions,
-                            &rtp_forwarding,
                             current_unix_millis(),
                         );
+                        let (key_room, key_publisher, key_track_sid, key_subscriber) = &key;
                         let downstream_pli_sent = effects
                             .feedback_packets
                             .iter()
@@ -8220,39 +8176,34 @@ async fn forward_publisher_remote_track(
                                 >()
                             })
                             .count() as u64;
-                        if let Some(target) = cached_forward_targets
-                            .iter_mut()
-                            .find(|target| target.key == key)
-                        {
-                            target.downstream_feedback_counters.pli_received = target
-                                .downstream_feedback_counters
-                                .pli_received
-                                .saturating_add(downstream_pli_received);
-                            target.downstream_feedback_counters.pli_sent = target
-                                .downstream_feedback_counters
-                                .pli_sent
-                                .saturating_add(downstream_pli_sent);
-                            target.downstream_feedback_counters.pli_suppressed = target
-                                .downstream_feedback_counters
-                                .pli_suppressed
-                                .saturating_add(
-                                    downstream_pli_received.saturating_sub(downstream_pli_sent),
-                                );
-                            target.downstream_feedback_counters.fir_received = target
-                                .downstream_feedback_counters
-                                .fir_received
-                                .saturating_add(downstream_fir_received);
-                            target.downstream_feedback_counters.fir_sent = target
-                                .downstream_feedback_counters
-                                .fir_sent
-                                .saturating_add(downstream_fir_sent);
-                            target.downstream_feedback_counters.fir_suppressed = target
-                                .downstream_feedback_counters
-                                .fir_suppressed
-                                .saturating_add(
-                                    downstream_fir_received.saturating_sub(downstream_fir_sent),
-                                );
-                        }
+                        target.downstream_feedback_counters.pli_received = target
+                            .downstream_feedback_counters
+                            .pli_received
+                            .saturating_add(downstream_pli_received);
+                        target.downstream_feedback_counters.pli_sent = target
+                            .downstream_feedback_counters
+                            .pli_sent
+                            .saturating_add(downstream_pli_sent);
+                        target.downstream_feedback_counters.pli_suppressed = target
+                            .downstream_feedback_counters
+                            .pli_suppressed
+                            .saturating_add(
+                                downstream_pli_received.saturating_sub(downstream_pli_sent),
+                            );
+                        target.downstream_feedback_counters.fir_received = target
+                            .downstream_feedback_counters
+                            .fir_received
+                            .saturating_add(downstream_fir_received);
+                        target.downstream_feedback_counters.fir_sent = target
+                            .downstream_feedback_counters
+                            .fir_sent
+                            .saturating_add(downstream_fir_sent);
+                        target.downstream_feedback_counters.fir_suppressed = target
+                            .downstream_feedback_counters
+                            .fir_suppressed
+                            .saturating_add(
+                                downstream_fir_received.saturating_sub(downstream_fir_sent),
+                            );
 
                         let rtp_sink = LocalForwardTrackRtpSink {
                             track: local_forward_track,
@@ -9164,9 +9115,6 @@ async fn cleanup_publisher_forwarding_for_track(
         .remove_track(room_name, publisher_identity, &track.sid);
     state
         .media_subscriptions
-        .remove_track(room_name, publisher_identity, &track.sid);
-    state
-        .rtp_forwarding
         .remove_track(room_name, publisher_identity, &track.sid);
 
     let track_kind = if track.r#type == proto::TrackType::Video as i32 {

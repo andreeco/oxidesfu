@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    sync::{Arc, Mutex},
-};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 pub(crate) const RTP_DUPLICATE_WINDOW: usize = 512;
 pub(crate) const RTP_RETRANSMISSION_CACHE_SIZE: usize = 256;
@@ -273,7 +270,7 @@ impl RetransmissionCache {
 }
 
 #[derive(Debug, Clone, Default)]
-struct SubscriberRtpState {
+pub(crate) struct SubscriberRtpState {
     highest_incoming_ext_seq_by_ssrc: HashMap<u32, u64>,
     active_incoming_ext_seq: Option<(u32, u64)>,
     seen_incoming_ext_seq: HashSet<(u32, u64)>,
@@ -292,7 +289,7 @@ struct SubscriberRtpState {
 }
 
 impl SubscriberRtpState {
-    fn rewrite_packet(
+    pub(crate) fn rewrite_packet(
         &mut self,
         packet: &rtc::rtp::Packet,
         target_ssrc: Option<u32>,
@@ -340,11 +337,14 @@ impl SubscriberRtpState {
         Some(rewritten_packet)
     }
 
-    fn retransmission_packet(&self, outgoing_sequence_number: u16) -> Option<rtc::rtp::Packet> {
+    pub(crate) fn retransmission_packet(
+        &self,
+        outgoing_sequence_number: u16,
+    ) -> Option<rtc::rtp::Packet> {
         self.retransmission_cache.get(outgoing_sequence_number)
     }
 
-    fn should_forward_keyframe_request(
+    pub(crate) fn should_forward_keyframe_request(
         &mut self,
         request: KeyFrameRequestKind,
         now_millis: u64,
@@ -354,7 +354,7 @@ impl SubscriberRtpState {
             .should_forward(request, now_millis, min_gap_millis)
     }
 
-    fn map_sender_report(
+    pub(crate) fn map_sender_report(
         &mut self,
         target_ssrc: u32,
         incoming_rtp_timestamp: u32,
@@ -363,14 +363,14 @@ impl SubscriberRtpState {
             .map(target_ssrc, incoming_rtp_timestamp)
     }
 
-    fn next_fir_sequence_number(&mut self, media_ssrc: u32) -> u8 {
+    pub(crate) fn next_fir_sequence_number(&mut self, media_ssrc: u32) -> u8 {
         let entry = self.fir_sequence_numbers.entry(media_ssrc).or_insert(0);
         let sequence_number = *entry;
         *entry = entry.wrapping_add(1);
         sequence_number
     }
 
-    fn observe_receiver_report(
+    pub(crate) fn observe_receiver_report(
         &mut self,
         now_millis: u64,
         ssrc: u32,
@@ -385,7 +385,7 @@ impl SubscriberRtpState {
         );
     }
 
-    fn observe_transport_wide_cc(
+    pub(crate) fn observe_transport_wide_cc(
         &mut self,
         now_millis: u64,
         media_ssrc: u32,
@@ -395,11 +395,14 @@ impl SubscriberRtpState {
             .observe_transport_wide_cc(now_millis, media_ssrc, packet_status_count);
     }
 
-    fn media_feedback_summary(&mut self, now_millis: u64) -> MediaFeedbackSummary {
+    pub(crate) fn media_feedback_summary(&mut self, now_millis: u64) -> MediaFeedbackSummary {
         self.media_feedback.summary(now_millis)
     }
 
-    fn recommend_video_quality(&mut self, now_millis: u64) -> Option<RecommendedVideoQuality> {
+    pub(crate) fn recommend_video_quality(
+        &mut self,
+        now_millis: u64,
+    ) -> Option<RecommendedVideoQuality> {
         let summary = self.media_feedback.summary(now_millis);
         self.media_feedback_adaptation
             .maybe_recommend(summary, now_millis)
@@ -445,7 +448,7 @@ impl SubscriberRtpState {
         outgoing_timestamp
     }
 
-    fn cache_retransmission_packet(&mut self, packet: rtc::rtp::Packet) {
+    pub(crate) fn cache_retransmission_packet(&mut self, packet: rtc::rtp::Packet) {
         self.retransmission_cache.insert(packet);
     }
 
@@ -514,72 +517,80 @@ pub(crate) fn extend_sequence_number_from_reference(
     best_candidate
 }
 
-type SubscriberRtpStateHandle = Arc<Mutex<SubscriberRtpState>>;
-
-/// Target-local handle for steady-state RTP rewriting.
+/// Test-only compatibility fixture for legacy state-algorithm tests.
 ///
-/// The owning forwarding reader resolves this once when its target snapshot changes,
-/// while RTCP callbacks continue to reach the same state through [`RtpForwardingStore`].
-#[derive(Clone)]
-pub(crate) struct SubscriberRtpForwarder {
-    state: SubscriberRtpStateHandle,
+/// Production forwarding state is owned exclusively by `ForwardTarget`; this fixture must not
+/// be used by the media path.
+#[cfg(test)]
+type TestSubscriberRtpStateHandle = std::sync::Arc<std::sync::Mutex<SubscriberRtpState>>;
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct RtpForwardingStore {
+    states: std::sync::Mutex<HashMap<ForwardTrackKey, TestSubscriberRtpStateHandle>>,
 }
 
-impl SubscriberRtpForwarder {
-    /// Replaces the cached target packet after target-local RTP extension rewriting.
-    pub(crate) fn replace_cached_retransmission_packet(&self, packet: &rtc::rtp::Packet) {
-        if let Ok(mut state) = self.state.lock() {
-            state.cache_retransmission_packet(packet.clone());
-        }
-    }
+#[cfg(test)]
+struct TestSubscriberRtpForwarder {
+    state: TestSubscriberRtpStateHandle,
+}
 
-    pub(crate) fn rewrite_packet_with_target_ssrc_and_payload_type(
+#[cfg(test)]
+impl TestSubscriberRtpForwarder {
+    fn rewrite_packet_with_target_ssrc_and_payload_type(
         &self,
         packet: &rtc::rtp::Packet,
         target_ssrc: Option<u32>,
-        negotiated_payload_type: Option<u8>,
+        payload_type: Option<u8>,
     ) -> Option<rtc::rtp::Packet> {
-        self.state.lock().ok().and_then(|mut state| {
-            state.rewrite_packet(packet, target_ssrc, negotiated_payload_type)
-        })
+        self.state
+            .lock()
+            .expect("test forwarding state lock")
+            .rewrite_packet(packet, target_ssrc, payload_type)
+    }
+
+    fn replace_cached_retransmission_packet(&self, packet: &rtc::rtp::Packet) {
+        self.state
+            .lock()
+            .expect("test forwarding state lock")
+            .cache_retransmission_packet(packet.clone());
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub(crate) struct RtpForwardingStore {
-    states: Arc<Mutex<HashMap<ForwardTrackKey, SubscriberRtpStateHandle>>>,
-}
-
+#[cfg(test)]
 impl RtpForwardingStore {
-    fn get_or_insert_state(&self, key: &ForwardTrackKey) -> Option<SubscriberRtpStateHandle> {
-        self.states.lock().ok().map(|mut states| {
-            states
-                .entry(key.clone())
-                .or_insert_with(|| Arc::new(Mutex::new(SubscriberRtpState::default())))
-                .clone()
-        })
-    }
-
-    /// Resolves one target's rewrite state for use in a forwarding-reader snapshot.
-    pub(crate) fn forwarder_for(&self, key: &ForwardTrackKey) -> Option<SubscriberRtpForwarder> {
-        self.get_or_insert_state(key)
-            .map(|state| SubscriberRtpForwarder { state })
-    }
-
-    fn get_state(&self, key: &ForwardTrackKey) -> Option<SubscriberRtpStateHandle> {
+    fn state_for(&self, key: &ForwardTrackKey) -> TestSubscriberRtpStateHandle {
         self.states
             .lock()
-            .ok()
-            .and_then(|states| states.get(key).cloned())
+            .expect("test forwarding state lock")
+            .entry(key.clone())
+            .or_insert_with(|| {
+                std::sync::Arc::new(std::sync::Mutex::new(SubscriberRtpState::default()))
+            })
+            .clone()
     }
 
-    #[allow(dead_code)]
+    fn with_state<T>(
+        &self,
+        key: &ForwardTrackKey,
+        operation: impl FnOnce(&mut SubscriberRtpState) -> T,
+    ) -> T {
+        let state = self.state_for(key);
+        operation(&mut state.lock().expect("test forwarding state lock"))
+    }
+
+    fn forwarder_for(&self, key: &ForwardTrackKey) -> Option<TestSubscriberRtpForwarder> {
+        Some(TestSubscriberRtpForwarder {
+            state: self.state_for(key),
+        })
+    }
+
     pub(crate) fn rewrite_packet_for_subscriber(
         &self,
         key: &ForwardTrackKey,
         packet: rtc::rtp::Packet,
     ) -> Option<rtc::rtp::Packet> {
-        self.rewrite_packet_for_subscriber_with_target_ssrc(key, packet, None)
+        self.with_state(key, |state| state.rewrite_packet(&packet, None, None))
     }
 
     pub(crate) fn rewrite_packet_for_subscriber_with_target_ssrc(
@@ -588,87 +599,62 @@ impl RtpForwardingStore {
         packet: rtc::rtp::Packet,
         target_ssrc: Option<u32>,
     ) -> Option<rtc::rtp::Packet> {
-        self.rewrite_packet_for_subscriber_with_target_ssrc_and_payload_type(
-            key,
-            packet,
-            target_ssrc,
-            None,
-        )
+        self.with_state(key, |state| {
+            state.rewrite_packet(&packet, target_ssrc, None)
+        })
     }
 
-    /// Rewrites an RTP packet using the payload type negotiated by this forwarding target.
     pub(crate) fn rewrite_packet_for_subscriber_with_target_ssrc_and_payload_type(
         &self,
         key: &ForwardTrackKey,
         packet: rtc::rtp::Packet,
         target_ssrc: Option<u32>,
-        negotiated_payload_type: Option<u8>,
+        payload_type: Option<u8>,
     ) -> Option<rtc::rtp::Packet> {
-        self.forwarder_for(key)?
-            .rewrite_packet_with_target_ssrc_and_payload_type(
-                &packet,
-                target_ssrc,
-                negotiated_payload_type,
-            )
+        self.with_state(key, |state| {
+            state.rewrite_packet(&packet, target_ssrc, payload_type)
+        })
     }
 
     pub(crate) fn get_retransmission_packet(
         &self,
         key: &ForwardTrackKey,
-        outgoing_sequence_number: u16,
+        sequence_number: u16,
     ) -> Option<rtc::rtp::Packet> {
-        self.get_state(key).and_then(|state| {
-            state
-                .lock()
-                .ok()
-                .and_then(|state| state.retransmission_packet(outgoing_sequence_number))
+        self.states.lock().ok().and_then(|states| {
+            states.get(key).and_then(|state| {
+                state
+                    .lock()
+                    .ok()
+                    .and_then(|state| state.retransmission_packet(sequence_number))
+            })
         })
     }
 
     pub(crate) fn should_forward_keyframe_request(
         &self,
         key: &ForwardTrackKey,
-        request: KeyFrameRequestKind,
+        kind: KeyFrameRequestKind,
         now_millis: u64,
-        min_gap_millis: u64,
+        minimum_gap_millis: u64,
     ) -> bool {
-        self.get_or_insert_state(key)
-            .and_then(|state| {
-                state.lock().ok().map(|mut state| {
-                    state.should_forward_keyframe_request(request, now_millis, min_gap_millis)
-                })
-            })
-            .unwrap_or(true)
+        self.with_state(key, |state| {
+            state.should_forward_keyframe_request(kind, now_millis, minimum_gap_millis)
+        })
     }
 
-    pub(crate) fn next_fir_sequence_number(&self, key: &ForwardTrackKey, media_ssrc: u32) -> u8 {
-        self.get_or_insert_state(key)
-            .and_then(|state| {
-                state
-                    .lock()
-                    .ok()
-                    .map(|mut state| state.next_fir_sequence_number(media_ssrc))
-            })
-            .unwrap_or(0)
+    #[allow(dead_code)]
+    pub(crate) fn next_fir_sequence_number(&self, key: &ForwardTrackKey, ssrc: u32) -> u8 {
+        self.with_state(key, |state| state.next_fir_sequence_number(ssrc))
     }
 
     pub(crate) fn map_sender_report(
         &self,
         key: &ForwardTrackKey,
-        target_ssrc: u32,
-        incoming_rtp_timestamp: u32,
+        ssrc: u32,
+        timestamp: u32,
     ) -> MappedSenderReport {
-        self.get_or_insert_state(key)
-            .and_then(|state| {
-                state
-                    .lock()
-                    .ok()
-                    .map(|mut state| state.map_sender_report(target_ssrc, incoming_rtp_timestamp))
-            })
-            .unwrap_or(MappedSenderReport {
-                ssrc: target_ssrc,
-                rtp_timestamp: incoming_rtp_timestamp,
-            })
+        self.with_state(key, |state| state.map_sender_report(ssrc, timestamp))
     }
 
     pub(crate) fn observe_receiver_report(
@@ -676,28 +662,24 @@ impl RtpForwardingStore {
         key: &ForwardTrackKey,
         now_millis: u64,
         ssrc: u32,
-        max_fraction_lost: u8,
-        report_count: u16,
+        loss: u8,
+        count: u16,
     ) {
-        if let Some(state) = self.get_or_insert_state(key)
-            && let Ok(mut state) = state.lock()
-        {
-            state.observe_receiver_report(now_millis, ssrc, max_fraction_lost, report_count);
-        }
+        self.with_state(key, |state| {
+            state.observe_receiver_report(now_millis, ssrc, loss, count)
+        });
     }
 
     pub(crate) fn observe_transport_wide_cc(
         &self,
         key: &ForwardTrackKey,
         now_millis: u64,
-        media_ssrc: u32,
-        packet_status_count: u16,
+        ssrc: u32,
+        count: u16,
     ) {
-        if let Some(state) = self.get_or_insert_state(key)
-            && let Ok(mut state) = state.lock()
-        {
-            state.observe_transport_wide_cc(now_millis, media_ssrc, packet_status_count);
-        }
+        self.with_state(key, |state| {
+            state.observe_transport_wide_cc(now_millis, ssrc, count)
+        });
     }
 
     pub(crate) fn media_feedback_summary(
@@ -705,14 +687,7 @@ impl RtpForwardingStore {
         key: &ForwardTrackKey,
         now_millis: u64,
     ) -> MediaFeedbackSummary {
-        self.get_or_insert_state(key)
-            .and_then(|state| {
-                state
-                    .lock()
-                    .ok()
-                    .map(|mut state| state.media_feedback_summary(now_millis))
-            })
-            .unwrap_or_default()
+        self.with_state(key, |state| state.media_feedback_summary(now_millis))
     }
 
     pub(crate) fn recommend_video_quality(
@@ -720,58 +695,7 @@ impl RtpForwardingStore {
         key: &ForwardTrackKey,
         now_millis: u64,
     ) -> Option<RecommendedVideoQuality> {
-        self.get_or_insert_state(key).and_then(|state| {
-            state
-                .lock()
-                .ok()
-                .and_then(|mut state| state.recommend_video_quality(now_millis))
-        })
-    }
-
-    pub(crate) fn remove(
-        &self,
-        room: &str,
-        publisher_identity: &str,
-        track_sid: &str,
-        subscriber_identity: &str,
-    ) {
-        if let Ok(mut states) = self.states.lock() {
-            states.remove(&(
-                room.to_string(),
-                publisher_identity.to_string(),
-                track_sid.to_string(),
-                subscriber_identity.to_string(),
-            ));
-        }
-    }
-
-    pub(crate) fn remove_track(&self, room: &str, publisher_identity: &str, track_sid: &str) {
-        if let Ok(mut states) = self.states.lock() {
-            states.retain(
-                |(
-                    candidate_room,
-                    candidate_publisher,
-                    candidate_track_sid,
-                    _subscriber_identity,
-                ),
-                 _| {
-                    candidate_room != room
-                        || candidate_publisher != publisher_identity
-                        || candidate_track_sid != track_sid
-                },
-            );
-        }
-    }
-
-    pub(crate) fn remove_participant(&self, room: &str, identity: &str) {
-        if let Ok(mut states) = self.states.lock() {
-            states.retain(
-                |(candidate_room, publisher_identity, _track_sid, subscriber_identity), _| {
-                    candidate_room != room
-                        || (publisher_identity != identity && subscriber_identity != identity)
-                },
-            );
-        }
+        self.with_state(key, |state| state.recommend_video_quality(now_millis))
     }
 }
 
@@ -918,6 +842,60 @@ mod tests {
                 "{codec_mime} source switching must resume the target RTP timestamp continuously"
             );
         }
+    }
+
+    #[test]
+    fn target_state_preserves_rtp_nack_ordering_without_shared_store() {
+        let mut state = SubscriberRtpState::default();
+        let source_ssrc = 0x1111_0001;
+        let target_ssrc = 0x2222_0002;
+
+        let first = state
+            .rewrite_packet(
+                &packet_with_seq_ssrc_timestamp(100, source_ssrc, 90_000),
+                Some(target_ssrc),
+                Some(111),
+            )
+            .expect("first packet should forward");
+        assert_eq!(first.header.ssrc, target_ssrc);
+        assert_eq!(first.header.payload_type, 111);
+        assert_eq!(
+            state.retransmission_packet(first.header.sequence_number),
+            Some(first.clone()),
+            "a NACK immediately after RTP must observe the final target representation"
+        );
+
+        let second = state
+            .rewrite_packet(
+                &packet_with_seq_ssrc_timestamp(101, source_ssrc, 90_960),
+                Some(target_ssrc),
+                Some(111),
+            )
+            .expect("second packet should forward");
+        assert_eq!(
+            second.header.sequence_number,
+            first.header.sequence_number.wrapping_add(1)
+        );
+        assert_eq!(
+            state.retransmission_packet(first.header.sequence_number),
+            Some(first.clone()),
+            "a later RTP packet must not change an earlier NACK representation"
+        );
+        assert!(
+            state
+                .rewrite_packet(
+                    &packet_with_seq_ssrc_timestamp(100, source_ssrc, 90_000),
+                    Some(target_ssrc),
+                    Some(111),
+                )
+                .is_none(),
+            "a duplicate source packet must not advance target state"
+        );
+        assert_eq!(
+            state.retransmission_packet(second.header.sequence_number),
+            Some(second),
+            "duplicate suppression must leave the most recent NACK representation intact"
+        );
     }
 
     #[test]

@@ -62,7 +62,6 @@ use crate::{
     validate::{SignalQuery, authenticate, signal_auth_error, validate_join},
 };
 
-pub(crate) use crate::media::RtpForwardingStore;
 pub use crate::state::{IceServerProvider, SignalState};
 
 use crate::relay::{
@@ -1696,12 +1695,6 @@ async fn remove_orphaned_forward_tracks_for_departing_publisher(
             &track_sid,
             &subscriber_identity,
         );
-        state.rtp_forwarding.remove(
-            room_name,
-            publisher_identity,
-            &track_sid,
-            &subscriber_identity,
-        );
 
         let _ = state.rooms.set_media_track_subscribed(
             room_name,
@@ -1956,7 +1949,6 @@ pub(crate) async fn cleanup_participant_runtime_state(
         .pending_remote_tracks
         .remove_participant(room_name, identity);
     state.forward_tracks.remove_participant(room_name, identity);
-    state.rtp_forwarding.remove_participant(room_name, identity);
     for peer_connection in state.peer_connections.remove_all(room_name, identity) {
         let _ = peer_connection.close().await;
     }
@@ -2357,9 +2349,6 @@ async fn run_non_local_relay_accepted_socket_loop(
         .remove_participant(&room_name, &identity);
     state
         .forward_tracks
-        .remove_participant(&room_name, &identity);
-    state
-        .rtp_forwarding
         .remove_participant(&room_name, &identity);
     for peer_connection in state.peer_connections.remove_all(&room_name, &identity) {
         let _ = peer_connection.close().await;

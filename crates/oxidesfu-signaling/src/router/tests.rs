@@ -1,4 +1,10 @@
-#![allow(deprecated, clippy::let_unit_value, clippy::manual_ignore_case_cmp)]
+#![allow(
+    deprecated,
+    unused_mut,
+    unused_variables,
+    clippy::let_unit_value,
+    clippy::manual_ignore_case_cmp
+)]
 
 use std::{
     collections::{HashMap, HashSet},
@@ -22,6 +28,7 @@ use tokio_tungstenite::{
 use tower::ServiceExt;
 
 use super::*;
+use crate::media::{RtpForwardingStore, SubscriberRtpState};
 
 const API_KEY: &str = "devkey";
 const API_SECRET: &str = "secret";
@@ -9911,10 +9918,10 @@ async fn execute_rtcp_outbound_effects_mixed_burst_dispatches_nack_keyframe_and_
         "TR_video".to_string(),
         "subscriber".to_string(),
     );
-    let store = RtpForwardingStore::default();
+    let mut rtp_state = SubscriberRtpState::default();
 
-    let rewritten = store
-        .rewrite_packet_for_subscriber(&key, rtp_packet(6000, 0xcc))
+    let rewritten = rtp_state
+        .rewrite_packet(&rtp_packet(6000, 0xcc), None, None)
         .expect("packet should be rewritten and cached");
 
     let packets: Vec<Box<dyn rtc::rtcp::Packet>> = vec![
@@ -9950,7 +9957,7 @@ async fn execute_rtcp_outbound_effects_mixed_burst_dispatches_nack_keyframe_and_
         }),
     ];
     let actions = derive_rtcp_forward_actions(&packets);
-    let effects = build_rtcp_outbound_effects(&key, &actions, &store, 95_000);
+    let effects = build_rtcp_outbound_effects(&mut rtp_state, &actions, 95_000);
 
     let rtp_packets = Arc::new(Mutex::new(Vec::new()));
     let feedback_packet_kinds = Arc::new(Mutex::new(Vec::new()));
@@ -9996,7 +10003,7 @@ fn rtcp_execution_plan_rr_and_twcc_observed_have_no_outbound_side_effects() {
         "TR_media".to_string(),
         "subscriber".to_string(),
     );
-    let store = RtpForwardingStore::default();
+    let mut rtp_state = SubscriberRtpState::default();
 
     let actions = vec![
         RtcpForwardAction::ReceiverReportObserved {
@@ -10010,7 +10017,7 @@ fn rtcp_execution_plan_rr_and_twcc_observed_have_no_outbound_side_effects() {
         },
     ];
 
-    let plan = build_rtcp_execution_plan(&key, &actions, &store, 123_456);
+    let plan = build_rtcp_execution_plan(&mut rtp_state, &actions, 123_456);
     assert!(
         plan.retransmit_packets.is_empty(),
         "RR/TWCC observation should not produce retransmit packets"
@@ -10030,7 +10037,7 @@ fn rtcp_execution_plan_rr_and_twcc_observed_have_no_outbound_side_effects() {
     assert_eq!(plan.media_feedback.twcc_packet_status_count, 7);
     assert!(plan.media_feedback.is_degraded);
 
-    let effects = build_rtcp_outbound_effects(&key, &actions, &store, 123_456);
+    let effects = build_rtcp_outbound_effects(&mut rtp_state, &actions, 123_456);
     assert!(effects.retransmit_packets.is_empty());
     assert!(effects.feedback_packets.is_empty());
     assert!(effects.sender_report_packets.is_empty());
@@ -10147,13 +10154,13 @@ fn rtcp_execution_plan_nack_burst_retransmits_only_cached_packets_with_bounded_c
         "TR_video".to_string(),
         "subscriber".to_string(),
     );
-    let store = RtpForwardingStore::default();
+    let mut rtp_state = SubscriberRtpState::default();
 
     let mut first_outgoing_sequence = None;
     let mut last_outgoing_sequence = None;
     for i in 0..(RTP_RETRANSMISSION_CACHE_SIZE + 4) {
-        let rewritten = store
-            .rewrite_packet_for_subscriber(&key, rtp_packet(4000 + i as u16, (i % 255) as u8))
+        let rewritten = rtp_state
+            .rewrite_packet(&rtp_packet(4000 + i as u16, (i % 255) as u8), None, None)
             .expect("packet should be rewritten and cached");
         if i == 0 {
             first_outgoing_sequence = Some(rewritten.header.sequence_number);
@@ -10168,13 +10175,12 @@ fn rtcp_execution_plan_nack_burst_retransmits_only_cached_packets_with_bounded_c
     let missing = newest.wrapping_add(1);
 
     let plan = build_rtcp_execution_plan(
-        &key,
+        &mut rtp_state,
         &[
             RtcpForwardAction::RetransmitSequence(oldest),
             RtcpForwardAction::RetransmitSequence(newest),
             RtcpForwardAction::RetransmitSequence(missing),
         ],
-        &store,
         12_000,
     );
 
@@ -10194,18 +10200,17 @@ fn rtcp_execution_plan_retransmits_cached_packets_for_nack_actions() {
         "TR_video".to_string(),
         "subscriber".to_string(),
     );
-    let store = RtpForwardingStore::default();
+    let mut rtp_state = SubscriberRtpState::default();
 
-    let rewritten = store
-        .rewrite_packet_for_subscriber(&key, rtp_packet(2000, 0x5a))
+    let rewritten = rtp_state
+        .rewrite_packet(&rtp_packet(2000, 0x5a), None, None)
         .expect("packet should be rewritten and cached");
 
     let plan = build_rtcp_execution_plan(
-        &key,
+        &mut rtp_state,
         &[RtcpForwardAction::RetransmitSequence(
             rewritten.header.sequence_number,
         )],
-        &store,
         10_000,
     );
 
@@ -10215,16 +10220,10 @@ fn rtcp_execution_plan_retransmits_cached_packets_for_nack_actions() {
 
 #[test]
 fn rtcp_outbound_effects_include_retransmit_and_feedback_packets() {
-    let key = (
-        "room".to_string(),
-        "publisher".to_string(),
-        "TR_video".to_string(),
-        "subscriber".to_string(),
-    );
-    let store = RtpForwardingStore::default();
+    let mut rtp_state = SubscriberRtpState::default();
 
-    let rewritten = store
-        .rewrite_packet_for_subscriber(&key, rtp_packet(3000, 0x7b))
+    let rewritten = rtp_state
+        .rewrite_packet(&rtp_packet(3000, 0x7b), None, None)
         .expect("packet should be rewritten and cached");
 
     let actions = [
@@ -10235,7 +10234,7 @@ fn rtcp_outbound_effects_include_retransmit_and_feedback_packets() {
         },
     ];
 
-    let effects = build_rtcp_outbound_effects(&key, &actions, &store, 40_000);
+    let effects = build_rtcp_outbound_effects(&mut rtp_state, &actions, 40_000);
 
     assert_eq!(effects.retransmit_packets.len(), 1);
     assert_eq!(effects.retransmit_packets[0].payload, vec![0x7b]);
@@ -10253,27 +10252,16 @@ fn rtcp_outbound_effects_include_retransmit_and_feedback_packets() {
 
 #[test]
 fn rtcp_outbound_effects_isolate_state_across_subscribers() {
-    let key_a = (
-        "room".to_string(),
-        "publisher".to_string(),
-        "TR_video".to_string(),
-        "subscriber-a".to_string(),
-    );
-    let key_b = (
-        "room".to_string(),
-        "publisher".to_string(),
-        "TR_video".to_string(),
-        "subscriber-b".to_string(),
-    );
-    let store = RtpForwardingStore::default();
+    let mut rtp_state_a = SubscriberRtpState::default();
+    let mut rtp_state_b = SubscriberRtpState::default();
 
-    let seq_a = store
-        .rewrite_packet_for_subscriber(&key_a, rtp_packet(5000, 0xa1))
+    let seq_a = rtp_state_a
+        .rewrite_packet(&rtp_packet(5000, 0xa1), None, None)
         .expect("subscriber-a packet should be cached")
         .header
         .sequence_number;
-    let seq_b = store
-        .rewrite_packet_for_subscriber(&key_b, rtp_packet(5001, 0xb1))
+    let seq_b = rtp_state_b
+        .rewrite_packet(&rtp_packet(5001, 0xb1), None, None)
         .expect("subscriber-b packet should be cached")
         .header
         .sequence_number;
@@ -10307,9 +10295,9 @@ fn rtcp_outbound_effects_isolate_state_across_subscribers() {
         },
     ];
 
-    let effects_a_first = build_rtcp_outbound_effects(&key_a, &actions_a, &store, 60_000);
-    let effects_b_first = build_rtcp_outbound_effects(&key_b, &actions_b, &store, 60_000);
-    let effects_a_second = build_rtcp_outbound_effects(&key_a, &actions_a, &store, 60_400);
+    let effects_a_first = build_rtcp_outbound_effects(&mut rtp_state_a, &actions_a, 60_000);
+    let effects_b_first = build_rtcp_outbound_effects(&mut rtp_state_b, &actions_b, 60_000);
+    let effects_a_second = build_rtcp_outbound_effects(&mut rtp_state_a, &actions_a, 60_400);
 
     assert_eq!(effects_a_first.retransmit_packets.len(), 1);
     assert_eq!(effects_a_first.retransmit_packets[0].payload, vec![0xa1]);
@@ -10356,9 +10344,11 @@ fn rtcp_outbound_effects_sender_report_rewrite_handles_timestamp_wrap_continuity
         "subscriber".to_string(),
     );
     let store = RtpForwardingStore::default();
+    let mut rtp_state = SubscriberRtpState::default();
+    let mut rtp_state = SubscriberRtpState::default();
 
     let first = build_rtcp_outbound_effects(
-        &key,
+        &mut rtp_state,
         &[RtcpForwardAction::SenderReport {
             report: rtc::rtcp::sender_report::SenderReport {
                 ssrc: 0x5555,
@@ -10366,11 +10356,10 @@ fn rtcp_outbound_effects_sender_report_rewrite_handles_timestamp_wrap_continuity
                 ..Default::default()
             },
         }],
-        &store,
         70_000,
     );
     let second = build_rtcp_outbound_effects(
-        &key,
+        &mut rtp_state,
         &[RtcpForwardAction::SenderReport {
             report: rtc::rtcp::sender_report::SenderReport {
                 ssrc: 0x5555,
@@ -10378,7 +10367,6 @@ fn rtcp_outbound_effects_sender_report_rewrite_handles_timestamp_wrap_continuity
                 ..Default::default()
             },
         }],
-        &store,
         70_400,
     );
 
@@ -10409,9 +10397,11 @@ fn rtcp_outbound_effects_sender_report_resets_mapping_on_ssrc_switch() {
         "subscriber".to_string(),
     );
     let store = RtpForwardingStore::default();
+    let mut rtp_state = SubscriberRtpState::default();
+    let mut rtp_state = SubscriberRtpState::default();
 
     let a1 = build_rtcp_outbound_effects(
-        &key,
+        &mut rtp_state,
         &[RtcpForwardAction::SenderReport {
             report: rtc::rtcp::sender_report::SenderReport {
                 ssrc: 0x1010,
@@ -10419,11 +10409,10 @@ fn rtcp_outbound_effects_sender_report_resets_mapping_on_ssrc_switch() {
                 ..Default::default()
             },
         }],
-        &store,
         80_000,
     );
     let b = build_rtcp_outbound_effects(
-        &key,
+        &mut rtp_state,
         &[RtcpForwardAction::SenderReport {
             report: rtc::rtcp::sender_report::SenderReport {
                 ssrc: 0x2020,
@@ -10431,11 +10420,10 @@ fn rtcp_outbound_effects_sender_report_resets_mapping_on_ssrc_switch() {
                 ..Default::default()
             },
         }],
-        &store,
         80_400,
     );
     let a2 = build_rtcp_outbound_effects(
-        &key,
+        &mut rtp_state,
         &[RtcpForwardAction::SenderReport {
             report: rtc::rtcp::sender_report::SenderReport {
                 ssrc: 0x1010,
@@ -10443,7 +10431,6 @@ fn rtcp_outbound_effects_sender_report_resets_mapping_on_ssrc_switch() {
                 ..Default::default()
             },
         }],
-        &store,
         80_800,
     );
 
@@ -10477,6 +10464,8 @@ fn rtcp_outbound_effects_include_rewritten_sender_report_packet() {
         "subscriber".to_string(),
     );
     let store = RtpForwardingStore::default();
+    let mut rtp_state = SubscriberRtpState::default();
+    let mut rtp_state = SubscriberRtpState::default();
     let actions = [RtcpForwardAction::SenderReport {
         report: rtc::rtcp::sender_report::SenderReport {
             ssrc: 0x7777,
@@ -10487,7 +10476,7 @@ fn rtcp_outbound_effects_include_rewritten_sender_report_packet() {
         },
     }];
 
-    let effects = build_rtcp_outbound_effects(&key, &actions, &store, 41_000);
+    let effects = build_rtcp_outbound_effects(&mut rtp_state, &actions, 41_000);
     assert_eq!(effects.sender_report_packets.len(), 1);
     let rewritten = effects.sender_report_packets[0]
         .as_any()
@@ -10508,13 +10497,15 @@ fn rtcp_outbound_effects_assign_incrementing_fir_feedback_sequence_numbers() {
         "subscriber".to_string(),
     );
     let store = RtpForwardingStore::default();
+    let mut rtp_state = SubscriberRtpState::default();
+    let mut rtp_state = SubscriberRtpState::default();
 
     let actions = [RtcpForwardAction::KeyFrameRequest {
         kind: KeyFrameRequestKind::Fir,
         media_ssrc: 0x9999,
     }];
 
-    let first = build_rtcp_outbound_effects(&key, &actions, &store, 50_000);
+    let first = build_rtcp_outbound_effects(&mut rtp_state, &actions, 50_000);
     assert_eq!(first.feedback_packets.len(), 1);
     let first_fir = first.feedback_packets[0]
         .as_any()
@@ -10523,7 +10514,7 @@ fn rtcp_outbound_effects_assign_incrementing_fir_feedback_sequence_numbers() {
     assert_eq!(first_fir.fir.len(), 1);
     assert_eq!(first_fir.fir[0].sequence_number, 0);
 
-    let second = build_rtcp_outbound_effects(&key, &actions, &store, 50_400);
+    let second = build_rtcp_outbound_effects(&mut rtp_state, &actions, 50_400);
     assert_eq!(second.feedback_packets.len(), 1);
     let second_fir = second.feedback_packets[0]
         .as_any()
@@ -10536,7 +10527,7 @@ fn rtcp_outbound_effects_assign_incrementing_fir_feedback_sequence_numbers() {
         kind: KeyFrameRequestKind::Fir,
         media_ssrc: 0xaaaa,
     }];
-    let other_ssrc = build_rtcp_outbound_effects(&key, &other_ssrc_actions, &store, 50_800);
+    let other_ssrc = build_rtcp_outbound_effects(&mut rtp_state, &other_ssrc_actions, 50_800);
     assert_eq!(other_ssrc.feedback_packets.len(), 1);
     let other_fir = other_ssrc.feedback_packets[0]
         .as_any()
@@ -10555,6 +10546,8 @@ fn rtcp_execution_plan_throttles_repeated_keyframe_requests_within_gate() {
         "subscriber".to_string(),
     );
     let store = RtpForwardingStore::default();
+    let mut rtp_state = SubscriberRtpState::default();
+    let mut rtp_state = SubscriberRtpState::default();
     let actions = [
         RtcpForwardAction::KeyFrameRequest {
             kind: KeyFrameRequestKind::Pli,
@@ -10566,16 +10559,16 @@ fn rtcp_execution_plan_throttles_repeated_keyframe_requests_within_gate() {
         },
     ];
 
-    let first = build_rtcp_execution_plan(&key, &actions, &store, 20_000);
+    let first = build_rtcp_execution_plan(&mut rtp_state, &actions, 20_000);
     assert_eq!(first.keyframe_requests.len(), 2);
 
-    let second = build_rtcp_execution_plan(&key, &actions, &store, 20_100);
+    let second = build_rtcp_execution_plan(&mut rtp_state, &actions, 20_100);
     assert!(
         second.keyframe_requests.is_empty(),
         "second requests inside gate window should be suppressed"
     );
 
-    let third = build_rtcp_execution_plan(&key, &actions, &store, 20_400);
+    let third = build_rtcp_execution_plan(&mut rtp_state, &actions, 20_400);
     assert_eq!(
         third.keyframe_requests.len(),
         2,
@@ -10660,16 +10653,18 @@ fn rtcp_execution_plan_assigns_incrementing_fir_sequence_numbers_per_subscriber_
         "subscriber".to_string(),
     );
     let store = RtpForwardingStore::default();
+    let mut rtp_state = SubscriberRtpState::default();
+    let mut rtp_state = SubscriberRtpState::default();
     let actions = [RtcpForwardAction::KeyFrameRequest {
         kind: KeyFrameRequestKind::Fir,
         media_ssrc: 0x1234,
     }];
 
-    let first = build_rtcp_execution_plan(&key, &actions, &store, 30_000);
+    let first = build_rtcp_execution_plan(&mut rtp_state, &actions, 30_000);
     assert_eq!(first.keyframe_requests.len(), 1);
     assert_eq!(first.keyframe_requests[0].fir_sequence_number, Some(0));
 
-    let second = build_rtcp_execution_plan(&key, &actions, &store, 30_400);
+    let second = build_rtcp_execution_plan(&mut rtp_state, &actions, 30_400);
     assert_eq!(second.keyframe_requests.len(), 1);
     assert_eq!(second.keyframe_requests[0].fir_sequence_number, Some(1));
 
@@ -10677,7 +10672,7 @@ fn rtcp_execution_plan_assigns_incrementing_fir_sequence_numbers_per_subscriber_
         kind: KeyFrameRequestKind::Fir,
         media_ssrc: 0x5678,
     }];
-    let other_media = build_rtcp_execution_plan(&key, &other_media_actions, &store, 30_800);
+    let other_media = build_rtcp_execution_plan(&mut rtp_state, &other_media_actions, 30_800);
     assert_eq!(other_media.keyframe_requests.len(), 1);
     assert_eq!(
         other_media.keyframe_requests[0].fir_sequence_number,
@@ -10694,9 +10689,11 @@ fn rtcp_execution_plan_rewrites_sender_reports_into_subscriber_state() {
         "subscriber".to_string(),
     );
     let store = RtpForwardingStore::default();
+    let mut rtp_state = SubscriberRtpState::default();
+    let mut rtp_state = SubscriberRtpState::default();
 
     let first = build_rtcp_execution_plan(
-        &key,
+        &mut rtp_state,
         &[RtcpForwardAction::SenderReport {
             report: rtc::rtcp::sender_report::SenderReport {
                 ssrc: 0x9999,
@@ -10706,7 +10703,6 @@ fn rtcp_execution_plan_rewrites_sender_reports_into_subscriber_state() {
                 ..Default::default()
             },
         }],
-        &store,
         1,
     );
     assert_eq!(first.rewritten_sender_reports.len(), 1);
@@ -10715,7 +10711,7 @@ fn rtcp_execution_plan_rewrites_sender_reports_into_subscriber_state() {
     assert_eq!(first.rewritten_sender_reports[0].packet_count, 10);
 
     let second = build_rtcp_execution_plan(
-        &key,
+        &mut rtp_state,
         &[RtcpForwardAction::SenderReport {
             report: rtc::rtcp::sender_report::SenderReport {
                 ssrc: 0x9999,
@@ -10725,7 +10721,6 @@ fn rtcp_execution_plan_rewrites_sender_reports_into_subscriber_state() {
                 ..Default::default()
             },
         }],
-        &store,
         2,
     );
     assert_eq!(second.rewritten_sender_reports.len(), 1);

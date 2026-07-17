@@ -26,10 +26,14 @@ impl ForwardTrackReaderLease {
 #[derive(Clone, Default)]
 pub(crate) struct ForwardTrackStore {
     tracks: Arc<Mutex<HashMap<ForwardTrackKey, oxidesfu_rtc::LocalRtpTrack>>>,
+    /// Changes whenever a forwarding target is inserted, including same-key replacement.
+    /// Reader-local media state may only survive when this value is unchanged.
+    target_incarnations: Arc<Mutex<HashMap<ForwardTrackKey, u64>>>,
     active: Arc<Mutex<HashSet<ForwardTrackKey>>>,
     active_by_track: Arc<Mutex<HashMap<ForwardTrackReaderKey, HashSet<ForwardTrackKey>>>>,
     started: Arc<Mutex<HashMap<ForwardTrackReaderKey, u64>>>,
     next_reader_lease: Arc<AtomicU64>,
+    next_target_incarnation: Arc<AtomicU64>,
     revision: Arc<AtomicU64>,
 }
 
@@ -170,6 +174,10 @@ impl ForwardTrackStore {
             subscriber_identity.to_string(),
         );
         let forwarding_mid = track.forwarding_mid().map(str::to_string);
+        let incarnation = self.next_target_incarnation.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut incarnations) = self.target_incarnations.lock() {
+            incarnations.insert(key.clone(), incarnation);
+        }
         if let Ok(mut tracks) = self.tracks.lock() {
             tracks.insert(key.clone(), track);
             tracing::debug!(
@@ -179,6 +187,7 @@ impl ForwardTrackStore {
                 subscriber_identity,
                 active,
                 forwarding_mid = ?forwarding_mid,
+                incarnation,
                 total_forward_tracks = tracks.len(),
                 "forward_track_store_inserted"
             );
@@ -326,6 +335,37 @@ impl ForwardTrackStore {
                 active_keys
                     .iter()
                     .filter_map(|key| tracks.get(key).map(|track| (key.clone(), track.clone())))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Returns active forwarding targets together with their lifetime incarnation.
+    pub(crate) fn list_for_track_with_incarnation(
+        &self,
+        room: &str,
+        publisher_identity: &str,
+        track_sid: &str,
+    ) -> Vec<(ForwardTrackKey, oxidesfu_rtc::LocalRtpTrack, u64)> {
+        let reader_key = Self::reader_key(room, publisher_identity, track_sid);
+        let active_keys = self
+            .active_by_track
+            .lock()
+            .ok()
+            .and_then(|active_by_track| active_by_track.get(&reader_key).cloned())
+            .unwrap_or_default();
+        let incarnations = self.target_incarnations.lock().ok();
+
+        self.tracks
+            .lock()
+            .map(|tracks| {
+                active_keys
+                    .iter()
+                    .filter_map(|key| {
+                        let track = tracks.get(key)?.clone();
+                        let incarnation = incarnations.as_ref()?.get(key).copied()?;
+                        Some((key.clone(), track, incarnation))
+                    })
                     .collect()
             })
             .unwrap_or_default()

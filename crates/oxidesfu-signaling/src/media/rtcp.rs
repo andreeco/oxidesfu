@@ -1,8 +1,8 @@
 use std::{future::Future, pin::Pin};
 
 use super::{
-    ForwardTrackKey, KeyFrameRequestKind, MappedSenderReport, MediaFeedbackSummary,
-    RecommendedVideoQuality, RtpForwardingStore,
+    KeyFrameRequestKind, MappedSenderReport, MediaFeedbackSummary, RecommendedVideoQuality,
+    SubscriberRtpState,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,9 +131,8 @@ pub(crate) struct RtcpOutboundEffects {
 }
 
 pub(crate) fn build_rtcp_execution_plan(
-    key: &ForwardTrackKey,
+    rtp_state: &mut SubscriberRtpState,
     actions: &[RtcpForwardAction],
-    rtp_forwarding: &RtpForwardingStore,
     now_millis: i64,
 ) -> RtcpExecutionPlan {
     const KEYFRAME_REQUEST_MIN_GAP_MILLIS: u64 = 300;
@@ -144,21 +143,18 @@ pub(crate) fn build_rtcp_execution_plan(
     for action in actions {
         match *action {
             RtcpForwardAction::RetransmitSequence(outgoing_sequence_number) => {
-                if let Some(packet) =
-                    rtp_forwarding.get_retransmission_packet(key, outgoing_sequence_number)
-                {
+                if let Some(packet) = rtp_state.retransmission_packet(outgoing_sequence_number) {
                     plan.retransmit_packets.push(packet);
                 }
             }
             RtcpForwardAction::KeyFrameRequest { kind, media_ssrc } => {
-                if rtp_forwarding.should_forward_keyframe_request(
-                    key,
+                if rtp_state.should_forward_keyframe_request(
                     kind,
                     now_millis,
                     KEYFRAME_REQUEST_MIN_GAP_MILLIS,
                 ) {
                     let fir_sequence_number = if kind == KeyFrameRequestKind::Fir {
-                        Some(rtp_forwarding.next_fir_sequence_number(key, media_ssrc))
+                        Some(rtp_state.next_fir_sequence_number(media_ssrc))
                     } else {
                         None
                     };
@@ -170,7 +166,7 @@ pub(crate) fn build_rtcp_execution_plan(
                 }
             }
             RtcpForwardAction::SenderReport { ref report } => {
-                let mapped = rtp_forwarding.map_sender_report(key, report.ssrc, report.rtp_time);
+                let mapped = rtp_state.map_sender_report(report.ssrc, report.rtp_time);
                 let rewritten = rewrite_sender_report_packet(report, mapped);
                 plan.rewritten_sender_reports.push(rewritten);
             }
@@ -179,8 +175,7 @@ pub(crate) fn build_rtcp_execution_plan(
                 max_fraction_lost,
                 report_count,
             } => {
-                rtp_forwarding.observe_receiver_report(
-                    key,
+                rtp_state.observe_receiver_report(
                     now_millis,
                     ssrc,
                     max_fraction_lost,
@@ -191,29 +186,23 @@ pub(crate) fn build_rtcp_execution_plan(
                 media_ssrc,
                 packet_status_count,
             } => {
-                rtp_forwarding.observe_transport_wide_cc(
-                    key,
-                    now_millis,
-                    media_ssrc,
-                    packet_status_count,
-                );
+                rtp_state.observe_transport_wide_cc(now_millis, media_ssrc, packet_status_count);
             }
         }
     }
 
-    plan.media_feedback = rtp_forwarding.media_feedback_summary(key, now_millis);
-    plan.recommended_video_quality = rtp_forwarding.recommend_video_quality(key, now_millis);
+    plan.media_feedback = rtp_state.media_feedback_summary(now_millis);
+    plan.recommended_video_quality = rtp_state.recommend_video_quality(now_millis);
 
     plan
 }
 
 pub(crate) fn build_rtcp_outbound_effects(
-    key: &ForwardTrackKey,
+    rtp_state: &mut SubscriberRtpState,
     actions: &[RtcpForwardAction],
-    rtp_forwarding: &RtpForwardingStore,
     now_millis: i64,
 ) -> RtcpOutboundEffects {
-    let plan = build_rtcp_execution_plan(key, actions, rtp_forwarding, now_millis);
+    let plan = build_rtcp_execution_plan(rtp_state, actions, now_millis);
     let _media_feedback = plan.media_feedback;
     let feedback_packets = plan
         .keyframe_requests
@@ -356,15 +345,6 @@ pub(crate) fn build_keyframe_feedback_packet(
 mod tests {
     use super::*;
 
-    fn key() -> ForwardTrackKey {
-        (
-            "room-a".to_string(),
-            "publisher-a".to_string(),
-            "track-a".to_string(),
-            "subscriber-a".to_string(),
-        )
-    }
-
     #[test]
     fn derive_rtcp_forward_actions_includes_receiver_report_and_twcc_observation() {
         let rr: Box<dyn rtc::rtcp::Packet> = Box::new(rtc::rtcp::receiver_report::ReceiverReport {
@@ -403,8 +383,7 @@ mod tests {
 
     #[test]
     fn build_rtcp_execution_plan_rewrites_sender_report_ssrc_and_timestamp() {
-        let store = RtpForwardingStore::default();
-        let key = key();
+        let mut state = SubscriberRtpState::default();
         let original = rtc::rtcp::sender_report::SenderReport {
             ssrc: 111,
             rtp_time: 90_000,
@@ -414,7 +393,7 @@ mod tests {
             report: original.clone(),
         }];
 
-        let plan = build_rtcp_execution_plan(&key, &actions, &store, 1);
+        let plan = build_rtcp_execution_plan(&mut state, &actions, 1);
         assert_eq!(plan.rewritten_sender_reports.len(), 1);
         assert_eq!(plan.rewritten_sender_reports[0].ssrc, 111);
         assert_eq!(plan.rewritten_sender_reports[0].rtp_time, 90_000);
@@ -422,16 +401,15 @@ mod tests {
 
     #[test]
     fn build_rtcp_execution_plan_throttles_keyframe_requests_within_min_gap() {
-        let store = RtpForwardingStore::default();
-        let key = key();
+        let mut state = SubscriberRtpState::default();
         let actions = vec![RtcpForwardAction::KeyFrameRequest {
             kind: KeyFrameRequestKind::Pli,
             media_ssrc: 333,
         }];
 
-        let first = build_rtcp_execution_plan(&key, &actions, &store, 1_000);
-        let second = build_rtcp_execution_plan(&key, &actions, &store, 1_100);
-        let third = build_rtcp_execution_plan(&key, &actions, &store, 1_350);
+        let first = build_rtcp_execution_plan(&mut state, &actions, 1_000);
+        let second = build_rtcp_execution_plan(&mut state, &actions, 1_100);
+        let third = build_rtcp_execution_plan(&mut state, &actions, 1_350);
 
         assert_eq!(first.keyframe_requests.len(), 1);
         assert!(second.keyframe_requests.is_empty());
@@ -440,8 +418,7 @@ mod tests {
 
     #[test]
     fn build_rtcp_execution_plan_populates_media_feedback_summary_from_rr_and_twcc() {
-        let store = RtpForwardingStore::default();
-        let key = key();
+        let mut state = SubscriberRtpState::default();
         let actions = vec![
             RtcpForwardAction::ReceiverReportObserved {
                 ssrc: 55,
@@ -459,7 +436,7 @@ mod tests {
             },
         ];
 
-        let plan = build_rtcp_execution_plan(&key, &actions, &store, 33_000);
+        let plan = build_rtcp_execution_plan(&mut state, &actions, 33_000);
         assert_eq!(plan.media_feedback.last_rr_ssrc, Some(55));
         assert_eq!(plan.media_feedback.rr_report_count, 2);
         assert_eq!(plan.media_feedback.rr_max_fraction_lost, 90);
